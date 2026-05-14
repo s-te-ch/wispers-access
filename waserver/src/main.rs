@@ -1,4 +1,6 @@
-use anyhow::Result;
+mod storage;
+
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -49,16 +51,17 @@ enum Command {
     },
 }
 
-fn main() {
-    if let Err(e) = run() {
-        eprintln!("error: {e:#}");
-        std::process::exit(1);
-    }
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("failed to create tokio runtime")?
+        .block_on(async_main(cli.command))
 }
 
-fn run() -> Result<()> {
-    let cli = Cli::parse();
-    match cli.command {
+async fn async_main(command: Command) -> Result<()> {
+    match command {
         Command::Init { share, api_key } => init(&api_key, &share),
         Command::Serve { share, local_port } => serve(&share, &local_port),
         Command::Start { share, local_port } => start(&share, &local_port),
@@ -72,12 +75,19 @@ fn init(api_key: &str, share: &str) -> Result<()> {
     println!("init({}, {});", api_key, share);
     // What this needs to do:
     // - Create a connectivity group using the Rest API (name TBD, something
-    //   like "Wispers Access - $name"?)
-    // - Store this as one file in the config dir (key and cgID)
+    //   like "Wispers Access - $name"?). Maybe use the share name as association
+    //   key to protect against partial state?
     // - Get a registration code for node 1, name "waserver"
-    // - Create a Node, with storage implementation using another file in the
+    // - Store key as one file in the config dir
+    // - Create a Node, with storage implementation using other files in the
     //   config dir
     // - Register the node (this writes automatically)
+
+    let store = storage::ShareStateStore::new(share)?;
+    if let Some(_) = store.load_share_config()? {
+        anyhow::bail!("Share {} already exists", share);
+    }
+
     Ok(())
 }
 
@@ -89,6 +99,16 @@ fn serve(share: &str, local_port: &u16) -> Result<()> {
     // - Init the node (must be registered or activated)
     // - Serve in the foreground (this part is mostly what wconnect did, except
     //   we need to handle the requests, so we can inject or elide headers)
+
+    // Load config and node state from storage.
+    let store = storage::ShareStateStore::new(share)?;
+    let Some(share_config) = store.load_share_config()? else {
+        anyhow::bail!("Unknown share {}", share);
+    };
+    let node_storage = wispers_connect::NodeStorage::new(store);
+    let Some(registration) = node_storage.read_registration()? else {
+        anyhow::bail!("Wispers node for share {} has not been registered", share);
+    };
     Ok(())
 }
 
