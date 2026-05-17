@@ -1,7 +1,9 @@
 mod storage;
+mod wcbe;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use futures::future::BoxFuture;
 
 #[derive(Parser)]
 #[command(name = "waserver", version)]
@@ -49,6 +51,7 @@ enum Command {
         follow: bool,
         share: String,
     },
+    // TODO: remove share, invite & revoke guest
 }
 
 fn main() -> Result<()> {
@@ -62,7 +65,7 @@ fn main() -> Result<()> {
 
 async fn async_main(command: Command) -> Result<()> {
     match command {
-        Command::Init { share, api_key } => init(&api_key, &share),
+        Command::Init { share, api_key } => init(&api_key, &share).await,
         Command::Serve { share, local_port } => serve(&share, &local_port),
         Command::Start { share, local_port } => start(&share, &local_port),
         Command::Stop { share } => stop(&share),
@@ -71,25 +74,97 @@ async fn async_main(command: Command) -> Result<()> {
     }
 }
 
-fn init(api_key: &str, share: &str) -> Result<()> {
-    println!("init({}, {});", api_key, share);
-    // What this needs to do:
-    // - Create a connectivity group using the Rest API (name TBD, something
-    //   like "Wispers Access - $name"?). Maybe use the share name as association
-    //   key to protect against partial state?
-    // - Get a registration code for node 1, name "waserver"
-    // - Store key as one file in the config dir
-    // - Create a Node, with storage implementation using other files in the
-    //   config dir
-    // - Register the node (this writes automatically)
+//-- init -----------------------------------------------------------------------
 
+type RollbackVec = Vec<BoxFuture<'static, ()>>;
+
+async fn init(api_key: &str, share: &str) -> Result<()> {
+    println!("init({}, {});", api_key, share);
+
+    if !is_valid_share_name(share) {
+        anyhow::bail!("Invalid share name '{}'", share);
+    }
     let store = storage::ShareStateStore::new(share)?;
     if let Some(_) = store.load_share_config()? {
         anyhow::bail!("Share {} already exists", share);
     }
+    let wcbe_client = wcbe::Client::new(api_key);
 
+    // Run initialisation while keeping track of rollback steps.
+    let mut rollback: RollbackVec = Vec::new();
+    let result: Result<()> = async {
+        let cg_id = add_connectivity_group(&wcbe_client, &share, &mut rollback).await?;
+        store_share_config(&store, &api_key, &mut rollback)?;
+        let mut node = create_wispers_node(&store, &mut rollback).await?;
+        let token = wcbe_client
+            .get_registration_token(&cg_id, "Server".into())
+            .await?;
+        node.register(&token).await.context("registration failed")?;
+        Ok(())
+    }
+    .await;
+    if result.is_err() {
+        for action in rollback.into_iter().rev() {
+            action.await;
+        }
+    }
     Ok(())
 }
+
+async fn add_connectivity_group(
+    client: &wcbe::Client,
+    share: &str,
+    rollback: &mut RollbackVec,
+) -> Result<String> {
+    let cg_id = client.add_connectivity_group(share).await?;
+    rollback.push(Box::pin({
+        let client = client.clone();
+        let cg_id = cg_id.clone();
+        async move {
+            if let Err(e) = client.remove_connectivity_group(&cg_id).await {
+                eprintln!(
+                    "rollback: remove_connectivity_group {} failed: {}",
+                    cg_id, e,
+                );
+            }
+        }
+    }));
+    Ok(cg_id)
+}
+
+fn store_share_config(
+    store: &storage::ShareStateStore,
+    api_key: &str,
+    rollback: &mut RollbackVec,
+) -> Result<()> {
+    let cfg = storage::ShareConfig::new(&api_key);
+    store.save_share_config(&cfg)?;
+    rollback.push(Box::pin({
+        let store = store.clone();
+        async move {
+            if let Err(e) = store.delete() {
+                eprintln!("rollback: deleting store failed: {}", e);
+            }
+        }
+    }));
+    Ok(())
+}
+
+async fn create_wispers_node(
+    store: &storage::ShareStateStore,
+    rollback: &mut RollbackVec,
+) -> Result<wispers_connect::Node> {
+    let node_storage = wispers_connect::NodeStorage::new(store.clone());
+    let node = node_storage.restore_or_init_node().await?;
+    rollback.push(Box::pin(async move {
+        if let Err(e) = node_storage.delete_state() {
+            eprintln!("rollback: deleting node state failed: {}", e);
+        }
+    }));
+    Ok(node)
+}
+
+//-- serve ----------------------------------------------------------------------
 
 fn serve(share: &str, local_port: &u16) -> Result<()> {
     println!("serve({}, {});", share, local_port);
@@ -144,4 +219,12 @@ fn logs(follow: &bool, share: &str) -> Result<()> {
     // - Find the latest logs of the given share (platform dependent)
     // - Print them, or if -f is given, tail them
     Ok(())
+}
+
+fn is_valid_share_name(s: &str) -> bool {
+    !s.is_empty()
+        && s.len() <= 64  // pick your limit
+        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        && !(s.starts_with('-') || s.starts_with('_'))
+        && !(s.ends_with('-') || s.ends_with('_'))
 }
