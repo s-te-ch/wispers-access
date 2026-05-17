@@ -21,7 +21,16 @@ pub struct ShareConfig {
     version: u32,
 
     /// API key for the Wispers domain, used to create new node registrations.
-    api_key: String,
+    pub api_key: String,
+}
+
+impl ShareConfig {
+    pub fn new(api_key: &str) -> Self {
+        Self {
+            version: default_version(),
+            api_key: api_key.to_owned(),
+        }
+    }
 }
 
 fn default_version() -> u32 {
@@ -60,6 +69,7 @@ pub enum Error {
 
 //-- Share state store ---------------------------------------------------------
 
+#[derive(Clone)]
 pub struct ShareStateStore {
     dir: PathBuf,
 }
@@ -93,7 +103,7 @@ impl ShareStateStore {
         Ok(())
     }
 
-    pub fn delete_state(&self) -> Result<(), Error> {
+    pub fn delete(&self) -> Result<(), Error> {
         match fs::remove_dir_all(&self.dir) {
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
