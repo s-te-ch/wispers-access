@@ -5,7 +5,6 @@ use crate::wcbe;
 use anyhow::{Context, Result};
 use wispers_connect;
 
-
 /// Initialise a new app share.
 pub async fn up(api_key: &str, share: &str) -> Result<()> {
     // Check for valid name & non-existence.
@@ -45,13 +44,14 @@ pub async fn down(share: &str) -> Result<()> {
     };
     // Remove the Wispers connectivity group. This deregisters all nodes.
     let wcbe_client = wcbe::Client::new(&cfg.api_key);
-    wcbe_client.remove_connectivity_group(&cfg.connectivity_group_id).await?;
+    wcbe_client
+        .remove_connectivity_group(&cfg.connectivity_group_id)
+        .await?;
     // Remove the store directory. This removes both the share config and the
     // node state.
     store.delete()?;
     Ok(())
 }
-
 
 fn is_valid_share_name(s: &str) -> bool {
     !s.is_empty()

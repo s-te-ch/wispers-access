@@ -71,6 +71,21 @@ pub enum Error {
     NoConfigDir,
 }
 
+//-- Global functions ----------------------------------------------------------
+
+pub fn list_shares() -> Result<Vec<String>, Error> {
+    let path = base_dir()?;
+    let shares: Vec<String> = if !path.exists() {
+        Vec::new()
+    } else {
+        fs::read_dir(path)?
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect()
+    };
+    Ok(shares)
+}
+
 //-- Share state store ---------------------------------------------------------
 
 #[derive(Clone)]
@@ -177,10 +192,14 @@ impl wc::NodeStateStore for ShareStateStore {
 }
 
 fn config_dir(share: &str) -> Result<PathBuf, Error> {
+    let dir = base_dir()?.join(share);
+    Ok(dir)
+}
+
+fn base_dir() -> Result<PathBuf, Error> {
     let dir = dirs::config_dir()
         .ok_or(Error::NoConfigDir)?
-        .join("waserver")
-        .join(share);
+        .join("waserver");
     Ok(dir)
 }
 
