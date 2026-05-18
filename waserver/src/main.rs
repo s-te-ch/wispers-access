@@ -1,4 +1,5 @@
 mod initialization;
+mod ipc;
 mod serving;
 mod storage;
 mod wcbe;
