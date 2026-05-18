@@ -4,8 +4,8 @@ use crate::ipc;
 use crate::storage;
 use crate::wcbe;
 use anyhow::Result;
+use tokio::io::AsyncWriteExt;
 use wispers_connect as wc;
-use tokio::io::{AsyncWriteExt};
 
 pub async fn serve(share: &str, _port: &u16) -> Result<()> {
     let store = storage::ShareStateStore::new(share)?;

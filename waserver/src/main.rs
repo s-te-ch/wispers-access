@@ -77,7 +77,7 @@ async fn async_main(command: Command) -> Result<()> {
         Command::Serve { share, local_port } => serving::serve(&share, &local_port).await,
         Command::Start { share, local_port } => start(&share, &local_port),
         Command::Stop { share } => stop(&share),
-        Command::Status => status(),
+        Command::Status => status().await,
         Command::Logs { follow, share } => logs(&follow, &share),
     }
 }
@@ -99,13 +99,19 @@ fn stop(share: &str) -> Result<()> {
     Ok(())
 }
 
-fn status() -> Result<()> {
-    println!("status();");
-    // What this needs to do:
-    // - List all shares (using the file system)
-    // - For each, check if there's a server running
-    // - If so, query the server for info/stats to display
-    // - Print it all nicely
+async fn status() -> Result<()> {
+    let shares = storage::list_shares()?;
+    if shares.is_empty() {
+        println!("No app shares found");
+        return Ok(());
+    }
+    for share in &shares {
+        let status = match ipc::Client::connect(share).await {
+            Ok(_) => "running",
+            Err(_) => "offline",
+        };
+        println!("{} ({})", share, status);
+    }
     Ok(())
 }
 
