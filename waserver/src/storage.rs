@@ -173,7 +173,9 @@ impl wc::NodeStateStore for ShareStateStore {
             write_atomically(&self.dir, &REGISTRATION_FILENAME, &bytes)?;
         } else {
             let path = self.dir.join(REGISTRATION_FILENAME);
-            fs::remove_file(&path)?;
+            if path.exists() {
+                fs::remove_file(&path)?;
+            }
         }
         Ok(())
     }
