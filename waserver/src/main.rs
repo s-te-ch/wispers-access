@@ -62,6 +62,20 @@ enum Command {
 }
 
 fn main() -> Result<()> {
+    // Restrict default file mode to user-only. None of files waserver writes
+    // have an obvious reason to be group- or world-readable. This is marked
+    // unsafe because it changes global state, but doing so as the first thing
+    // is safe.
+    #[cfg(unix)]
+    unsafe {
+        libc::umask(0o077);
+    }
+    // De-conflict rustls. reqwest pulls it in via the aws-lc-rs provider
+    // feature, and wispers-connect via the ring feature. We have to choose one.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("install rustls crypto provider");
+
     let cli = Cli::parse();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
