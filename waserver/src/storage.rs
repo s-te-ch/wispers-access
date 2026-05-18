@@ -22,13 +22,17 @@ pub struct ShareConfig {
 
     /// API key for the Wispers domain, used to create new node registrations.
     pub api_key: String,
+
+    /// ID of the Wispers connectivity group that corresponds to this share.
+    pub connectivity_group_id: String,
 }
 
 impl ShareConfig {
-    pub fn new(api_key: &str) -> Self {
+    pub fn new(api_key: &str, connectivity_group_id: &str) -> Self {
         Self {
             version: default_version(),
             api_key: api_key.to_owned(),
+            connectivity_group_id: connectivity_group_id.to_owned(),
         }
     }
 }
