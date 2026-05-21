@@ -1,13 +1,15 @@
 //! Serving logic - handles hub connection and incoming P2P connections.
 
+use crate::http;
 use crate::ipc;
 use crate::storage;
 use crate::wcbe;
 use anyhow::{Context, Result};
 use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::TcpStream;
 use wispers_connect as wc;
 
-pub async fn serve(share: &str, _port: &u16) -> Result<()> {
+pub async fn serve(share: &str, port: u16) -> Result<()> {
     let store = storage::ShareStateStore::new(share)?;
     let Some(cfg) = store.load_share_config()? else {
         anyhow::bail!("Share {} is not initialised", share);
@@ -44,7 +46,7 @@ pub async fn serve(share: &str, _port: &u16) -> Result<()> {
         tokio::select! {
             // Incoming QUIC connection.
             Some(result) = incoming.quic.recv() => {
-                tokio::spawn(handle_quic_conn(result));
+                tokio::spawn(handle_quic_conn(result, port));
             },
             // Incoming IPC connection.
             result = ipc_server.accept() => handle_ipc_conn(result).await,
@@ -91,15 +93,28 @@ async fn handle_ipc_conn(r: Result<ipc::IpcStream>) {
     }
 }
 
-async fn handle_quic_conn(r: Result<wc::QuicConnection, wc::P2pError>) {
-    let _conn = match r {
+async fn handle_quic_conn(r: Result<wc::QuicConnection, wc::P2pError>, port: u16) {
+    let conn = match r {
         Ok(c) => c,
         Err(e) => {
             eprintln!("Failed to accept QUIC connection: {}", e);
             return;
         }
     };
-    println!("QUIC connection accepted");
+    let peer = conn.peer_node_number;
+    println!("QUIC connection from {} accepted", peer);
+
+    loop {
+        match conn.accept_stream().await {
+            Ok(stream) => {
+                tokio::spawn(http::handle_quic_stream(stream, port));
+            }
+            Err(e) => {
+                eprintln!("QUIC connection with {} closed: {}", peer, e);
+                break;
+            }
+        }
+    }
 }
 
 fn handle_session_end(
