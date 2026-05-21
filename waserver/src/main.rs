@@ -1,3 +1,4 @@
+mod http;
 mod initialization;
 mod ipc;
 mod serving;
@@ -88,7 +89,7 @@ async fn async_main(command: Command) -> Result<()> {
     match command {
         Command::Init { share, api_key } => initialization::up(&api_key, &share).await,
         Command::Deinit { share } => initialization::down(&share).await,
-        Command::Serve { share, local_port } => serving::serve(&share, &local_port).await,
+        Command::Serve { share, local_port } => serving::serve(&share, local_port).await,
         Command::Start { share, local_port } => start(&share, &local_port),
         Command::Stop { share } => stop(&share),
         Command::Status => status().await,
