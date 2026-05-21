@@ -60,7 +60,25 @@ enum Command {
         follow: bool,
         share: String,
     },
-    // TODO: remove share, invite & revoke guest
+    /// Generates an guest device invite code.
+    Invite {
+        /// Name of the application share.
+        share: String,
+        /// User identification (e.g. email address) of the user.
+        user_id: String,
+    },
+    /// Revoke access.
+    Revoke {
+        /// Name of the application share.
+        share: String,
+        /// Node number whose access to revoke.
+        node_number: i32,
+    },
+    /// List guest nodes.
+    Nodes {
+        /// Name of the application share.
+        share: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -95,6 +113,9 @@ async fn async_main(command: Command) -> Result<()> {
         Command::Stop { share } => stop(&share).await,
         Command::Status => status().await,
         Command::Logs { follow, share } => logs(&follow, &share),
+        Command::Invite { share, user_id } => invite(&share, &user_id).await,
+        Command::Revoke { share, node_number } => revoke(&share, &node_number).await,
+        Command::Nodes { share } => nodes(&share).await,
     }
 }
 
@@ -167,5 +188,20 @@ fn logs(follow: &bool, share: &str) -> Result<()> {
     println!("logs({}, {});", follow, share);
     // - Find the latest logs of the given share (platform dependent)
     // - Print them, or if -f is given, tail them
+    Ok(())
+}
+
+async fn invite(share: &str, user_id: &str) -> Result<()> {
+    println!("invite({}, {});", share, user_id);
+    Ok(())
+}
+
+async fn revoke(share: &str, node_number: &i32) -> Result<()> {
+    println!("revoke({}, {});", share, node_number);
+    Ok(())
+}
+
+async fn nodes(share: &str) -> Result<()> {
+    println!("nodes({});", share);
     Ok(())
 }
