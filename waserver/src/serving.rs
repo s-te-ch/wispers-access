@@ -5,37 +5,65 @@ use crate::ipc;
 use crate::storage;
 use crate::wcbe;
 use anyhow::{Context, Result};
+use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::RwLock;
 use wispers_connect as wc;
+
+#[derive(Clone)]
+pub struct ServingHandle {
+    inner: Arc<Inner>,
+}
+
+struct Inner {
+    wc_handle: RwLock<Option<wc::ServingHandle>>,
+    wcbe_client: wcbe::Client,
+    local_port: u16,
+}
+
+impl ServingHandle {
+    pub fn new(local_port: u16, api_key: &str) -> Self {
+        Self {
+            inner: Arc::new(Inner {
+                wc_handle: RwLock::new(None),
+                wcbe_client: wcbe::Client::new(api_key),
+                local_port,
+            }),
+        }
+    }
+
+    async fn set_wc_handle(&self, handle: wc::ServingHandle) {
+        *self.inner.wc_handle.write().await = Some(handle);
+    }
+
+    async fn wc_handle(&self) -> Option<wc::ServingHandle> {
+        self.inner.wc_handle.read().await.clone()
+    }
+}
 
 pub async fn serve(share: &str, port: u16) -> Result<()> {
     let store = storage::ShareStateStore::new(share)?;
     let Some(cfg) = store.load_share_config()? else {
         anyhow::bail!("Share {} is not initialised", share);
     };
-    let _wcbe_client = wcbe::Client::new(&cfg.api_key);
     let node_storage = wc::NodeStorage::new(store);
     let node = node_storage.restore_or_init_node().await?;
     if !node.is_registered() {
         anyhow::bail!("Wispers Connect node is not registered");
     }
-    let ipc_server = ipc::Server::bind(share).await?;
-    let mut connect_task = connect_to_hub(node);
 
-    // Wait for the hub connection, but already accept IPC requests.
-    let (handle, session, mut incoming) = loop {
-        tokio::select! {
-            result = &mut connect_task => {
-                match result {
-                    Ok(Ok(triple)) => break triple,
-                    Ok(Err(e)) => return Err(e),
-                    Err(e) => return Err(anyhow::anyhow!("Connect task panicked: {}", e)),
-                }
-            }
-            result = ipc_server.accept() => handle_ipc_conn(result).await,
-        }
-    };
+    // Start serving IPC requests to handle local requests.
+    let serving_handle = ServingHandle::new(port, &cfg.api_key);
+    let ipc_server = ipc::Server::bind(share).await?;
+    tokio::spawn(ipc_server.run(serving_handle.clone()));
+
+    // Connect to the hub.
+    let (wc_handle, session, mut incoming) = node
+        .start_serving()
+        .await
+        .context("starting Wispers node serving loop")?;
+    serving_handle.set_wc_handle(wc_handle).await;
     println!("Connected to hub");
 
     // Run the Wispers serving session.
@@ -48,47 +76,8 @@ pub async fn serve(share: &str, port: u16) -> Result<()> {
             Some(result) = incoming.quic.recv() => {
                 tokio::spawn(handle_quic_conn(result, port));
             },
-            // Incoming IPC connection.
-            result = ipc_server.accept() => handle_ipc_conn(result).await,
             // Session end.
             result = &mut session_task => break handle_session_end(result),
-        }
-    }
-}
-
-fn connect_to_hub(
-    node: wc::Node,
-) -> tokio::task::JoinHandle<
-    Result<(
-        wc::ServingHandle,
-        wc::ServingSession,
-        wc::IncomingConnections,
-    )>,
-> {
-    tokio::spawn(async move {
-        node.start_serving()
-            .await
-            .context("failed to start serving")
-    })
-}
-
-async fn handle_ipc_conn(r: Result<ipc::IpcStream>) {
-    let stream = match r {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("Failed to accept daemon connection: {}", e);
-            return;
-        }
-    };
-    let (reader, _) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-    let mut req = String::new();
-    match reader.read_line(&mut req).await {
-        Ok(_) => {
-            println!("Received IPC request: {}", req);
-        }
-        Err(e) => {
-            eprintln!("Failed to read from IPC client: {}", e);
         }
     }
 }

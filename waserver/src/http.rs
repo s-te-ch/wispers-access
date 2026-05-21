@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use http_body_util::{combinators::BoxBody, BodyExt, Full};
+use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::body::Incoming;
 use hyper::client::conn::http1 as http1_client;
 use hyper::server::conn::http1 as http1_server;

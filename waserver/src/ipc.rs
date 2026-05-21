@@ -57,9 +57,17 @@ impl Server {
         Ok(Self { listener })
     }
 
-    pub async fn accept(&self) -> Result<IpcStream> {
-        let (stream, _addr) = self.listener.accept().await?;
-        Ok(stream)
+    pub async fn run(self, serving_handle: crate::serving::ServingHandle) {
+        loop {
+            let _stream = match self.listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    eprintln!("Failed to accept IPC connection: {}", e);
+                    continue;
+                }
+            };
+            // TODO: handle the request.
+        }
     }
 }
 
