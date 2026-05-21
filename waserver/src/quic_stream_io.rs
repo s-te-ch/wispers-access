@@ -111,9 +111,8 @@ impl AsyncWrite for QuicStreamIo {
                 WriteState::Idle => {
                     let stream = Arc::clone(&this.stream);
                     let data = buf.to_vec();
-                    let fut: IoFuture<usize> = Box::pin(async move {
-                        stream.write(&data).await.map_err(map_err)
-                    });
+                    let fut: IoFuture<usize> =
+                        Box::pin(async move { stream.write(&data).await.map_err(map_err) });
                     this.write_state = WriteState::Writing(fut);
                 }
                 WriteState::Writing(fut) => match fut.as_mut().poll(cx) {
@@ -132,18 +131,14 @@ impl AsyncWrite for QuicStreamIo {
         Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-    ) -> Poll<io::Result<()>> {
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         let this = self.get_mut();
         loop {
             match &mut this.shutdown_state {
                 ShutdownState::NotStarted => {
                     let stream = Arc::clone(&this.stream);
-                    let fut: IoFuture<()> = Box::pin(async move {
-                        stream.finish().await.map_err(map_err)
-                    });
+                    let fut: IoFuture<()> =
+                        Box::pin(async move { stream.finish().await.map_err(map_err) });
                     this.shutdown_state = ShutdownState::Finishing(fut);
                 }
                 ShutdownState::Finishing(fut) => match fut.as_mut().poll(cx) {
