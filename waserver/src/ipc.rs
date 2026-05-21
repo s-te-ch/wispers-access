@@ -67,7 +67,10 @@ impl Server {
                     continue;
                 }
             };
-            handle_request(stream, serving_handle.clone()).await;
+            let shutdown = handle_request(stream, serving_handle.clone()).await;
+            if shutdown {
+                break;
+            }
         }
     }
 }
@@ -142,7 +145,10 @@ impl Server {
             if password_line.trim() != self.windows_ipc_password {
                 continue; // Wrong password.
             }
-            handle_request(stream, serving_handle.clone()).await;
+            let shutdown = handle_request(stream, serving_handle.clone()).await;
+            if shutdown {
+                break;
+            }
         }
     }
 }
@@ -198,37 +204,37 @@ impl Response {
     }
 }
 
-async fn handle_request(stream: IpcStream, handle: crate::serving::ServingHandle) {
-    // Parse the request.
+async fn handle_request(stream: IpcStream, handle: crate::serving::ServingHandle) -> bool {
     let (reader, mut writer) = stream.into_split();
     let mut reader = BufReader::new(reader);
+    let mut shutdown = false;
+    let response = match parse_request(reader).await {
+        Ok(Request::Status) => Response::error("no implemented"),
+        Ok(Request::GetInvite) => Response::error("no implemented"),
+        Ok(Request::Shutdown) => {
+            shutdown = true;
+            Response::error("no implemented")
+        }
+        Err(s) => Response::error(s),
+    };
+    send_response(writer, response);
+    shutdown
+}
+
+async fn parse_request(mut reader: BufReader<ReadHalf>) -> std::result::Result<Request, String> {
     let mut line = String::new();
-    let request = match reader.read_line(&mut line).await {
+    match reader.read_line(&mut line).await {
+        Err(e) => Err(format!("cannot read request: {}", e)),
         Ok(_) => match serde_json::from_str::<Request>(&line) {
-            Ok(r) => r,
-            Err(e) => {
-                let resp = Response::error(format!("invalid request: {}", e));
-                send_response(writer, resp).await;
-                return;
-            },
-        }
-        Err(_) =>  {
-            // Error reading the line, don't bother sending an error.
-            return;
-        }
-    };
-    let response = match request {
-        Request::Status => Response::error("no implemented"),
-        Request::GetInvite => Response::error("no implemented"),
-        Request::Shutdown => Response::error("no implemented"),
-    };
-    send_response(writer, response).await;
+            Err(e) => Err(format!("invalid request: {}", e)),
+            Ok(r) => Ok(r),
+        },
+    }
 }
 
 async fn send_response(mut writer: WriteHalf, resp: Response) {
     let json = serde_json::to_string(&resp).unwrap_or_else(|e| {
-        serde_json::to_string(&Response::error(format!("serialization error: {}", e)))
-            .unwrap()
+        serde_json::to_string(&Response::error(format!("serialization error: {}", e))).unwrap()
     });
     if let Err(e) = writer.write_all(json.as_bytes()).await {
         eprintln!("Failed to write response: {}", e);
