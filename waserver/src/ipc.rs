@@ -181,8 +181,8 @@ pub enum ResponseData {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusData {
-    pub connected: bool,
-    pub cg_id: String,
+    pub connected_to_hub: bool,
+    pub local_port: u16,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -205,19 +205,23 @@ impl Response {
 }
 
 async fn handle_request(stream: IpcStream, handle: crate::serving::ServingHandle) -> bool {
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
+    let (reader, writer) = stream.into_split();
+    let reader = BufReader::new(reader);
     let mut shutdown = false;
     let response = match parse_request(reader).await {
-        Ok(Request::Status) => Response::error("no implemented"),
+        Ok(Request::Status) => Response::success(ResponseData::Status(StatusData {
+            connected_to_hub: handle.connected_to_hub().await,
+            local_port: handle.local_port(),
+        })),
         Ok(Request::GetInvite) => Response::error("no implemented"),
         Ok(Request::Shutdown) => {
+            let _ = handle.shutdown().await;
             shutdown = true;
-            Response::error("no implemented")
+            Response::success(ResponseData::Empty)
         }
         Err(s) => Response::error(s),
     };
-    send_response(writer, response);
+    send_response(writer, response).await;
     shutdown
 }
 
@@ -289,6 +293,19 @@ impl Client {
             reader: BufReader::new(reader),
             writer,
         })
+    }
+
+    pub async fn request(&mut self, req: &Request) -> Result<Response> {
+        let req_json = serde_json::to_string(req)?;
+        self.writer.write_all(req_json.as_bytes()).await?;
+        self.writer.write_all(b"\n").await?;
+        self.writer.flush().await?;
+
+        let mut line = String::new();
+        self.reader.read_line(&mut line).await?;
+
+        let response: Response = serde_json::from_str(&line)?;
+        Ok(response)
     }
 }
 
