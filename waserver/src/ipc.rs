@@ -1,9 +1,10 @@
 //! Inter-process communication between server and cli tool.
 
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use tokio::io::BufReader;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[cfg(windows)]
 use tokio::net::{TcpListener, TcpStream};
@@ -59,14 +60,14 @@ impl Server {
 
     pub async fn run(self, serving_handle: crate::serving::ServingHandle) {
         loop {
-            let _stream = match self.listener.accept().await {
+            let stream = match self.listener.accept().await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
                     eprintln!("Failed to accept IPC connection: {}", e);
                     continue;
                 }
             };
-            // TODO: handle the request.
+            handle_request(stream, serving_handle.clone()).await;
         }
     }
 }
@@ -126,7 +127,7 @@ impl Server {
 
     pub async fn run(self, serving_handle: crate::serving::ServingHandle) {
         loop {
-            let _stream = match self.listener.accept().await {
+            let stream = match self.listener.accept().await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
                     eprintln!("Failed to accept IPC connection: {}", e);
@@ -141,9 +142,105 @@ impl Server {
             if password_line.trim() != self.windows_ipc_password {
                 continue; // Wrong password.
             }
-
-            // TODO: handle the request.
+            handle_request(stream, serving_handle.clone()).await;
         }
+    }
+}
+
+/// Request from CLI to running server.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "cmd", rename_all = "snake_case")]
+pub enum Request {
+    Status,
+    GetInvite,
+    Shutdown,
+}
+
+/// Response from running server to CLI.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Response {
+    Success { ok: bool, data: ResponseData },
+    Error { ok: bool, error: String },
+}
+
+/// Data payload for successful responses.
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ResponseData {
+    Status(StatusData),
+    Invite(InviteData),
+    Empty,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct StatusData {
+    pub connected: bool,
+    pub cg_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct InviteData {
+    pub registration_token: String,
+    pub activation_code: String,
+}
+
+impl Response {
+    pub fn success(data: ResponseData) -> Self {
+        Response::Success { ok: true, data }
+    }
+
+    pub fn error(msg: impl Into<String>) -> Self {
+        Response::Error {
+            ok: false,
+            error: msg.into(),
+        }
+    }
+}
+
+async fn handle_request(stream: IpcStream, handle: crate::serving::ServingHandle) {
+    // Parse the request.
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
+    let mut line = String::new();
+    let request = match reader.read_line(&mut line).await {
+        Ok(_) => match serde_json::from_str::<Request>(&line) {
+            Ok(r) => r,
+            Err(e) => {
+                let resp = Response::error(format!("invalid request: {}", e));
+                send_response(writer, resp).await;
+                return;
+            },
+        }
+        Err(_) =>  {
+            // Error reading the line, don't bother sending an error.
+            return;
+        }
+    };
+    let response = match request {
+        Request::Status => Response::error("no implemented"),
+        Request::GetInvite => Response::error("no implemented"),
+        Request::Shutdown => Response::error("no implemented"),
+    };
+    send_response(writer, response).await;
+}
+
+async fn send_response(mut writer: WriteHalf, resp: Response) {
+    let json = serde_json::to_string(&resp).unwrap_or_else(|e| {
+        serde_json::to_string(&Response::error(format!("serialization error: {}", e)))
+            .unwrap()
+    });
+    if let Err(e) = writer.write_all(json.as_bytes()).await {
+        eprintln!("Failed to write response: {}", e);
+        return;
+    }
+    if let Err(e) = writer.write_all(b"\n").await {
+        eprintln!("Failed to write newline: {}", e);
+        return;
+    }
+    if let Err(e) = writer.flush().await {
+        eprintln!("Failed to flush: {}", e);
+        return;
     }
 }
 
