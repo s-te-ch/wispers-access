@@ -124,18 +124,25 @@ impl Server {
         })
     }
 
-    pub async fn accept(&self) -> Result<IpcStream> {
+    pub async fn run(self, serving_handle: crate::serving::ServingHandle) {
         loop {
-            let (stream, _addr) = self.listener.accept().await?;
+            let _stream = match self.listener.accept().await {
+                Ok((stream, _)) => stream,
+                Err(e) => {
+                    eprintln!("Failed to accept IPC connection: {}", e);
+                    continue;
+                }
+            };
             let mut buf_stream = BufReader::new(stream);
             let mut password_line = String::new();
-            match buf_stream.read_line(&mut password_line).await {
-                Ok(0) => continue,
-                Ok(_) if password_line.trim() == self.windows_ipc_password => {
-                    return Ok(buf_stream.into_inner());
-                }
-                _ => continue,
+            if let Err(_) = buf_stream.read_line(&mut password_line).await {
+                continue;
             }
+            if password_line.trim() != self.windows_ipc_password {
+                continue; // Wrong password.
+            }
+
+            // TODO: handle the request.
         }
     }
 }
