@@ -2669,8 +2669,12 @@ name = "waserver"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytes",
  "clap",
  "dirs",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
  "libc",
  "reqwest",
  "rustls",
