@@ -34,6 +34,7 @@ pub async fn serve(share: &str, _port: &u16) -> Result<()> {
             result = ipc_server.accept() => handle_ipc_conn(result).await,
         }
     };
+    println!("Connected to hub");
 
     // Run the Wispers serving session.
     let mut session_task = tokio::spawn(async move { session.run().await });
@@ -48,23 +49,9 @@ pub async fn serve(share: &str, _port: &u16) -> Result<()> {
             // Incoming IPC connection.
             result = ipc_server.accept() => handle_ipc_conn(result).await,
             // Session end.
-            result = &mut session_task => {
-                match result {
-                    Ok(Ok(())) => {
-                        println!("Session ended normally");
-                    }
-                    Ok(Err(e)) => {
-                        return Err(anyhow::anyhow!("Session error: {}", e));
-                    }
-                    Err(e) => {
-                        return Err(anyhow::anyhow!("Session task panicked: {}", e));
-                    }
-                }
-                break;
-            },
+            result = &mut session_task => break handle_session_end(result),
         }
     }
-    Ok(())
 }
 
 fn connect_to_hub(
@@ -113,4 +100,21 @@ async fn handle_quic_conn(r: Result<wc::QuicConnection, wc::P2pError>) {
         }
     };
     println!("QUIC connection accepted");
+}
+
+fn handle_session_end(
+    result: Result<Result<(), wc::ServingError>, tokio::task::JoinError>,
+) -> Result<()> {
+    match result {
+        Ok(Ok(())) => {
+            println!("Session ended normally");
+        }
+        Ok(Err(e)) => {
+            return Err(anyhow::anyhow!("Session error: {}", e));
+        }
+        Err(e) => {
+            return Err(anyhow::anyhow!("Session task panicked: {}", e));
+        }
+    }
+    Ok(())
 }
