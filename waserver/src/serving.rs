@@ -33,6 +33,21 @@ impl ServingHandle {
         }
     }
 
+    pub fn local_port(&self) -> u16 {
+        self.inner.local_port
+    }
+
+    pub async fn connected_to_hub(&self) -> bool {
+        self.inner.wc_handle.read().await.is_some()
+    }
+
+    pub async fn shutdown(&self) -> Result<()> {
+        match self.wc_handle().await {
+            Some(handle) => handle.shutdown().await.context("shutdown failed"),
+            None => Ok(()),
+        }
+    }
+
     async fn set_wc_handle(&self, handle: wc::ServingHandle) {
         *self.inner.wc_handle.write().await = Some(handle);
     }

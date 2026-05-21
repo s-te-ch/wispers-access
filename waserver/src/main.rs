@@ -92,7 +92,7 @@ async fn async_main(command: Command) -> Result<()> {
         Command::Deinit { share } => initialization::down(&share).await,
         Command::Serve { share, local_port } => serving::serve(&share, local_port).await,
         Command::Start { share, local_port } => start(&share, &local_port),
-        Command::Stop { share } => stop(&share),
+        Command::Stop { share } => stop(&share).await,
         Command::Status => status().await,
         Command::Logs { follow, share } => logs(&follow, &share),
     }
@@ -106,12 +106,21 @@ fn start(share: &str, local_port: &u16) -> Result<()> {
     Ok(())
 }
 
-fn stop(share: &str) -> Result<()> {
-    println!("stop({});", share);
-    // What this needs to do:
-    // - Find the server (UDS on *NIX, port on Windows)
-    // - Tell it to shut down
-    // (this should work with both foreground and daemon servers)
+async fn stop(share: &str) -> Result<()> {
+    let Ok(mut client) = ipc::Client::connect(share).await else {
+        anyhow::bail!("cannot connect to server for share {}", share);
+    };
+    match client.request(&ipc::Request::Shutdown).await {
+        Ok(ipc::Response::Success { .. }) => {
+            println!("Success!");
+        }
+        Ok(ipc::Response::Error { error, .. }) => {
+            anyhow::bail!("error stopping server: {}", error);
+        }
+        Err(e) => {
+            anyhow::bail!("error sending command to server: {}", e);
+        }
+    }
     Ok(())
 }
 
@@ -123,8 +132,31 @@ async fn status() -> Result<()> {
     }
     for share in &shares {
         let status = match ipc::Client::connect(share).await {
-            Ok(_) => "running",
-            Err(_) => "offline",
+            Ok(mut client) => {
+                match client.request(&ipc::Request::Status).await {
+                    Ok(ipc::Response::Success {
+                        data: ipc::ResponseData::Status(status),
+                        ..
+                    }) => {
+                        if status.connected_to_hub {
+                            format!("serving, local port {}", status.local_port)
+                        } else {
+                            format!("connecting, local port {}", status.local_port)
+                        }
+                    }
+                    Ok(ipc::Response::Success { .. }) => {
+                        anyhow::bail!("unexpected response from server");
+                    }
+                    Ok(ipc::Response::Error { error, .. }) => {
+                        format!("error getting status: {}", error)
+                    }
+                    Err(e) => {
+                        // Probably went down just now, return "offline".
+                        "offline".to_string()
+                    }
+                }
+            }
+            Err(_) => "offline".to_string(),
         };
         println!("{} ({})", share, status);
     }
