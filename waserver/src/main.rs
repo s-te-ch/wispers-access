@@ -193,11 +193,36 @@ fn logs(follow: &bool, share: &str) -> Result<()> {
 
 async fn invite(share: &str, user_id: &str) -> Result<()> {
     println!("invite({}, {});", share, user_id);
+    let Ok(mut client) = ipc::Client::connect(share).await else {
+        anyhow::bail!("cannot connect to server for share {}", share);
+    };
+    let req = ipc::Request::GetInvite {
+        user_id: user_id.to_owned(),
+    };
+    match client.request(&req).await {
+        Ok(ipc::Response::Success {
+            data: ipc::ResponseData::Invite(invite),
+            ..
+        }) => {
+            println!("Token: {}", invite.registration_token);
+            println!("Code: {}", invite.activation_code);
+        }
+        Ok(ipc::Response::Success { .. }) => {
+            anyhow::bail!("unexpected response from server");
+        }
+        Ok(ipc::Response::Error { error, .. }) => {
+            anyhow::bail!("error generating invite: {}", error);
+        }
+        Err(e) => {
+            anyhow::bail!("error sending command to server: {}", e);
+        }
+    }
     Ok(())
 }
 
 async fn revoke(share: &str, node_number: &i32) -> Result<()> {
     println!("revoke({}, {});", share, node_number);
+    // TODO: add revocation support to the library. Right now all it has is logout().
     Ok(())
 }
 
