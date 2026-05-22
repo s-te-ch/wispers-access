@@ -158,7 +158,7 @@ impl Server {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Status,
-    GetInvite { user_id: String },
+    GetInvite { node_name: String, user_id: String },
     Shutdown,
 }
 
@@ -210,7 +210,9 @@ async fn handle_request(stream: IpcStream, handle: crate::serving::ServingHandle
     let mut shutdown = false;
     let response = match parse_request(reader).await {
         Ok(Request::Status) => handle_status(&handle).await,
-        Ok(Request::GetInvite { user_id }) => handle_invite(&handle, &user_id).await,
+        Ok(Request::GetInvite { node_name, user_id }) => {
+            handle_invite(&handle, &node_name, &user_id).await
+        }
         Ok(Request::Shutdown) => {
             shutdown = true;
             handle_shutdown(&handle).await
@@ -239,8 +241,12 @@ async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
     }))
 }
 
-async fn handle_invite(handle: &crate::serving::ServingHandle, user_id: &str) -> Response {
-    let token = match handle.get_registration_token(&user_id).await {
+async fn handle_invite(
+    handle: &crate::serving::ServingHandle,
+    node_name: &str,
+    user_id: &str,
+) -> Response {
+    let token = match handle.get_registration_token(node_name, user_id).await {
         Ok(t) => t,
         Err(e) => {
             let e = format!("error generating registration token: {}", e);

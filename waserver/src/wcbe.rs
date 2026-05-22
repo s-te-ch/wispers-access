@@ -5,7 +5,7 @@
 
 use anyhow::{Context, Result};
 use reqwest;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 type ConnectivityGroupId = String;
@@ -30,6 +30,12 @@ struct AddGroupResponse {
 struct RegistrationTokenResponse {
     token: String,
     // Other fields ignored.
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeMetadata {
+    pub user_id: String,
 }
 
 impl Client {
@@ -78,10 +84,21 @@ impl Client {
         Ok(())
     }
 
-    pub async fn get_registration_token(&self, cg_id: &str, name: &str) -> Result<String> {
+    pub async fn get_registration_token(
+        &self,
+        cg_id: &str,
+        node_name: Option<&str>,
+        metadata: Option<&NodeMetadata>,
+    ) -> Result<String> {
         let url = format!("{BASE_URL}/connectivity-groups/{cg_id}/registration-tokens");
         let mut body = HashMap::new();
-        body.insert("name", name.to_owned());
+        if let Some(node_name) = node_name {
+            body.insert("nodeName", node_name.to_owned());
+        }
+        if let Some(metadata) = metadata {
+            let json = serde_json::to_string(metadata)?;
+            body.insert("nodeMetadata", json);
+        }
         let res = self
             .client
             .post(&url)
