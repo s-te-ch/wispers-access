@@ -30,7 +30,7 @@ pub async fn up(api_key: &str, share: &str) -> Result<()> {
 
     // Register the node with the Wispers backend.
     let token = wcbe_client
-        .get_registration_token(&cg_id, "Server".into())
+        .get_registration_token(&cg_id, Some("Server".into()), None /* metadata */)
         .await?;
     node.register(&token).await.context("registration failed")?;
 

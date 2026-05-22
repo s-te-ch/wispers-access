@@ -6,8 +6,6 @@ use crate::storage;
 use crate::wcbe;
 use anyhow::{Context, Result};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, BufReader};
-use tokio::net::TcpStream;
 use tokio::sync::RwLock;
 use wispers_connect as wc;
 
@@ -19,15 +17,17 @@ pub struct ServingHandle {
 struct Inner {
     wc_handle: RwLock<Option<wc::ServingHandle>>,
     wcbe_client: wcbe::Client,
+    connectivity_group_id: String,
     local_port: u16,
 }
 
 impl ServingHandle {
-    pub fn new(local_port: u16, api_key: &str) -> Self {
+    pub fn new(local_port: u16, api_key: &str, cg_id: &str) -> Self {
         Self {
             inner: Arc::new(Inner {
                 wc_handle: RwLock::new(None),
                 wcbe_client: wcbe::Client::new(api_key),
+                connectivity_group_id: cg_id.to_owned(),
                 local_port,
             }),
         }
@@ -41,12 +41,26 @@ impl ServingHandle {
         self.inner.wc_handle.read().await.is_some()
     }
 
-    pub async fn get_registration_token(&self, user_id: &str) -> Result<String> {
-        Ok("todo".to_string())
+    pub async fn get_registration_token(&self, node_name: &str, user_id: &str) -> Result<String> {
+        let metadata = wcbe::NodeMetadata {
+            user_id: user_id.to_owned(),
+        };
+        self.inner
+            .wcbe_client
+            .get_registration_token(
+                &self.inner.connectivity_group_id,
+                Some(node_name),
+                Some(&metadata),
+            )
+            .await
     }
 
     pub async fn get_activation_code(&self) -> Result<String> {
-        Ok("todo".to_string())
+        let Some(handle) = self.wc_handle().await else {
+            anyhow::bail!("Not connected to hub");
+        };
+        let code = handle.generate_activation_code().await?;
+        Ok(code.format())
     }
 
     pub async fn shutdown(&self) -> Result<()> {
@@ -77,7 +91,13 @@ pub async fn serve(share: &str, port: u16) -> Result<()> {
     }
 
     // Start serving IPC requests to handle local requests.
-    let serving_handle = ServingHandle::new(port, &cfg.api_key);
+    let cg_id = match node.connectivity_group_id() {
+        Some(id) => id.to_string(),
+        None => {
+            anyhow::bail!("server node not registered");
+        }
+    };
+    let serving_handle = ServingHandle::new(port, &cfg.api_key, &cg_id);
     let ipc_server = ipc::Server::bind(share).await?;
     tokio::spawn(ipc_server.run(serving_handle.clone()));
 

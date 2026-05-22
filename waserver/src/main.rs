@@ -64,6 +64,8 @@ enum Command {
     Invite {
         /// Name of the application share.
         share: String,
+        /// Name of the new node.
+        node_name: String,
         /// User identification (e.g. email address) of the user.
         user_id: String,
     },
@@ -113,7 +115,11 @@ async fn async_main(command: Command) -> Result<()> {
         Command::Stop { share } => stop(&share).await,
         Command::Status => status().await,
         Command::Logs { follow, share } => logs(&follow, &share),
-        Command::Invite { share, user_id } => invite(&share, &user_id).await,
+        Command::Invite {
+            share,
+            node_name,
+            user_id,
+        } => invite(&share, &node_name, &user_id).await,
         Command::Revoke { share, node_number } => revoke(&share, &node_number).await,
         Command::Nodes { share } => nodes(&share).await,
     }
@@ -171,7 +177,7 @@ async fn status() -> Result<()> {
                     Ok(ipc::Response::Error { error, .. }) => {
                         format!("error getting status: {}", error)
                     }
-                    Err(e) => {
+                    Err(_) => {
                         // Probably went down just now, return "offline".
                         "offline".to_string()
                     }
@@ -191,12 +197,13 @@ fn logs(follow: &bool, share: &str) -> Result<()> {
     Ok(())
 }
 
-async fn invite(share: &str, user_id: &str) -> Result<()> {
+async fn invite(share: &str, node_name: &str, user_id: &str) -> Result<()> {
     println!("invite({}, {});", share, user_id);
     let Ok(mut client) = ipc::Client::connect(share).await else {
         anyhow::bail!("cannot connect to server for share {}", share);
     };
     let req = ipc::Request::GetInvite {
+        node_name: node_name.to_owned(),
         user_id: user_id.to_owned(),
     };
     match client.request(&req).await {
