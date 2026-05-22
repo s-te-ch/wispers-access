@@ -41,6 +41,14 @@ impl ServingHandle {
         self.inner.wc_handle.read().await.is_some()
     }
 
+    pub async fn get_registration_token(&self, user_id: &str) -> Result<String> {
+        Ok("todo".to_string())
+    }
+
+    pub async fn get_activation_code(&self) -> Result<String> {
+        Ok("todo".to_string())
+    }
+
     pub async fn shutdown(&self) -> Result<()> {
         match self.wc_handle().await {
             Some(handle) => handle.shutdown().await.context("shutdown failed"),

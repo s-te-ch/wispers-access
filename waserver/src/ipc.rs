@@ -158,7 +158,7 @@ impl Server {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Status,
-    GetInvite,
+    GetInvite { user_id: String },
     Shutdown,
 }
 
@@ -209,15 +209,11 @@ async fn handle_request(stream: IpcStream, handle: crate::serving::ServingHandle
     let reader = BufReader::new(reader);
     let mut shutdown = false;
     let response = match parse_request(reader).await {
-        Ok(Request::Status) => Response::success(ResponseData::Status(StatusData {
-            connected_to_hub: handle.connected_to_hub().await,
-            local_port: handle.local_port(),
-        })),
-        Ok(Request::GetInvite) => Response::error("no implemented"),
+        Ok(Request::Status) => handle_status(&handle).await,
+        Ok(Request::GetInvite { user_id }) => handle_invite(&handle, &user_id).await,
         Ok(Request::Shutdown) => {
-            let _ = handle.shutdown().await;
             shutdown = true;
-            Response::success(ResponseData::Empty)
+            handle_shutdown(&handle).await
         }
         Err(s) => Response::error(s),
     };
@@ -234,6 +230,39 @@ async fn parse_request(mut reader: BufReader<ReadHalf>) -> std::result::Result<R
             Ok(r) => Ok(r),
         },
     }
+}
+
+async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
+    Response::success(ResponseData::Status(StatusData {
+        connected_to_hub: handle.connected_to_hub().await,
+        local_port: handle.local_port(),
+    }))
+}
+
+async fn handle_invite(handle: &crate::serving::ServingHandle, user_id: &str) -> Response {
+    let token = match handle.get_registration_token(&user_id).await {
+        Ok(t) => t,
+        Err(e) => {
+            let e = format!("error generating registration token: {}", e);
+            return Response::error(e);
+        }
+    };
+    let code = match handle.get_activation_code().await {
+        Ok(c) => c,
+        Err(e) => {
+            let e = format!("error generating activation code: {}", e);
+            return Response::error(e);
+        }
+    };
+    Response::success(ResponseData::Invite(InviteData {
+        registration_token: token,
+        activation_code: code,
+    }))
+}
+
+async fn handle_shutdown(handle: &crate::serving::ServingHandle) -> Response {
+    let _ = handle.shutdown().await;
+    Response::success(ResponseData::Empty)
 }
 
 async fn send_response(mut writer: WriteHalf, resp: Response) {
