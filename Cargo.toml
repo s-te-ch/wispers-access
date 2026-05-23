@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = [
+    "waserver",
+    "waclient",
+    "lib/quic_stream_io",
+]

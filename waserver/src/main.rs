@@ -1,7 +1,6 @@
 mod http;
 mod initialization;
 mod ipc;
-mod quic_stream_io;
 mod serving;
 mod storage;
 mod wcbe;
