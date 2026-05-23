@@ -5,6 +5,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, OnceCell};
 use wispers_connect as wc;
 
@@ -74,25 +75,38 @@ async fn join(share: &str, invite_code: &str) -> Result<()> {
     Ok(())
 }
 
-async fn serve(_port: u16) -> Result<()> {
+async fn serve(port: u16) -> Result<()> {
+    // Start a stream factory for all known shares.
     let shares = list_shares()?;
     let mut nodes = Vec::new();
     for share in &shares {
         let node = load_node(share).await?;
         nodes.push((share.clone(), node));
     }
-    let _sf = StreamFactory::new(nodes);
+    let stream_factory = Arc::new(StreamFactory::new(nodes));
 
-    println!("Found shares:");
-    for share in &shares {
-        println!("  {}", share);
+    // Bind to local port.
+    let bind_addr = format!("localhost:{}", port);
+    let listener = TcpListener::bind(&bind_addr)
+        .await
+        .with_context(|| format!("failed to bind to {}", &bind_addr))?;
+    println!("Listening on {}", bind_addr);
+
+    loop {
+        match listener.accept().await {
+            Ok((tcp_stream, _)) => {
+                let stream_factory = stream_factory.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(tcp_stream, stream_factory).await {
+                        eprintln!("Connection error: {}", e);
+                    }
+                });
+            }
+            Err(e) => {
+                eprintln!("Accept error: {}", e);
+            }
+        }
     }
-    // TODO:
-    // - start a node for each -
-    // - keyed connection pool that gets connections from the matching node (based on appname)
-    // - Listen on port, dispatch each new client connection
-    //   - Get stream from pool
-    Ok(())
 }
 
 async fn load_node(share: &str) -> Result<wc::Node> {
@@ -102,6 +116,17 @@ async fn load_node(share: &str) -> Result<wc::Node> {
     }
     let node = ns.restore_or_init_node().await?;
     Ok(node)
+}
+
+async fn handle_connection(
+    tcp_stream: TcpStream,
+    stream_factory: Arc<StreamFactory>,
+) -> Result<()> {
+    // TODO:
+    // - read & parse request, extract host header
+    // - get stream for the host
+    // - forward the request & return result
+    Ok(())
 }
 
 fn get_node_storage(share: &str) -> Result<wc::NodeStorage> {
