@@ -190,5 +190,8 @@ impl StreamFactory {
 
 struct PoolEntry {
     cell: Arc<OnceCell<Arc<wc::QuicConnection>>>,
+    // TODO: The pool currently doesn't actually use this. Decide whether to
+    // expire connections actively, or just let the die and clean them up next
+    // time opening a stream fails.
     last_used: Instant,
 }
