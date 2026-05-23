@@ -1,0 +1,15 @@
+[package]
+name = "waclient"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+clap = { version = "4", features = ["derive", "env"] }
+dirs = "5"
+tokio = "1"
+wispers-connect = "0.8.2"
+quic_stream_io = { path = "../lib/quic_stream_io" }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

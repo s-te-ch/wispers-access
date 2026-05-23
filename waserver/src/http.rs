@@ -19,7 +19,7 @@ pub async fn handle_quic_stream(
     stream: wispers_connect::QuicStream,
     local_port: u16,
 ) -> Result<()> {
-    let io = crate::quic_stream_io::wrap(stream);
+    let io = quic_stream_io::wrap(stream);
     let service = hyper::service::service_fn(move |req| forward(req, local_port));
     http1_server::Builder::new()
         .serve_connection(io, service)

@@ -20,6 +20,7 @@ tempfile = "3"
 tokio = "1"
 thiserror = "2"
 wispers-connect = "0.8.2"
+quic_stream_io = { path = "../lib/quic_stream_io" }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
