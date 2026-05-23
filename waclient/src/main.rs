@@ -156,14 +156,12 @@ impl StreamFactory {
     }
 
     async fn try_open_stream(&self, share: &str, node: &wc::Node) -> Result<wc::QuicStream> {
-        // Get the cell under lock and update last_used.
+        // Get the cell under lock.
         let cell = {
             let mut pool = self.pool.lock().await;
             let pool_entry = pool.entry(share.to_owned()).or_insert_with(|| PoolEntry {
                 cell: Arc::new(OnceCell::new()),
-                last_used: Instant::now(),
             });
-            pool_entry.last_used = Instant::now();
             pool_entry.cell.clone()
         };
         // Get or establish the connection.
@@ -171,8 +169,9 @@ impl StreamFactory {
             .get_or_try_init(|| async { node.connect_quic(1).await.map(Arc::new) })
             .await?
             .clone();
-        // Open a stream. If this fails, the underlying connection has
-        // broken and we should remove it from the pool.
+        // Open a stream. If this fails, the underlying connection has broken
+        // and we should remove it from the pool. There could be several threads
+        // trying this, so make sure the cell hasn't changed.
         match conn.open_stream().await {
             Ok(stream) => Ok(stream),
             Err(e) => {
@@ -190,8 +189,4 @@ impl StreamFactory {
 
 struct PoolEntry {
     cell: Arc<OnceCell<Arc<wc::QuicConnection>>>,
-    // TODO: The pool currently doesn't actually use this. Decide whether to
-    // expire connections actively, or just let the die and clean them up next
-    // time opening a stream fails.
-    last_used: Instant,
 }
