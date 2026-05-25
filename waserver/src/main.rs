@@ -97,7 +97,18 @@ fn main() -> Result<()> {
         .install_default()
         .expect("install rustls crypto provider");
 
+    // Parse the command line.
     let cli = Cli::parse();
+
+    // Daemonising must happen before starting tokio.
+    match &cli.command {
+        Command::Start { .. } => {
+            start_daemon()?;
+        }
+        _ => {}
+    }
+
+    // Start async mode.
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -110,7 +121,7 @@ async fn async_main(command: Command) -> Result<()> {
         Command::Init { share, api_key } => initialization::up(&api_key, &share).await,
         Command::Deinit { share } => initialization::down(&share).await,
         Command::Serve { share, local_port } => serving::serve(&share, local_port).await,
-        Command::Start { share, local_port } => start(&share, &local_port),
+        Command::Start { share, local_port } => serving::serve(&share, local_port).await,
         Command::Stop { share } => stop(&share).await,
         Command::Status => status().await,
         Command::Logs { follow, share } => logs(&follow, &share),
@@ -124,12 +135,37 @@ async fn async_main(command: Command) -> Result<()> {
     }
 }
 
-fn start(share: &str, local_port: &u16) -> Result<()> {
-    println!("start({}, {});", share, local_port);
-    // What this needs to do:
-    // - Daemonise (see wconnect)
-    // - Serve
+#[cfg(unix)]
+fn start_daemon() -> Result<()> {
+    let daemonizer = daemonize::Daemonize::new()
+        // The daemonize crate defaults to 0o027 post-fork, which would loosen
+        // the 0o077 we set in main().
+        .umask(0o077);
+    daemonizer.start().context("failed to daemonize")?;
     Ok(())
+}
+
+#[cfg(windows)]
+fn start_daemon(share: &str, local_port: &u16) -> Result<()> {
+    use std::fs::{self, File};
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+
+    // Re-launch ourselves with s/start/serve/.
+    let exe = std::env::current_exe().context("failed to get current executable path")?;
+    let args: Vec<String> = std::iter::once("serve".to_string())
+        .chain(std::env::args().skip(2)) // Skip 'waserver start'.
+        .collect();
+
+    std::process::Command::new(exe)
+        .args(&args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
+        .context("failed to spawn background process")?;
+
+    // The background process has been spawned. Exit the starting process.
+    std::process::exit(0);
 }
 
 async fn stop(share: &str) -> Result<()> {
