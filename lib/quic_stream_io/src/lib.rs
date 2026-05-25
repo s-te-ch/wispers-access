@@ -111,8 +111,14 @@ impl AsyncWrite for QuicStreamIo {
                 WriteState::Idle => {
                     let stream = Arc::clone(&this.stream);
                     let data = buf.to_vec();
-                    let fut: IoFuture<usize> =
-                        Box::pin(async move { stream.write(&data).await.map_err(map_err) });
+                    let len = data.len();
+                    // Use write_all so QUIC flow-control backpressure (which surfaces
+                    // as Ok(0) from `write`) is handled by waiting for a state change
+                    // rather than being propagated up as a `write zero` error.
+                    let fut: IoFuture<usize> = Box::pin(async move {
+                        stream.write_all(&data).await.map_err(map_err)?;
+                        Ok(len)
+                    });
                     this.write_state = WriteState::Writing(fut);
                 }
                 WriteState::Writing(fut) => match fut.as_mut().poll(cx) {

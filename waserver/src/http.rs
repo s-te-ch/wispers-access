@@ -60,7 +60,7 @@ async fn try_forward(
     // Drive the connection I/O in its own task.
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            eprintln!("upstream connection error: {}", e);
+            eprintln!("upstream connection error: {:#}", e);
         }
     });
 
