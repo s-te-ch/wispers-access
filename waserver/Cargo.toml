@@ -23,4 +23,5 @@ wispers-connect = "0.8.2"
 quic_stream_io = { path = "../lib/quic_stream_io" }
 
 [target.'cfg(unix)'.dependencies]
+daemonize = "0.5"
 libc = "0.2"
