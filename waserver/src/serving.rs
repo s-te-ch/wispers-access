@@ -139,7 +139,11 @@ async fn handle_quic_conn(r: Result<wc::QuicConnection, wc::P2pError>, port: u16
     loop {
         match conn.accept_stream().await {
             Ok(stream) => {
-                tokio::spawn(http::handle_quic_stream(stream, port));
+                tokio::spawn(async move {
+                    if let Err(e) = http::handle_quic_stream(stream, port).await {
+                        eprintln!("QUIC stream handler error: {:#}", e);
+                    }
+                });
             }
             Err(e) => {
                 eprintln!("QUIC connection with {} closed: {}", peer, e);

@@ -109,12 +109,12 @@ async fn serve(port: u16) -> Result<()> {
                 let stream_factory = stream_factory.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(tcp_stream, stream_factory).await {
-                        eprintln!("Connection error: {}", e);
+                        eprintln!("Connection error: {:#}", e);
                     }
                 });
             }
             Err(e) => {
-                eprintln!("Accept error: {}", e);
+                eprintln!("Accept error: {:#}", e);
             }
         }
     }
@@ -173,7 +173,7 @@ async fn forward(
     };
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            eprintln!("upstream connection error: {}", e);
+            eprintln!("upstream connection error: {:#}", e);
         }
     });
 
