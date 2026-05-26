@@ -1,6 +1,7 @@
 mod http;
 mod initialization;
 mod ipc;
+mod logging;
 mod serving;
 mod storage;
 mod wcbe;
@@ -120,8 +121,14 @@ async fn async_main(command: Command) -> Result<()> {
     match command {
         Command::Init { share, api_key } => initialization::up(&api_key, &share).await,
         Command::Deinit { share } => initialization::down(&share).await,
-        Command::Serve { share, local_port } => serving::serve(&share, local_port).await,
-        Command::Start { share, local_port } => serving::serve(&share, local_port).await,
+        Command::Serve { share, local_port } => {
+            let _log = logging::init_foreground(&share)?;
+            serving::serve(&share, local_port).await
+        }
+        Command::Start { share, local_port } => {
+            let _log = logging::init_background(&share)?;
+            serving::serve(&share, local_port).await
+        }
         Command::Stop { share } => stop(&share).await,
         Command::Status => status().await,
         Command::Logs { follow, share } => logs(&follow, &share),
@@ -146,8 +153,7 @@ fn start_daemon() -> Result<()> {
 }
 
 #[cfg(windows)]
-fn start_daemon(share: &str, local_port: &u16) -> Result<()> {
-    use std::fs::{self, File};
+fn start_daemon() -> Result<()> {
     use std::os::windows::process::CommandExt;
 
     const CREATE_NO_WINDOW: u32 = 0x08000000;

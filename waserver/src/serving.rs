@@ -7,6 +7,7 @@ use crate::wcbe;
 use anyhow::{Context, Result};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+use tracing::{error, info, warn};
 use wispers_connect as wc;
 
 #[derive(Clone)]
@@ -79,6 +80,8 @@ impl ServingHandle {
     }
 }
 
+/// Run the serving loop. The caller is responsible for initialising logging
+/// (foreground or background) before invoking this.
 pub async fn serve(share: &str, port: u16) -> Result<()> {
     let store = storage::ShareStateStore::new(share)?;
     let Some(cfg) = store.load_share_config()? else {
@@ -107,7 +110,7 @@ pub async fn serve(share: &str, port: u16) -> Result<()> {
         .await
         .context("starting Wispers node serving loop")?;
     serving_handle.set_wc_handle(wc_handle).await;
-    println!("Connected to hub");
+    info!("Connected to hub");
 
     // Run the Wispers serving session.
     let mut session_task = tokio::spawn(async move { session.run().await });
@@ -129,24 +132,24 @@ async fn handle_quic_conn(r: Result<wc::QuicConnection, wc::P2pError>, port: u16
     let conn = match r {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to accept QUIC connection: {}", e);
+            error!("Failed to accept QUIC connection: {}", e);
             return;
         }
     };
     let peer = conn.peer_node_number;
-    println!("QUIC connection from {} accepted", peer);
+    info!(peer, "QUIC connection accepted");
 
     loop {
         match conn.accept_stream().await {
             Ok(stream) => {
                 tokio::spawn(async move {
                     if let Err(e) = http::handle_quic_stream(stream, port).await {
-                        eprintln!("QUIC stream handler error: {:#}", e);
+                        error!(error = format!("{:#}", e), "QUIC stream handler error");
                     }
                 });
             }
             Err(e) => {
-                eprintln!("QUIC connection with {} closed: {}", peer, e);
+                warn!(peer, error = %e, "QUIC connection closed");
                 break;
             }
         }
@@ -158,7 +161,7 @@ fn handle_session_end(
 ) -> Result<()> {
     match result {
         Ok(Ok(())) => {
-            println!("Session ended normally");
+            info!("Session ended normally");
         }
         Ok(Err(e)) => {
             return Err(anyhow::anyhow!("Session error: {}", e));

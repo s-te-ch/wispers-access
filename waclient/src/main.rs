@@ -48,6 +48,11 @@ fn main() -> Result<()> {
     unsafe {
         libc::umask(0o077);
     }
+    // De-conflict rustls.
+    rustls::crypto::aws_lc_rs::default_provider()
+        .install_default()
+        .expect("install rustls crypto provider");
+
     let cli = Cli::parse();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
