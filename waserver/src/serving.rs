@@ -80,8 +80,6 @@ impl ServingHandle {
     }
 }
 
-/// Run the serving loop. The caller is responsible for initialising logging
-/// (foreground or background) before invoking this.
 pub async fn serve(share: &str, port: u16) -> Result<()> {
     let store = storage::ShareStateStore::new(share)?;
     let Some(cfg) = store.load_share_config()? else {
