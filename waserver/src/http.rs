@@ -9,6 +9,7 @@ use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use tokio::net::TcpStream;
+use tracing::warn;
 
 /// Body type used in responses we send back to the peer. Boxed so we can return
 /// either the upstream's streamed body or a locally-generated error body.
@@ -36,7 +37,7 @@ async fn forward(
     match try_forward(req, local_port).await {
         Ok(resp) => Ok(resp),
         Err(e) => {
-            eprintln!("forward error: {:#}", e);
+            warn!(error = format!("{:#}", e), "forward error");
             Ok(error_response(
                 hyper::StatusCode::BAD_GATEWAY,
                 "upstream unavailable",
@@ -60,7 +61,7 @@ async fn try_forward(
     // Drive the connection I/O in its own task.
     tokio::spawn(async move {
         if let Err(e) = conn.await {
-            eprintln!("upstream connection error: {:#}", e);
+            warn!(error = %e, "upstream connection error");
         }
     });
 

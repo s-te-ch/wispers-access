@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tracing::error;
 
 #[cfg(windows)]
 use tokio::net::{TcpListener, TcpStream};
@@ -63,7 +64,7 @@ impl Server {
             let stream = match self.listener.accept().await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
-                    eprintln!("Failed to accept IPC connection: {}", e);
+                    error!(error = %e, "Failed to accept IPC connection");
                     continue;
                 }
             };
@@ -133,7 +134,7 @@ impl Server {
             let stream = match self.listener.accept().await {
                 Ok((stream, _)) => stream,
                 Err(e) => {
-                    eprintln!("Failed to accept IPC connection: {}", e);
+                    error!(error = %e, "Failed to accept IPC connection");
                     continue;
                 }
             };
@@ -276,15 +277,15 @@ async fn send_response(mut writer: WriteHalf, resp: Response) {
         serde_json::to_string(&Response::error(format!("serialization error: {}", e))).unwrap()
     });
     if let Err(e) = writer.write_all(json.as_bytes()).await {
-        eprintln!("Failed to write response: {}", e);
+        error!(error = %e, "Failed to write response");
         return;
     }
     if let Err(e) = writer.write_all(b"\n").await {
-        eprintln!("Failed to write newline: {}", e);
+        error!(error = %e, "Failed to write newline");
         return;
     }
     if let Err(e) = writer.flush().await {
-        eprintln!("Failed to flush: {}", e);
+        error!(error = %e, "Failed to flush");
         return;
     }
 }

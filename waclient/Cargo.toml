@@ -11,6 +11,7 @@ dirs = "5"
 http-body-util = "0.1"
 hyper = { version = "1", features = ["http1", "client", "server"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
+rustls = "0.23"
 tokio = "1"
 wispers-connect = "0.8.2"
 quic_stream_io = { path = "../lib/quic_stream_io" }

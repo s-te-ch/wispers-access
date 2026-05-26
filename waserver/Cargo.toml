@@ -19,6 +19,9 @@ serde_path_to_error = "0.1"
 tempfile = "3"
 tokio = "1"
 thiserror = "2"
+tracing = "0.1"
+tracing-appender = "0.2"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wispers-connect = "0.8.2"
 quic_stream_io = { path = "../lib/quic_stream_io" }
 
