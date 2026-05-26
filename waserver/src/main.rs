@@ -131,7 +131,7 @@ async fn async_main(command: Command) -> Result<()> {
         }
         Command::Stop { share } => stop(&share).await,
         Command::Status => status().await,
-        Command::Logs { follow, share } => logs(&follow, &share),
+        Command::Logs { follow, share } => logs(follow, &share),
         Command::Invite {
             share,
             node_name,
@@ -231,10 +231,68 @@ async fn status() -> Result<()> {
     Ok(())
 }
 
-fn logs(follow: &bool, share: &str) -> Result<()> {
-    println!("logs({}, {});", follow, share);
-    // - Find the latest logs of the given share (platform dependent)
-    // - Print them, or if -f is given, tail them
+fn logs(follow: bool, share: &str) -> Result<()> {
+    use std::collections::VecDeque;
+    use std::io::{self, Read, Write};
+    use std::path::PathBuf;
+
+    let mut stdout = io::stdout().lock();
+    let paths = logging::list_log_files(share)?;
+    let mut paths = VecDeque::from(paths);
+    let Some(mut path) = paths.pop_front() else {
+        eprintln!("No logs for share {}", share);
+        return Ok(());
+    };
+    let mut file =
+        std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
+    let mut buf = [0u8; 8192];
+    loop {
+        // Copy the entire file to stdout.
+        loop {
+            let n = file
+                .read(&mut buf)
+                .with_context(|| format!("read {}", path.display()))?;
+            if n == 0 {
+                break;
+            }
+            if let Err(e) = stdout.write_all(&buf[..n]) {
+                if e.kind() == io::ErrorKind::BrokenPipe {
+                    return Ok(());
+                }
+                return Err(e.into());
+            }
+        }
+        stdout.flush().ok();
+
+        // End of file. If there's another file in the list, continue with that.
+        if let Some(next) = paths.pop_front() {
+            path = next;
+            file =
+                std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
+            continue;
+        }
+
+        // If we're not in follow mode we're done here.
+        if !follow {
+            break;
+        }
+
+        // Check for newer log files due to log rotation.
+        for new_path in logging::list_log_files(share)? {
+            if new_path > path {
+                paths.push_back(new_path);
+            }
+        }
+        if let Some(next) = paths.pop_front() {
+            path = next;
+            file =
+                std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
+            continue;
+        }
+
+        // Sleep before retry.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
     Ok(())
 }
 

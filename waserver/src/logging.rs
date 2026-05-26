@@ -65,8 +65,7 @@ pub fn init_background(share: &str) -> Result<LoggingHandle> {
 
 fn file_writer(share: &str) -> Result<(NonBlocking, WorkerGuard)> {
     let dir = log_dir(share)?;
-    std::fs::create_dir_all(&dir)
-        .with_context(|| format!("creating log dir {}", dir.display()))?;
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {}", dir.display()))?;
     let appender = tracing_appender::rolling::daily(&dir, "waserver.log");
     Ok(tracing_appender::non_blocking(appender))
 }
@@ -96,6 +95,31 @@ fn install_panic_hook() {
 
 fn env_filter() -> EnvFilter {
     EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"))
+}
+
+const LOG_FILE_PREFIX: &str = "waserver.log.";
+
+/// List existing log files for a share, sorted oldest-first. The daily
+/// appender writes `waserver.log.YYYY-MM-DD`, which sorts lexicographically
+/// in chronological order. Returns an empty vec if the log dir doesn't
+/// exist yet.
+pub fn list_log_files(share: &str) -> Result<Vec<PathBuf>> {
+    let dir = log_dir(share)?;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .with_context(|| format!("read log dir {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with(LOG_FILE_PREFIX))
+        })
+        .collect();
+    files.sort();
+    Ok(files)
 }
 
 /// Platform-appropriate log directory for a given share.
