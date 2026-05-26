@@ -10,7 +10,7 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, fmt};
 
-/// Returned by the init functions. Drop this *after* the program is done — when
+/// Returned by the init functions. Drop this *after* the program is done. When
 /// the guard is dropped, the non-blocking writer flushes its buffer and joins
 /// its worker thread.
 pub struct LoggingHandle {
@@ -18,8 +18,8 @@ pub struct LoggingHandle {
     file_guard: WorkerGuard,
 }
 
-/// Foreground mode: log to stderr (pretty/colorized) and to a daily-rotated
-/// file in [`log_dir`]. Reads `RUST_LOG` for filtering; defaults to `info`.
+/// Log to stderr (pretty/colorised) and to a daily-rotated file in
+/// [`log_dir`]. Reads `RUST_LOG` for filtering; defaults to `info`.
 pub fn init_foreground(share: &str) -> Result<LoggingHandle> {
     let (writer, file_guard) = file_writer(share)?;
 
