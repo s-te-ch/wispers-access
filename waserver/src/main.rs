@@ -234,7 +234,6 @@ async fn status() -> Result<()> {
 fn logs(follow: bool, share: &str) -> Result<()> {
     use std::collections::VecDeque;
     use std::io::{self, Read, Write};
-    use std::path::PathBuf;
 
     let mut stdout = io::stdout().lock();
     let paths = logging::list_log_files(share)?;
@@ -333,6 +332,32 @@ async fn revoke(share: &str, node_number: &i32) -> Result<()> {
 }
 
 async fn nodes(share: &str) -> Result<()> {
-    println!("nodes({});", share);
+    use std::io::Write;
+    use tabwriter::TabWriter;
+
+    // Restore node.
+    let store = storage::ShareStateStore::new(share)?;
+    let Some(_) = store.load_share_config()? else {
+        anyhow::bail!("Share {} is not initialised", share);
+    };
+    let node_storage = wispers_connect::NodeStorage::new(store);
+    let node = node_storage.restore_or_init_node().await?;
+
+    // Query group info.
+    let group_info = node.group_info().await?;
+
+    // Render it.
+    let mut tw = TabWriter::new(std::io::stdout().lock()).padding(2);
+    write!(&mut tw, "Number\tName\tStatus\n").unwrap();
+    for node in &group_info.nodes {
+        let status = if node.is_online { "online" } else { "offline" };
+        let name = if node.name.is_empty() {
+            "<none>"
+        } else {
+            &node.name
+        };
+        write!(&mut tw, "{}\t{}\t{}\n", node.node_number, name, status).unwrap();
+    }
+    tw.flush().unwrap();
     Ok(())
 }
