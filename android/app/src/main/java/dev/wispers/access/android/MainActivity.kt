@@ -5,6 +5,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.platform.LocalContext
 import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
@@ -61,7 +62,11 @@ private fun AppNavHost() {
             route = Route.SHARE_DETAIL,
             arguments = listOf(navArgument("shareId") { type = NavType.StringType }),
         ) {
-            ShareDetailScreen(onBack = { navController.popBackStack() })
+            val context = LocalContext.current
+            ShareDetailScreen(
+                onBack = { navController.popBackStack() },
+                onOpenShare = { id -> ShareActivity.launch(context, id) },
+            )
         }
     }
 }
