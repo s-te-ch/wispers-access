@@ -1,5 +1,6 @@
 package dev.wispers.access.android.screens
 
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -11,7 +12,6 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -33,12 +33,14 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.wispers.access.android.R
 import dev.wispers.access.android.storage.Share
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
@@ -105,28 +107,11 @@ fun ShareListScreen(
 
 @Composable
 private fun BrandHeader() {
-    Column {
-        Box {
-            Text(
-                text = "wispers",
-                style = MaterialTheme.typography.displayLarge,
-                color = MaterialTheme.colorScheme.onSurface,
-            )
-            // Small green dot positioned above the "i".
-            Box(
-                modifier = Modifier
-                    .offset(x = 58.dp, y = (-4).dp)
-                    .size(10.dp)
-                    .background(MaterialTheme.colorScheme.primary, CircleShape),
-            )
-        }
-        Spacer(Modifier.height(8.dp))
-        Text(
-            text = "Access · your private shares",
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
-    }
+    Image(
+        painter = painterResource(R.drawable.wispers_access_logo),
+        contentDescription = "Wispers Access",
+        modifier = Modifier.height(48.dp),
+    )
 }
 
 @Composable
@@ -193,7 +178,7 @@ private fun ShareCard(share: Share, onClick: () -> Unit) {
                 Spacer(Modifier.height(4.dp))
                 Text(
                     text = share.nickname.ifBlank { "Untitled share" },
-                    style = MaterialTheme.typography.headlineMedium,
+                    style = MaterialTheme.typography.headlineSmall,
                     color = MaterialTheme.colorScheme.onSurface,
                 )
             }
