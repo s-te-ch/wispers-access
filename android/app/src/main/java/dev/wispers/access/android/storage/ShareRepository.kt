@@ -1,7 +1,9 @@
 package dev.wispers.access.android.storage
 
 import dev.wispers.connect.WispersConnect
+import dev.wispers.connect.handles.Node
 import dev.wispers.connect.handles.Storage
+import dev.wispers.connect.types.NodeState
 import java.time.Instant
 import java.util.UUID
 import javax.inject.Inject
@@ -54,6 +56,12 @@ class ShareRepository @Inject internal constructor(
     fun storageFor(id: ShareId): Storage =
         WispersConnect.createStorage(ShareNodeStorageCallbacks(dao, id.value))
 }
+
+/**
+ * Subject-correct rename of the library's [Storage.restoreOrInit]: a Storage doesn't get
+ * restored, the Node it holds does.
+ */
+suspend fun Storage.restoreOrInitNode(): Pair<Node, NodeState> = restoreOrInit()
 
 private fun ShareInfoRow.toShare(): Share = Share(
     id = ShareId(id),

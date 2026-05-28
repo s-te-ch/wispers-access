@@ -14,6 +14,7 @@ room = "2.8.4"
 sqlcipher = "4.15.0"
 wispersConnect = "0.8.2"
 hiltNavigationCompose = "1.2.0"
+navigationCompose = "2.9.8"
 
 [libraries]
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
@@ -38,6 +39,8 @@ androidx-room-compiler = { group = "androidx.room", name = "room-compiler", vers
 sqlcipher-android = { group = "net.zetetic", name = "sqlcipher-android", version.ref = "sqlcipher" }
 wispers-connect = { group = "dev.wispers", name = "connect", version.ref = "wispersConnect" }
 androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-compose", version.ref = "hiltNavigationCompose" }
+androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
+androidx-compose-material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
