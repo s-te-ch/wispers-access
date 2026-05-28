@@ -21,6 +21,9 @@ class ShareRepository @Inject internal constructor(
     fun observeShares(): Flow<List<Share>> =
         dao.observeShareInfos().map { rows -> rows.map(ShareInfoRow::toShare) }
 
+    fun observeShare(id: ShareId): Flow<Share?> =
+        dao.observeShareInfo(id.value).map { it?.toShare() }
+
     suspend fun getShare(id: ShareId): Share? = withContext(Dispatchers.IO) {
         dao.getShareInfo(id.value)?.toShare()
     }

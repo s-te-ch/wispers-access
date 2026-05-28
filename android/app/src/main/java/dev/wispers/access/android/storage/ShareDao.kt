@@ -17,6 +17,9 @@ internal interface ShareDao {
     @Query("SELECT id, nickname, createdAt, lastConnectedAt FROM shares WHERE id = :id")
     fun getShareInfo(id: String): ShareInfoRow?
 
+    @Query("SELECT id, nickname, createdAt, lastConnectedAt FROM shares WHERE id = :id")
+    fun observeShareInfo(id: String): Flow<ShareInfoRow?>
+
     @Insert
     fun insert(entity: ShareEntity)
 

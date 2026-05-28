@@ -1,0 +1,259 @@
+package dev.wispers.access.android.screens
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
+import androidx.compose.material3.Card
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.unit.dp
+import androidx.hilt.navigation.compose.hiltViewModel
+import androidx.lifecycle.SavedStateHandle
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
+import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.wispers.access.android.storage.Share
+import dev.wispers.access.android.storage.ShareId
+import dev.wispers.access.android.storage.ShareRepository
+import java.time.Duration
+import java.time.Instant
+import javax.inject.Inject
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.launch
+
+@HiltViewModel
+class ShareDetailViewModel @Inject constructor(
+    savedStateHandle: SavedStateHandle,
+    private val repo: ShareRepository,
+) : ViewModel() {
+
+    private val shareId: ShareId =
+        ShareId(checkNotNull(savedStateHandle["shareId"]) { "shareId arg required" })
+
+    val share: StateFlow<Share?> = repo.observeShare(shareId).stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(5_000),
+        initialValue = null,
+    )
+
+    private val _removed = MutableStateFlow(false)
+    val removed: StateFlow<Boolean> = _removed.asStateFlow()
+
+    fun onRemove() {
+        viewModelScope.launch {
+            repo.deleteShare(shareId)
+            _removed.value = true
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun ShareDetailScreen(
+    onBack: () -> Unit,
+    viewModel: ShareDetailViewModel = hiltViewModel(),
+) {
+    val share by viewModel.share.collectAsState()
+    val removed by viewModel.removed.collectAsState()
+    var confirmRemove by remember { mutableStateOf(false) }
+
+    LaunchedEffect(removed) {
+        if (removed) onBack()
+    }
+
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("Share") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
+            )
+        },
+    ) { innerPadding ->
+        val current = share
+        if (current != null) {
+            ShareDetailContent(
+                share = current,
+                contentPadding = innerPadding,
+                onOpen = { /* TODO: launch proxy session */ },
+                onAddToHomescreen = { /* TODO: PWA install / shortcut */ },
+                onRemove = { confirmRemove = true },
+            )
+        }
+    }
+
+    if (confirmRemove) {
+        AlertDialog(
+            onDismissRequest = { confirmRemove = false },
+            title = { Text("Remove share?") },
+            text = {
+                Text("This deletes the local share data. You'll need a new invitation code to rejoin.")
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        confirmRemove = false
+                        viewModel.onRemove()
+                    },
+                ) {
+                    Text("Remove", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { confirmRemove = false }) { Text("Cancel") }
+            },
+        )
+    }
+}
+
+@Composable
+private fun ShareDetailContent(
+    share: Share,
+    contentPadding: PaddingValues,
+    onOpen: () -> Unit,
+    onAddToHomescreen: () -> Unit,
+    onRemove: () -> Unit,
+) {
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(contentPadding)
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        StatusRow(online = false)
+        Text(
+            text = share.nickname.ifBlank { "Untitled share" },
+            style = MaterialTheme.typography.headlineLarge,
+        )
+        InfoCardsRow(share = share)
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Button(
+                onClick = onOpen,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Open share ↗")
+            }
+            OutlinedButton(
+                onClick = onAddToHomescreen,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Text("Add to homescreen")
+                    Text("Setup", style = MaterialTheme.typography.labelMedium)
+                }
+            }
+            OutlinedButton(
+                onClick = onRemove,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text("Remove share", color = MaterialTheme.colorScheme.error)
+            }
+        }
+    }
+}
+
+@Composable
+private fun StatusRow(online: Boolean) {
+    Row(
+        verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        androidx.compose.foundation.layout.Box(
+            modifier = Modifier
+                .size(10.dp)
+                .background(
+                    color = if (online) Color(0xFF34A853) else MaterialTheme.colorScheme.outline,
+                    shape = CircleShape,
+                ),
+        )
+        Text(
+            text = if (online) "ONLINE" else "OFFLINE",
+            style = MaterialTheme.typography.labelMedium,
+        )
+    }
+}
+
+@Composable
+private fun InfoCardsRow(share: Share) {
+    val now = Instant.now()
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        InfoCard(
+            label = "LAST CONNECTED",
+            value = formatRelative(share.lastConnectedAt, now),
+            modifier = Modifier.weight(1f),
+        )
+        InfoCard(
+            label = "JOINED",
+            value = formatRelative(share.createdAt, now),
+            modifier = Modifier.weight(1f),
+        )
+    }
+}
+
+@Composable
+private fun InfoCard(label: String, value: String, modifier: Modifier = Modifier) {
+    Card(modifier = modifier) {
+        Column(
+            modifier = Modifier.padding(12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            Text(label, style = MaterialTheme.typography.labelSmall)
+            Text(value, style = MaterialTheme.typography.bodyLarge)
+        }
+    }
+}
+
+private fun formatRelative(instant: Instant?, now: Instant): String {
+    if (instant == null) return "—"
+    val diff = Duration.between(instant, now)
+    return when {
+        diff.isNegative -> "in the future"
+        diff.seconds < 60 -> "just now"
+        diff.toMinutes() < 60 -> "${diff.toMinutes()}m ago"
+        diff.toHours() < 24 -> "${diff.toHours()}h ago"
+        diff.toDays() < 30 -> "${diff.toDays()}d ago"
+        else -> instant.atZone(java.time.ZoneId.systemDefault()).toLocalDate().toString()
+    }
+}
