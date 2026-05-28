@@ -27,11 +27,10 @@ import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.stateIn
-import kotlinx.coroutines.launch
 
 @HiltViewModel
 class ShareListViewModel @Inject constructor(
-    private val repo: ShareRepository,
+    repo: ShareRepository,
 ) : ViewModel() {
 
     val shares: StateFlow<List<Share>> = repo.observeShares()
@@ -40,23 +39,20 @@ class ShareListViewModel @Inject constructor(
             started = SharingStarted.WhileSubscribed(5_000),
             initialValue = emptyList(),
         )
-
-    fun addShare() {
-        viewModelScope.launch {
-            repo.createShare(nickname = "New share")
-        }
-    }
 }
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ShareListScreen(viewModel: ShareListViewModel = hiltViewModel()) {
+fun ShareListScreen(
+    onAddClick: () -> Unit,
+    viewModel: ShareListViewModel = hiltViewModel(),
+) {
     val shares by viewModel.shares.collectAsState()
 
     Scaffold(
         floatingActionButton = {
             ExtendedFloatingActionButton(
-                onClick = viewModel::addShare,
+                onClick = onAddClick,
                 text = { Text("Add a share") },
                 icon = { Text("+") },
             )
