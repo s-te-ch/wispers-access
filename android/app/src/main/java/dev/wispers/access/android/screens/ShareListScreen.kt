@@ -22,6 +22,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.wispers.access.android.storage.Share
+import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
 import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
@@ -45,6 +46,7 @@ class ShareListViewModel @Inject constructor(
 @Composable
 fun ShareListScreen(
     onAddClick: () -> Unit,
+    onShareClick: (ShareId) -> Unit,
     viewModel: ShareListViewModel = hiltViewModel(),
 ) {
     val shares by viewModel.shares.collectAsState()
@@ -61,7 +63,7 @@ fun ShareListScreen(
         if (shares.isEmpty()) {
             EmptyShareList(modifier = Modifier.fillMaxSize(), contentPadding = innerPadding)
         } else {
-            ShareList(shares = shares, contentPadding = innerPadding)
+            ShareList(shares = shares, contentPadding = innerPadding, onShareClick = onShareClick)
         }
     }
 }
@@ -74,7 +76,11 @@ private fun EmptyShareList(modifier: Modifier, contentPadding: PaddingValues) {
 }
 
 @Composable
-private fun ShareList(shares: List<Share>, contentPadding: PaddingValues) {
+private fun ShareList(
+    shares: List<Share>,
+    contentPadding: PaddingValues,
+    onShareClick: (ShareId) -> Unit,
+) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = contentPadding,
@@ -82,7 +88,7 @@ private fun ShareList(shares: List<Share>, contentPadding: PaddingValues) {
     ) {
         items(shares, key = { it.id.value }) { share ->
             AssistChip(
-                onClick = { /* TODO: open share */ },
+                onClick = { onShareClick(share.id) },
                 label = { Text(share.nickname.ifBlank { "(unnamed share)" }) },
             )
         }
