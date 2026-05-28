@@ -1,5 +1,6 @@
 package dev.wispers.access.android.proxy
 
+import android.util.Log
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.connect.handles.QuicStream
 import io.ktor.http.HttpStatusCode
@@ -32,10 +33,22 @@ internal class UpstreamClient(
 ) {
     suspend fun forward(call: ApplicationCall) {
         val request = buildOutboundRequest(call)
+        Log.d(TAG, "→ ${request.method} ${request.target} body=${request.body::class.simpleName}")
         sendRequest(request, call.receiveChannel())
         val reader = StreamReader(stream)
-        val response = readResponseHead(reader)
+        val response = try {
+            readResponseHead(reader)
+        } catch (e: Exception) {
+            Log.w(TAG, "← read response head failed: ${e.message}")
+            throw e
+        }
+        Log.d(TAG, "← ${response.status} framing=${response.framing::class.simpleName}")
         respond(call, response, reader)
+        // Half-close our send side only after the full response cycle. Calling finish()
+        // immediately after the request head was observed to confuse the upstream's
+        // hyper into reporting an "incomplete message" — hyper's own client doesn't FIN
+        // until the exchange is over, and we match that.
+        runCatching { stream.finish() }
     }
 
     // ---- Outbound (request) ----
@@ -72,14 +85,22 @@ internal class UpstreamClient(
     }
 
     private suspend fun sendRequest(req: OutboundRequest, body: ByteReadChannel) {
-        stream.write(serializeHead(req).toByteArray(Charsets.ISO_8859_1))
+        val headBytes = serializeHead(req).toByteArray(Charsets.ISO_8859_1)
+        Log.d(TAG, "→ head bytes=${headBytes.size} last8=${hexTail(headBytes, 8)}")
+        stream.write(headBytes)
         when (val b = req.body) {
             RequestBody.None -> Unit
             RequestBody.Chunked -> sendChunkedBody(body)
             is RequestBody.Fixed -> sendFixedBody(body, b.length)
         }
-        stream.finish()
+        // Intentionally no finish() here. The request is framed by headers
+        // (Content-Length or chunked terminator) or implicit zero body for
+        // method-without-body; upstream knows the request is complete without
+        // needing FIN. We FIN after the response, mirroring hyper's client.
     }
+
+    private fun hexTail(b: ByteArray, n: Int): String =
+        b.takeLast(n).joinToString(" ") { "%02x".format(it) }
 
     private suspend fun sendFixedBody(src: ByteReadChannel, length: Long) {
         val buf = ByteArray(BUFFER_SIZE)
@@ -223,6 +244,7 @@ internal class UpstreamClient(
     }
 
     private companion object {
+        const val TAG = "UpstreamClient"
         const val BUFFER_SIZE = 8192
         val CRLF = byteArrayOf(0x0D, 0x0A)
         val FINAL_CHUNK = "0\r\n\r\n".toByteArray(Charsets.ISO_8859_1)
