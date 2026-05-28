@@ -44,6 +44,7 @@ import dev.wispers.access.android.R
 import dev.wispers.access.android.storage.Share
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
+import dev.wispers.access.android.ui.theme.AccessOnSurfaceMedium
 import java.time.Duration
 import java.time.Instant
 import javax.inject.Inject
@@ -107,11 +108,16 @@ fun ShareListScreen(
 
 @Composable
 private fun BrandHeader() {
-    Image(
-        painter = painterResource(R.drawable.wispers_access_logo),
-        contentDescription = "Wispers Access",
-        modifier = Modifier.height(48.dp),
-    )
+    Box(
+        modifier = Modifier.fillMaxWidth(),
+        contentAlignment = Alignment.Center,
+    ) {
+        Image(
+            painter = painterResource(R.drawable.wispers_access_logo),
+            contentDescription = "Wispers Access",
+            modifier = Modifier.height(48.dp),
+        )
+    }
 }
 
 @Composable
@@ -179,7 +185,7 @@ private fun ShareCard(share: Share, onClick: () -> Unit) {
                 Text(
                     text = share.nickname.ifBlank { "Untitled share" },
                     style = MaterialTheme.typography.headlineSmall,
-                    color = MaterialTheme.colorScheme.onSurface,
+                    color = AccessOnSurfaceMedium,
                 )
             }
             Icon(
