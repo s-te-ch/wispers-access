@@ -83,6 +83,7 @@ class ShareDetailViewModel @Inject constructor(
 @Composable
 fun ShareDetailScreen(
     onBack: () -> Unit,
+    onOpenShare: (ShareId) -> Unit,
     viewModel: ShareDetailViewModel = hiltViewModel(),
 ) {
     val share by viewModel.share.collectAsState()
@@ -110,7 +111,7 @@ fun ShareDetailScreen(
             ShareDetailContent(
                 share = current,
                 contentPadding = innerPadding,
-                onOpen = { /* TODO: launch proxy session */ },
+                onOpen = { onOpenShare(current.id) },
                 onAddToHomescreen = { /* TODO: PWA install / shortcut */ },
                 onRemove = { confirmRemove = true },
             )
