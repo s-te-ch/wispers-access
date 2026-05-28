@@ -78,7 +78,7 @@ class ProxyServer @Inject constructor(
     }
 
     private companion object {
-        const val FIXED_PORT = 47823
+        const val FIXED_PORT = 10774
         const val TAG = "ProxyServer"
     }
 }
