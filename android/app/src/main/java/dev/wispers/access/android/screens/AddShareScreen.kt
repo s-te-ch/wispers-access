@@ -3,16 +3,23 @@ package dev.wispers.access.android.screens
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SecondaryTabRow
@@ -20,7 +27,6 @@ import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
@@ -30,14 +36,18 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
 import dev.wispers.access.android.storage.restoreOrInitNode
 import javax.inject.Inject
+import kotlin.coroutines.cancellation.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @HiltViewModel
 class AddShareViewModel @Inject constructor(
@@ -46,12 +56,24 @@ class AddShareViewModel @Inject constructor(
 
     enum class Tab { ENTER_CODE, SCAN_QR }
 
+    enum class JoinStep(val label: String) {
+        VALIDATING("Validating invitation code…"),
+        INITIALIZING("Generating node identity…"),
+        REGISTERING("Registering…"),
+        ACTIVATING("Activating…"),
+    }
+
+    sealed interface Phase {
+        data object Idle : Phase
+        data class Joining(val completed: Set<JoinStep>, val current: JoinStep) : Phase
+        data class Joined(val shareId: ShareId, val nickname: String) : Phase
+    }
+
     data class State(
         val tab: Tab = Tab.ENTER_CODE,
         val code: String = "",
-        val busy: Boolean = false,
+        val phase: Phase = Phase.Idle,
         val error: String? = null,
-        val joined: Boolean = false,
     )
 
     private val _state = MutableStateFlow(State())
@@ -62,33 +84,62 @@ class AddShareViewModel @Inject constructor(
     fun onCodeChange(code: String) = _state.update { it.copy(code = code, error = null) }
 
     fun onJoinClick() {
+        if (_state.value.phase !is Phase.Idle) return
         val parts = _state.value.code.trim().split("/")
         if (parts.size != 2 || parts.any(String::isBlank)) {
             _state.update { it.copy(error = "Code must be in the form regtok/activation.") }
             return
         }
         val (token, activation) = parts
-        viewModelScope.launch {
-            _state.update { it.copy(busy = true, error = null) }
+        viewModelScope.launch { runJoin(token, activation) }
+    }
+
+    private suspend fun runJoin(token: String, activation: String) {
+        var createdId: ShareId? = null
+        try {
+            startStep(JoinStep.VALIDATING)
+            completeStep(JoinStep.VALIDATING)
+
+            startStep(JoinStep.INITIALIZING)
             val id = repo.createShare()
-            val result = runCatching {
-                val storage = repo.storageFor(id)
-                val (node, _) = storage.restoreOrInitNode()
-                node.register(token)
-                node.activate(activation)
-                repo.markConnected(id)
+            createdId = id
+            val storage = repo.storageFor(id)
+            val (node, _) = storage.restoreOrInitNode()
+            completeStep(JoinStep.INITIALIZING)
+
+            startStep(JoinStep.REGISTERING)
+            node.register(token)
+            completeStep(JoinStep.REGISTERING)
+
+            startStep(JoinStep.ACTIVATING)
+            node.activate(activation)
+            repo.markConnected(id)
+            completeStep(JoinStep.ACTIVATING)
+
+            val nickname = repo.getShare(id)?.nickname.orEmpty()
+            _state.update { it.copy(phase = Phase.Joined(shareId = id, nickname = nickname)) }
+        } catch (e: CancellationException) {
+            createdId?.let { withContext(NonCancellable) { repo.deleteShare(it) } }
+            throw e
+        } catch (e: Exception) {
+            createdId?.let { repo.deleteShare(it) }
+            _state.update {
+                it.copy(phase = Phase.Idle, error = e.message ?: "Failed to join share.")
             }
-            if (result.isSuccess) {
-                _state.update { it.copy(busy = false, joined = true) }
-            } else {
-                repo.deleteShare(id)
-                _state.update {
-                    it.copy(
-                        busy = false,
-                        error = result.exceptionOrNull()?.message ?: "Failed to join share.",
-                    )
-                }
-            }
+        }
+    }
+
+    private fun startStep(step: JoinStep) {
+        _state.update { s ->
+            val completed = (s.phase as? Phase.Joining)?.completed ?: emptySet()
+            s.copy(phase = Phase.Joining(completed = completed, current = step))
+        }
+    }
+
+    private fun completeStep(step: JoinStep) {
+        _state.update { s ->
+            val joining = s.phase as? Phase.Joining ?: return@update s
+            s.copy(phase = joining.copy(completed = joining.completed + step))
         }
     }
 }
@@ -97,14 +148,10 @@ class AddShareViewModel @Inject constructor(
 @Composable
 fun AddShareScreen(
     onBack: () -> Unit,
-    onJoined: () -> Unit,
+    onOpenShare: (ShareId) -> Unit,
     viewModel: AddShareViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
-
-    LaunchedEffect(state.joined) {
-        if (state.joined) onJoined()
-    }
 
     Scaffold(
         topBar = {
@@ -125,37 +172,55 @@ fun AddShareScreen(
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            CodeEntryTabs(selected = state.tab, onSelected = viewModel::onTabChange)
-            when (state.tab) {
-                AddShareViewModel.Tab.ENTER_CODE -> EnterCodeContent(
+            when (val phase = state.phase) {
+                AddShareViewModel.Phase.Idle -> IdleContent(
+                    tab = state.tab,
                     code = state.code,
                     error = state.error,
-                    busy = state.busy,
+                    onTabChange = viewModel::onTabChange,
                     onCodeChange = viewModel::onCodeChange,
                     onJoin = viewModel::onJoinClick,
                 )
-                AddShareViewModel.Tab.SCAN_QR -> ScanQrPlaceholder()
+                is AddShareViewModel.Phase.Joining -> JoinProgress(phase = phase)
+                is AddShareViewModel.Phase.Joined -> JoinSuccess(
+                    phase = phase,
+                    onOpen = { onOpenShare(phase.shareId) },
+                    onBackToList = onBack,
+                )
             }
         }
     }
 }
 
 @Composable
-private fun CodeEntryTabs(
-    selected: AddShareViewModel.Tab,
-    onSelected: (AddShareViewModel.Tab) -> Unit,
+private fun IdleContent(
+    tab: AddShareViewModel.Tab,
+    code: String,
+    error: String?,
+    onTabChange: (AddShareViewModel.Tab) -> Unit,
+    onCodeChange: (String) -> Unit,
+    onJoin: () -> Unit,
 ) {
-    SecondaryTabRow(selectedTabIndex = selected.ordinal) {
+    SecondaryTabRow(selectedTabIndex = tab.ordinal) {
         Tab(
-            selected = selected == AddShareViewModel.Tab.ENTER_CODE,
-            onClick = { onSelected(AddShareViewModel.Tab.ENTER_CODE) },
+            selected = tab == AddShareViewModel.Tab.ENTER_CODE,
+            onClick = { onTabChange(AddShareViewModel.Tab.ENTER_CODE) },
             text = { Text("Enter code") },
         )
         Tab(
-            selected = selected == AddShareViewModel.Tab.SCAN_QR,
-            onClick = { onSelected(AddShareViewModel.Tab.SCAN_QR) },
+            selected = tab == AddShareViewModel.Tab.SCAN_QR,
+            onClick = { onTabChange(AddShareViewModel.Tab.SCAN_QR) },
             text = { Text("Scan QR") },
         )
+    }
+    when (tab) {
+        AddShareViewModel.Tab.ENTER_CODE -> EnterCodeContent(
+            code = code,
+            error = error,
+            onCodeChange = onCodeChange,
+            onJoin = onJoin,
+        )
+        AddShareViewModel.Tab.SCAN_QR -> ScanQrPlaceholder()
     }
 }
 
@@ -163,7 +228,6 @@ private fun CodeEntryTabs(
 private fun EnterCodeContent(
     code: String,
     error: String?,
-    busy: Boolean,
     onCodeChange: (String) -> Unit,
     onJoin: () -> Unit,
 ) {
@@ -178,14 +242,18 @@ private fun EnterCodeContent(
             modifier = Modifier.fillMaxWidth(),
         )
         if (error != null) {
-            Text(error, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall)
+            Text(
+                error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
         }
         Button(
             onClick = onJoin,
-            enabled = !busy && code.isNotBlank(),
+            enabled = code.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text(if (busy) "Joining…" else "Join share")
+            Text("Join share")
         }
         Text(
             "Codes are issued by the person who set up the share.",
@@ -198,5 +266,82 @@ private fun EnterCodeContent(
 private fun ScanQrPlaceholder() {
     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
         Text("QR scanning coming soon.")
+    }
+}
+
+@Composable
+private fun JoinProgress(phase: AddShareViewModel.Phase.Joining) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        AddShareViewModel.JoinStep.entries.forEach { step ->
+            val status = when {
+                step in phase.completed -> StepStatus.DONE
+                step == phase.current -> StepStatus.RUNNING
+                else -> StepStatus.PENDING
+            }
+            StepRow(label = step.label, status = status)
+        }
+    }
+}
+
+@Composable
+private fun JoinSuccess(
+    phase: AddShareViewModel.Phase.Joined,
+    onOpen: () -> Unit,
+    onBackToList: () -> Unit,
+) {
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        AddShareViewModel.JoinStep.entries.forEach { step ->
+            StepRow(label = step.label, status = StepStatus.DONE)
+        }
+        StepRow(
+            label = if (phase.nickname.isBlank()) "Joined" else "Joined \"${phase.nickname}\"",
+            status = StepStatus.DONE,
+        )
+        Button(
+            onClick = onOpen,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Open share")
+        }
+        OutlinedButton(
+            onClick = onBackToList,
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Back to list")
+        }
+    }
+}
+
+private enum class StepStatus { PENDING, RUNNING, DONE }
+
+@Composable
+private fun StepRow(label: String, status: StepStatus) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        Box(modifier = Modifier.size(24.dp), contentAlignment = Alignment.Center) {
+            when (status) {
+                StepStatus.DONE -> Icon(
+                    imageVector = Icons.Filled.CheckCircle,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                )
+                StepStatus.RUNNING -> CircularProgressIndicator(
+                    modifier = Modifier.size(20.dp),
+                    strokeWidth = 2.dp,
+                )
+                StepStatus.PENDING -> Box(
+                    modifier = Modifier
+                        .size(20.dp)
+                        .border(
+                            width = 2.dp,
+                            color = MaterialTheme.colorScheme.outline,
+                            shape = CircleShape,
+                        ),
+                )
+            }
+        }
+        Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }
