@@ -41,7 +41,7 @@ private fun AppNavHost() {
         composable(Route.ADD_SHARE) {
             AddShareScreen(
                 onBack = { navController.popBackStack() },
-                onJoined = { navController.popBackStack() },
+                onOpenShare = { /* TODO: navigate to share-detail */ navController.popBackStack() },
             )
         }
     }
