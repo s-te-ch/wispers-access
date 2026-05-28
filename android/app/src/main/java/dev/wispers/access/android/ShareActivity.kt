@@ -9,12 +9,31 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.compose.setContent
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import dev.wispers.access.android.proxy.ProxyServer
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
+import dev.wispers.access.android.ui.theme.WispersAccessTheme
 import javax.inject.Inject
 import kotlinx.coroutines.launch
 
@@ -32,7 +51,7 @@ class ShareActivity : ComponentActivity() {
     @Inject lateinit var repo: ShareRepository
     @Inject lateinit var proxyServer: ProxyServer
 
-    private lateinit var webView: WebView
+    private var webView: WebView? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,24 +61,21 @@ class ShareActivity : ComponentActivity() {
             return
         }
 
-        webView = WebView(this).apply {
-            settings.javaScriptEnabled = true
-            settings.domStorageEnabled = true
-            webViewClient = WebViewClient()
-            webChromeClient = WebChromeClient()
-        }
-        setContentView(webView)
-
-        if (savedInstanceState == null) {
-            webView.loadUrl("http://${shareId.value}.localhost:${proxyServer.port}/")
-        } else {
-            webView.restoreState(savedInstanceState)
+        setContent {
+            WispersAccessTheme {
+                ShareWebViewScreen(
+                    url = "http://${shareId.value}.localhost:${proxyServer.port}/",
+                    savedState = savedInstanceState,
+                    onWebViewReady = { webView = it },
+                )
+            }
         }
 
         onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
             override fun handleOnBackPressed() {
-                if (webView.canGoBack()) {
-                    webView.goBack()
+                val wv = webView
+                if (wv != null && wv.canGoBack()) {
+                    wv.goBack()
                 } else {
                     isEnabled = false
                     onBackPressedDispatcher.onBackPressed()
@@ -76,7 +92,7 @@ class ShareActivity : ComponentActivity() {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        webView.saveState(outState)
+        webView?.saveState(outState)
     }
 
     companion object {
@@ -86,6 +102,58 @@ class ShareActivity : ComponentActivity() {
                 addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
             }
             context.startActivity(intent)
+        }
+    }
+}
+
+@Composable
+private fun ShareWebViewScreen(
+    url: String,
+    savedState: Bundle?,
+    onWebViewReady: (WebView) -> Unit,
+) {
+    var loading by remember { mutableStateOf(true) }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        AndroidView(
+            modifier = Modifier.fillMaxSize(),
+            factory = { context ->
+                WebView(context).apply {
+                    settings.javaScriptEnabled = true
+                    settings.domStorageEnabled = true
+                    webChromeClient = WebChromeClient()
+                    webViewClient = object : WebViewClient() {
+                        override fun onPageCommitVisible(view: WebView?, url: String?) {
+                            loading = false
+                        }
+                    }
+                    if (savedState != null) {
+                        restoreState(savedState)
+                    } else {
+                        loadUrl(url)
+                    }
+                    onWebViewReady(this)
+                }
+            },
+        )
+        if (loading) {
+            ConnectingOverlay(modifier = Modifier.fillMaxSize())
+        }
+    }
+}
+
+@Composable
+private fun ConnectingOverlay(modifier: Modifier = Modifier) {
+    Box(
+        modifier = modifier.background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            CircularProgressIndicator()
+            Text("Connecting…", style = MaterialTheme.typography.bodyLarge)
         }
     }
 }

@@ -33,21 +33,15 @@ internal class UpstreamClient(
 ) {
     suspend fun forward(call: ApplicationCall) {
         val request = buildOutboundRequest(call)
-        Log.d(TAG, "→ ${request.method} ${request.target} body=${request.body::class.simpleName}")
         sendRequest(request, call.receiveChannel())
         val reader = StreamReader(stream)
-        val response = try {
-            readResponseHead(reader)
-        } catch (e: Exception) {
-            Log.w(TAG, "← read response head failed: ${e.message}")
-            throw e
-        }
-        Log.d(TAG, "← ${response.status} framing=${response.framing::class.simpleName}")
+        val response = readResponseHead(reader)
+        Log.d(TAG, "${request.method} ${request.target} → ${response.status}")
         respond(call, response, reader)
         // Half-close our send side only after the full response cycle. Calling finish()
-        // immediately after the request head was observed to confuse the upstream's
-        // hyper into reporting an "incomplete message" — hyper's own client doesn't FIN
-        // until the exchange is over, and we match that.
+        // immediately after the request head confuses upstream hyper into reporting an
+        // "incomplete message" — hyper's own client doesn't FIN until the exchange is
+        // over, and we match that.
         runCatching { stream.finish() }
     }
 
@@ -85,9 +79,7 @@ internal class UpstreamClient(
     }
 
     private suspend fun sendRequest(req: OutboundRequest, body: ByteReadChannel) {
-        val headBytes = serializeHead(req).toByteArray(Charsets.ISO_8859_1)
-        Log.d(TAG, "→ head bytes=${headBytes.size} last8=${hexTail(headBytes, 8)}")
-        stream.write(headBytes)
+        stream.write(serializeHead(req).toByteArray(Charsets.ISO_8859_1))
         when (val b = req.body) {
             RequestBody.None -> Unit
             RequestBody.Chunked -> sendChunkedBody(body)
@@ -98,9 +90,6 @@ internal class UpstreamClient(
         // method-without-body; upstream knows the request is complete without
         // needing FIN. We FIN after the response, mirroring hyper's client.
     }
-
-    private fun hexTail(b: ByteArray, n: Int): String =
-        b.takeLast(n).joinToString(" ") { "%02x".format(it) }
 
     private suspend fun sendFixedBody(src: ByteReadChannel, length: Long) {
         val buf = ByteArray(BUFFER_SIZE)
