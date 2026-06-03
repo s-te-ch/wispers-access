@@ -7,4 +7,4 @@ edition = "2024"
 hyper = "1"
 hyper-util = { version = "0.1", features = ["tokio"] }
 tokio = "1"
-wispers-connect = "0.8.2"
+wispers-connect = "0.9.0"
