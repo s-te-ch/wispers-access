@@ -58,17 +58,51 @@ pub struct Row {
 }
 
 impl Row {
-    pub fn write_names(&self, cg_id: &str, display_name: &str, hostname: &str) -> Result<()> {
+    pub fn write_connectivity_group_id(&self, cg_id: &str) -> Result<()> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
         conn.execute(
-            "UPDATE shares SET
-                 connectivity_group_id = ?1,
-                 display_name = ?2,
-                 hostname = ?3
-             WHERE id = ?4",
-            rusqlite::params![cg_id, display_name, hostname, self.id],
+            "UPDATE shares SET connectivity_group_id = ?1 WHERE id = ?2",
+            rusqlite::params![cg_id, self.id],
         )?;
         Ok(())
+    }
+
+    pub fn write_display_name(&self, name: &str) -> Result<()> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        conn.execute(
+            "UPDATE shares SET display_name = ?1 WHERE id = ?2",
+            rusqlite::params![name, self.id],
+        )?;
+        Ok(())
+    }
+
+    pub fn write_deduped_hostname(&self, hostname: &str, cg_id: &str) -> Result<String> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        for n in 1.. {
+            let candidate: String = if n == 1 {
+                hostname.to_owned()
+            } else {
+                format!("{}-{}", hostname, n)
+            };
+            if candidate.len() > 63 {
+                // Max DNS label exceeded.
+                break;
+            }
+            match conn.execute(
+                "UPDATE shares SET hostname = ?1 WHERE id = ?2",
+                rusqlite::params![candidate, self.id],
+            ) {
+                Ok(_) => return Ok(candidate),
+                Err(e) if is_unique_violation(&e) => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        // Normal deduping has failed. Just use the connectivity group ID.
+        conn.execute(
+            "UPDATE shares SET hostname = ?1 WHERE id = ?2",
+            rusqlite::params![cg_id, self.id],
+        )?;
+        Ok(cg_id.to_owned())
     }
 
     pub fn read_names(&self) -> Result<(String, String, String)> {
@@ -94,6 +128,20 @@ impl Row {
         conn.execute("UPDATE shares SET complete = TRUE WHERE id = ?1", [self.id])?;
         Ok(())
     }
+}
+
+fn is_unique_violation(e: &rusqlite::Error) -> bool {
+    use rusqlite::{Error, ErrorCode};
+    matches!(
+        e,
+        Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code: ErrorCode::ConstraintViolation,
+                ..
+            },
+            _
+        )
+    )
 }
 
 impl wc::NodeStateStore for Row {

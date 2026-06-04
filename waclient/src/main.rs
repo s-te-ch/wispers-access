@@ -84,20 +84,22 @@ async fn join(invite_code: &str) -> Result<()> {
     println!("Activating Wispers node...");
     node.activate(activation_code).await?;
 
-    // Determine display name & identifier.
+    // Determine display & host names, deduping the host name if necessary.
     let group_info = node.group_info().await?;
     let cg_id = group_info.id.to_string();
+    row.write_connectivity_group_id(&cg_id)?;
     let display_name = group_info.name.unwrap_or_else(|| cg_id.clone());
+    row.write_display_name(&display_name)?;
     let hostname = host_slug(&display_name).unwrap_or_else(|| cg_id.clone());
-    // TODO: We need to handle duplicate hostnames here.
-    row.write_names(&cg_id, &display_name, &hostname)?;
+    let hostname = row.write_deduped_hostname(&hostname, &cg_id)?;
 
     // Mark the row complete, so it doesn't get cleaned up at next start.
     row.mark_complete()?;
 
     println!(
-        "Joined share '{}'\n  Connectivity group ID: {}\n  Node number: {}\n",
+        "Joined share: {}\n  Hostname: {}\n  Connectivity group: {}\n  Node: {}\n",
         display_name,
+        hostname,
         node.connectivity_group_id().unwrap().to_string(),
         node.node_number().unwrap(),
     );
