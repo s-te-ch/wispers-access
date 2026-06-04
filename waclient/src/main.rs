@@ -1,3 +1,5 @@
+mod storage;
+
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use clap::{Parser, Subcommand};
@@ -9,8 +11,6 @@ use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::fs;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, OnceCell};
@@ -32,8 +32,6 @@ struct Cli {
 enum Command {
     /// Join a Wispers Accept share.
     Join {
-        /// Share name.
-        share: String,
         /// Invite code for the share, produced by waserver.
         invite_code: String,
     },
@@ -63,43 +61,76 @@ fn main() -> Result<()> {
 
 async fn async_main(command: Command) -> Result<()> {
     match command {
-        Command::Join { share, invite_code } => join(&share, &invite_code).await,
+        Command::Join { invite_code } => join(&invite_code).await,
         Command::Serve { port } => serve(port.clone()).await,
     }
 }
 
-async fn join(share: &str, invite_code: &str) -> Result<()> {
+async fn join(invite_code: &str) -> Result<()> {
+    // Parse the invite code.
     let Some((registration_token, activation_code)) = invite_code.split_once('/') else {
         anyhow::bail!("invalid invite code");
     };
-    let storage = get_node_storage(share)?;
-    if let Some(_) = storage.read_registration()? {
-        anyhow::bail!("found existing registration for share {}", share);
-    }
-    let mut node = storage.restore_or_init_node().await?;
+
+    // Create a new DB row.
+    let db = storage::DB::new()?;
+    let row = db.new_row()?;
+
+    // Register & activate the Wispers node.
+    let ns = wc::NodeStorage::new(row.clone());
+    let mut node = ns.restore_or_init_node().await?;
     println!("Registering Wispers node...");
     node.register(registration_token).await?;
     println!("Activating Wispers node...");
     node.activate(activation_code).await?;
+
+    // Determine display name & identifier.
+    let group_info = node.group_info().await?;
+    let cg_id = group_info.id.to_string();
+    let display_name = group_info.name.unwrap_or_else(|| cg_id.clone());
+    let hostname = host_slug(&display_name).unwrap_or_else(|| cg_id.clone());
+    row.write_names(&cg_id, &display_name, &hostname)?;
+
+    // Mark the row complete, so it doesn't get cleaned up at next start.
+    row.mark_complete()?;
+
     println!(
-        "Joined share {}\n  Connectivity group ID: {}\n  Node number: {}\n",
-        share,
+        "Joined share '{}'\n  Connectivity group ID: {}\n  Node number: {}\n",
+        display_name,
         node.connectivity_group_id().unwrap().to_string(),
         node.node_number().unwrap(),
     );
-
     Ok(())
+}
+
+/// Free-form name -> DNS-label-safe slug, or None if nothing usable remains.
+fn host_slug(name: &str) -> Option<String> {
+    // Remove apostrophes, so "Bob's app" becomes "bobs-app", not "bob-s-app".
+    let cleaned = name.replace(['\'', '’'], "");
+    // Slugify, but keep it to 63 chars, to produce a legal DNS label.
+    let mut s = slug::slugify(cleaned);
+    s.truncate(63);
+    // Truncation can leave a trailing '-'.
+    let s = s.trim_end_matches('-');
+    (!s.is_empty()).then(|| s.to_string())
 }
 
 async fn serve(port: u16) -> Result<()> {
     // Start a stream factory for all known shares.
-    let shares = list_shares()?;
+    let db = storage::DB::new()?;
+    let rows = db.get_all_rows()?;
     let mut nodes = Vec::new();
-    for share in &shares {
-        let node = load_node(share).await?;
-        nodes.push((share.clone(), node));
+    let mut hostname_map: HashMap<String, String> = HashMap::new();
+    println!("Available shares:");
+    for row in rows {
+        let (cg_id, _, hostname) = row.read_names()?;
+        println!("  http://{}.localhost:{}", hostname, port);
+        hostname_map.insert(hostname.clone(), cg_id.clone());
+        let ns = wc::NodeStorage::new(row);
+        let node = ns.restore_or_init_node().await?;
+        nodes.push((cg_id, node));
     }
-    let stream_factory = Arc::new(StreamFactory::new(nodes));
+    let stream_factory = Arc::new(StreamFactory::new(nodes, hostname_map));
 
     // Bind to local port.
     let bind_addr = format!("localhost:{}", port);
@@ -108,6 +139,8 @@ async fn serve(port: u16) -> Result<()> {
         .with_context(|| format!("failed to bind to {}", &bind_addr))?;
     println!("Listening on {}", bind_addr);
 
+    // Serve.
+    // TODO: we also need to handle revocation.
     loop {
         match listener.accept().await {
             Ok((tcp_stream, _)) => {
@@ -123,15 +156,6 @@ async fn serve(port: u16) -> Result<()> {
             }
         }
     }
-}
-
-async fn load_node(share: &str) -> Result<wc::Node> {
-    let ns = get_node_storage(share)?;
-    if !ns.read_registration()?.is_some() {
-        anyhow::bail!("Share {} doesn't have a registered node", share);
-    }
-    let node = ns.restore_or_init_node().await?;
-    Ok(node)
 }
 
 async fn handle_connection(
@@ -265,62 +289,42 @@ fn error_response(status: hyper::StatusCode, msg: &str) -> hyper::Response<Boxed
         .expect("static error response is always valid")
 }
 
-fn get_node_storage(share: &str) -> Result<wc::NodeStorage> {
-    let dir = get_storage_dir()?;
-    let dir = dir.join(share);
-    let store = wc::FileNodeStateStore::new(dir);
-    let storage = wc::NodeStorage::new(store);
-    Ok(storage)
-}
-
-fn list_shares() -> Result<Vec<String>> {
-    let dir = get_storage_dir()?;
-    let shares: Vec<String> = if !dir.exists() {
-        Vec::new()
-    } else {
-        fs::read_dir(dir)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect()
-    };
-    Ok(shares)
-}
-
-fn get_storage_dir() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().context("could not determine config directory")?;
-    Ok(config_dir.join("waclient"))
-}
-
 struct StreamFactory {
-    nodes: HashMap<String, wc::Node>,
+    nodes: HashMap<String /* connectivity_group_id */, wc::Node>,
+    hostname_map: HashMap<String /* hostname */, String /* connectivity_group_id */>,
     pool: Mutex<HashMap<String, PoolEntry>>,
 }
 
 impl StreamFactory {
-    fn new(nodes: Vec<(String, wc::Node)>) -> Self {
+    fn new(nodes: Vec<(String, wc::Node)>, hostname_map: HashMap<String, String>) -> Self {
         Self {
             nodes: nodes.into_iter().collect(),
+            hostname_map,
             pool: Mutex::new(HashMap::new()),
         }
     }
 
-    async fn open_stream(&self, share: &str) -> Result<wc::QuicStream> {
-        let Some(node) = self.nodes.get(share) else {
-            anyhow::bail!("Unknown share {}", share);
+    async fn open_stream(&self, host: &str) -> Result<wc::QuicStream> {
+        let mut cg_id = host;
+        if let Some(mapped) = self.hostname_map.get(host) {
+            cg_id = mapped;
+        }
+        let Some(node) = self.nodes.get(cg_id) else {
+            anyhow::bail!("Unknown host {}", host);
         };
         // Open a stream with a single retry. This covers the case when the
         // connection has died and needed reestablishing.
-        match self.try_open_stream(share, &node).await {
+        match self.try_open_stream(cg_id, &node).await {
             Ok(s) => Ok(s),
-            Err(_) => self.try_open_stream(share, &node).await,
+            Err(_) => self.try_open_stream(cg_id, &node).await,
         }
     }
 
-    async fn try_open_stream(&self, share: &str, node: &wc::Node) -> Result<wc::QuicStream> {
+    async fn try_open_stream(&self, cg_id: &str, node: &wc::Node) -> Result<wc::QuicStream> {
         // Get the cell under lock.
         let cell = {
             let mut pool = self.pool.lock().await;
-            let pool_entry = pool.entry(share.to_owned()).or_insert_with(|| PoolEntry {
+            let pool_entry = pool.entry(cg_id.to_owned()).or_insert_with(|| PoolEntry {
                 cell: Arc::new(OnceCell::new()),
             });
             pool_entry.cell.clone()
@@ -337,10 +341,10 @@ impl StreamFactory {
             Ok(stream) => Ok(stream),
             Err(e) => {
                 let mut pool = self.pool.lock().await;
-                if let Some(entry) = pool.get(share)
+                if let Some(entry) = pool.get(cg_id)
                     && Arc::ptr_eq(&entry.cell, &cell)
                 {
-                    pool.remove(share);
+                    pool.remove(cg_id);
                 }
                 Err(e.into())
             }
