@@ -95,6 +95,8 @@ async fn join(invite_code: &str) -> Result<()> {
 
     // Mark the row complete, so it doesn't get cleaned up at next start.
     row.mark_complete()?;
+    // TODO: There's a problem here: if activation works but something fails
+    // afterwards, we should revoke the node and not just kill the registration.
 
     println!(
         "Joined share: {}\n  Hostname: {}\n  Connectivity group: {}\n  Node: {}\n",
