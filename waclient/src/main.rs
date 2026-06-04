@@ -89,6 +89,7 @@ async fn join(invite_code: &str) -> Result<()> {
     let cg_id = group_info.id.to_string();
     let display_name = group_info.name.unwrap_or_else(|| cg_id.clone());
     let hostname = host_slug(&display_name).unwrap_or_else(|| cg_id.clone());
+    // TODO: We need to handle duplicate hostnames here.
     row.write_names(&cg_id, &display_name, &hostname)?;
 
     // Mark the row complete, so it doesn't get cleaned up at next start.
