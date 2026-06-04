@@ -46,10 +46,10 @@ impl Client {
         }
     }
 
-    pub async fn add_connectivity_group(&self, share: &str) -> Result<ConnectivityGroupId> {
+    pub async fn add_connectivity_group(&self, name: &str) -> Result<ConnectivityGroupId> {
         let url = format!("{BASE_URL}/connectivity-groups");
         let mut body = HashMap::new();
-        body.insert("name", format!("Wispers Access share '{}'", share));
+        body.insert("name", name);
         let res = self
             .client
             .post(&url)

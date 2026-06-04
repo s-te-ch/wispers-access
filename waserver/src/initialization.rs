@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use wispers_connect;
 
 /// Initialise a new app share.
-pub async fn up(api_key: &str, share: &str) -> Result<()> {
+pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
     // Check for valid name & non-existence.
     if !is_valid_share_name(share) {
         anyhow::bail!("Invalid share name '{}'", share);
@@ -18,7 +18,7 @@ pub async fn up(api_key: &str, share: &str) -> Result<()> {
 
     // Create a Wispers connectivity group for the app share.
     let wcbe_client = wcbe::Client::new(api_key);
-    let cg_id = wcbe_client.add_connectivity_group(share).await?;
+    let cg_id = wcbe_client.add_connectivity_group(display_name).await?;
 
     // Write the ShareConfig.
     let cfg = storage::ShareConfig::new(&api_key, &cg_id);

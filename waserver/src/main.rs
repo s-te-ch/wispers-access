@@ -26,6 +26,8 @@ enum Command {
         api_key: String,
         /// Name of the application share.
         share: String,
+        /// Display name of the application share.
+        display_name: String,
     },
     /// De-initialise an existing application share.
     Deinit {
@@ -119,7 +121,11 @@ fn main() -> Result<()> {
 
 async fn async_main(command: Command) -> Result<()> {
     match command {
-        Command::Init { share, api_key } => initialization::up(&api_key, &share).await,
+        Command::Init {
+            api_key,
+            share,
+            display_name,
+        } => initialization::up(&api_key, &share, &display_name).await,
         Command::Deinit { share } => initialization::down(&share).await,
         Command::Serve { share, local_port } => {
             let _log = logging::init_foreground(&share)?;
