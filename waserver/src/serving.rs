@@ -86,7 +86,7 @@ pub async fn serve(share: &str, port: u16) -> Result<()> {
         anyhow::bail!("Share {} is not initialised", share);
     };
     let node_storage = wc::NodeStorage::new(store);
-    let node = node_storage.restore_or_init_node().await?;
+    let node = Arc::new(node_storage.restore_or_init_node().await?);
     if !node.is_registered() {
         anyhow::bail!("Wispers Connect node is not registered");
     }
@@ -118,7 +118,7 @@ pub async fn serve(share: &str, port: u16) -> Result<()> {
         tokio::select! {
             // Incoming QUIC connection.
             Some(result) = incoming.quic.recv() => {
-                tokio::spawn(handle_quic_conn(result, port));
+                tokio::spawn(handle_quic_conn(result, port, node.clone()));
             },
             // Session end.
             result = &mut session_task => break handle_session_end(result),
@@ -126,7 +126,11 @@ pub async fn serve(share: &str, port: u16) -> Result<()> {
     }
 }
 
-async fn handle_quic_conn(r: Result<wc::QuicConnection, wc::P2pError>, port: u16) {
+async fn handle_quic_conn(
+    r: Result<wc::QuicConnection, wc::P2pError>,
+    port: u16,
+    node: Arc<wc::Node>,
+) {
     let conn = match r {
         Ok(c) => c,
         Err(e) => {
@@ -137,11 +141,19 @@ async fn handle_quic_conn(r: Result<wc::QuicConnection, wc::P2pError>, port: u16
     let peer = conn.peer_node_number;
     info!(peer, "QUIC connection accepted");
 
+    // Resolve the peer's identity once per connection.
+    let user_id = resolve_identity(&node, peer).await;
+    match &user_id {
+        Some(uid) => info!(peer, user_id = %uid, "resolved peer identity"),
+        None => warn!(peer, "no identity resolved; forwarding without identity header"),
+    }
+
     loop {
         match conn.accept_stream().await {
             Ok(stream) => {
+                let user_id = user_id.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = http::handle_quic_stream(stream, port).await {
+                    if let Err(e) = http::handle_quic_stream(stream, port, user_id).await {
                         error!(error = format!("{:#}", e), "QUIC stream handler error");
                     }
                 });
@@ -152,6 +164,20 @@ async fn handle_quic_conn(r: Result<wc::QuicConnection, wc::P2pError>, port: u16
             }
         }
     }
+}
+
+/// Best-effort lookup of the peer's `user_id` from its node metadata, via the hub.
+async fn resolve_identity(node: &wc::Node, peer: i32) -> Option<String> {
+    let group = match node.group_info().await {
+        Ok(g) => g,
+        Err(e) => {
+            warn!(peer, error = %e, "could not fetch group info for identity");
+            return None;
+        }
+    };
+    let info = group.nodes.iter().find(|n| n.node_number == peer)?;
+    let metadata: wcbe::NodeMetadata = serde_json::from_str(&info.metadata).ok()?;
+    Some(metadata.user_id).filter(|s| !s.is_empty())
 }
 
 fn handle_session_end(
