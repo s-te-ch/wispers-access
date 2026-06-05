@@ -92,7 +92,10 @@ class ShareActivity : ComponentActivity() {
         lifecycleScope.launch {
             val nickname = repo.getShare(shareId)?.nickname?.ifBlank { null }
             val label = nickname ?: getString(R.string.app_name)
-            setTaskDescription(ActivityManager.TaskDescription.Builder().setLabel(label).build())
+            // TaskDescription.Builder is API 33+, but minSdk is 28 — use the older
+            // (deprecated) String constructor, which is valid back to API 21.
+            @Suppress("DEPRECATION")
+            setTaskDescription(ActivityManager.TaskDescription(label))
         }
     }
 
