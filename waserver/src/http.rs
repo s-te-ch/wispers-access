@@ -19,9 +19,11 @@ type BoxedBody = BoxBody<Bytes, std::io::Error>;
 pub async fn handle_quic_stream(
     stream: wispers_connect::QuicStream,
     local_port: u16,
+    user_id: Option<String>,
 ) -> Result<()> {
     let io = quic_stream_io::wrap(stream);
-    let service = hyper::service::service_fn(move |req| forward(req, local_port));
+    let service =
+        hyper::service::service_fn(move |req| forward(req, local_port, user_id.clone()));
     http1_server::Builder::new()
         .serve_connection(io, service)
         .await
@@ -33,8 +35,9 @@ pub async fn handle_quic_stream(
 async fn forward(
     req: hyper::Request<Incoming>,
     local_port: u16,
+    user_id: Option<String>,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
-    match try_forward(req, local_port).await {
+    match try_forward(req, local_port, user_id).await {
         Ok(resp) => Ok(resp),
         Err(e) => {
             warn!(error = format!("{:#}", e), "forward error");
@@ -49,6 +52,7 @@ async fn forward(
 async fn try_forward(
     req: hyper::Request<Incoming>,
     local_port: u16,
+    user_id: Option<String>,
 ) -> Result<hyper::Response<BoxedBody>> {
     // Open upstream on the localhost.
     let upstream = TcpStream::connect(("127.0.0.1", local_port))
@@ -68,7 +72,7 @@ async fn try_forward(
     // Rewrite the request before forwarding.
     let (mut parts, body) = req.into_parts();
     strip_hop_by_hop(&mut parts.headers);
-    // TODO: X-Forwarded-For / X-Forwarded-Proto based on the peer node identity.
+    inject_identity(&mut parts.headers, user_id.as_deref());
     let forwarded = hyper::Request::from_parts(parts, body);
 
     let upstream_resp = sender
@@ -83,6 +87,24 @@ async fn try_forward(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
         .boxed();
     Ok(hyper::Response::from_parts(parts, body))
+}
+
+/// Authoritative identity header injected on every forwarded request, naming the
+/// guest behind the connection.
+const IDENTITY_HEADER: &str = "x-wispers-access-user";
+
+/// Set the identity header from the resolved peer identity. Always strips any
+/// incoming value first.
+fn inject_identity(headers: &mut hyper::HeaderMap, user_id: Option<&str>) {
+    headers.remove(IDENTITY_HEADER);
+    if let Some(user_id) = user_id {
+        match hyper::header::HeaderValue::from_str(user_id) {
+            Ok(value) => {
+                headers.insert(IDENTITY_HEADER, value);
+            }
+            Err(_) => warn!(%user_id, "user_id is not a valid header value; omitting identity"),
+        }
+    }
 }
 
 /// Remove HTTP/1 hop-by-hop headers (RFC 7230 §6.1). `Transfer-Encoding` is
