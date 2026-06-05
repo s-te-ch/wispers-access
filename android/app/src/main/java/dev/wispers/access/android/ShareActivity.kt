@@ -29,7 +29,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
-import androidx.core.graphics.drawable.IconCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
@@ -121,12 +120,13 @@ class ShareActivity : ComponentActivity() {
  * Requests that the launcher pin a home-screen shortcut that opens [shareId].
  * Returns false if the current launcher doesn't support pinning shortcuts.
  */
-fun addToHomescreen(context: Context, shareId: ShareId, label: String): Boolean {
+fun addToHomescreen(context: Context, shareId: ShareId, nickname: String): Boolean {
     if (!ShortcutManagerCompat.isRequestPinShortcutSupported(context)) return false
+    val label = nickname.ifBlank { "Untitled share" }
     val shortcut = ShortcutInfoCompat.Builder(context, "share-${shareId.value}")
         .setShortLabel(label)
         .setLongLabel(label)
-        .setIcon(IconCompat.createWithResource(context, R.mipmap.ic_launcher))
+        .setIcon(shareIcon(context, nickname))
         .setIntent(ShareActivity.intentFor(context, shareId))
         .build()
     return ShortcutManagerCompat.requestPinShortcut(context, shortcut, null)
