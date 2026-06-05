@@ -117,8 +117,7 @@ fun ShareDetailScreen(
                 contentPadding = innerPadding,
                 onOpen = { onOpenShare(current.id) },
                 onAddToHomescreen = {
-                    val label = current.nickname.ifBlank { "Untitled share" }
-                    if (!addToHomescreen(context, current.id, label)) {
+                    if (!addToHomescreen(context, current.id, current.nickname)) {
                         Toast.makeText(
                             context,
                             "Your launcher doesn't support adding shortcuts",
@@ -171,6 +170,7 @@ private fun ShareDetailContent(
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
         StatusRow(online = false)
+        ShareAvatar(nickname = share.nickname, size = 64.dp)
         Text(
             text = share.nickname.ifBlank { "Untitled share" },
             style = MaterialTheme.typography.headlineLarge,
