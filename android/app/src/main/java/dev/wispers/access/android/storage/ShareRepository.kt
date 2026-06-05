@@ -52,6 +52,15 @@ class ShareRepository @Inject internal constructor(
             dao.setLastConnectedAt(id.value, at.toEpochMilli())
         }
 
+    /** Ladder rung of the currently-cached icon (0 if none). */
+    suspend fun currentIconRank(id: ShareId): Int = withContext(Dispatchers.IO) {
+        dao.getIconRank(id.value) ?: 0
+    }
+
+    suspend fun updateIcon(id: ShareId, png: ByteArray, rank: Int) = withContext(Dispatchers.IO) {
+        dao.setIcon(id.value, png, rank)
+    }
+
     suspend fun deleteShare(id: ShareId) = withContext(Dispatchers.IO) {
         dao.delete(id.value)
     }
@@ -71,4 +80,5 @@ private fun ShareInfoRow.toShare(): Share = Share(
     nickname = nickname,
     createdAt = Instant.ofEpochMilli(createdAt),
     lastConnectedAt = lastConnectedAt?.let(Instant::ofEpochMilli),
+    iconPng = iconPng,
 )

@@ -9,16 +9,22 @@ import kotlinx.coroutines.flow.Flow
 internal interface ShareDao {
 
     @Query(
-        "SELECT id, nickname, createdAt, lastConnectedAt FROM shares " +
+        "SELECT id, nickname, createdAt, lastConnectedAt, iconPng FROM shares " +
             "ORDER BY lastConnectedAt DESC, createdAt DESC"
     )
     fun observeShareInfos(): Flow<List<ShareInfoRow>>
 
-    @Query("SELECT id, nickname, createdAt, lastConnectedAt FROM shares WHERE id = :id")
+    @Query("SELECT id, nickname, createdAt, lastConnectedAt, iconPng FROM shares WHERE id = :id")
     fun getShareInfo(id: String): ShareInfoRow?
 
-    @Query("SELECT id, nickname, createdAt, lastConnectedAt FROM shares WHERE id = :id")
+    @Query("SELECT id, nickname, createdAt, lastConnectedAt, iconPng FROM shares WHERE id = :id")
     fun observeShareInfo(id: String): Flow<ShareInfoRow?>
+
+    @Query("SELECT iconRank FROM shares WHERE id = :id")
+    fun getIconRank(id: String): Int?
+
+    @Query("UPDATE shares SET iconPng = :png, iconRank = :rank WHERE id = :id")
+    fun setIcon(id: String, png: ByteArray, rank: Int)
 
     @Insert
     fun insert(entity: ShareEntity)

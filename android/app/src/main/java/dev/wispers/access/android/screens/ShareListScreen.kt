@@ -170,7 +170,7 @@ private fun ShareCard(share: Share, onClick: () -> Unit) {
                 .padding(horizontal = 20.dp, vertical = 16.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ShareAvatar(nickname = share.nickname)
+            ShareAvatar(nickname = share.nickname, iconPng = share.iconPng)
             Spacer(Modifier.width(16.dp))
             Column(modifier = Modifier.weight(1f)) {
                 Row(
