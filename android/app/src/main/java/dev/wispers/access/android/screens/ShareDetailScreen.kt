@@ -1,5 +1,6 @@
 package dev.wispers.access.android.screens
 
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -34,12 +35,14 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.wispers.access.android.addToHomescreen
 import dev.wispers.access.android.storage.Share
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
@@ -89,6 +92,7 @@ fun ShareDetailScreen(
     val share by viewModel.share.collectAsState()
     val removed by viewModel.removed.collectAsState()
     var confirmRemove by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     LaunchedEffect(removed) {
         if (removed) onBack()
@@ -112,7 +116,16 @@ fun ShareDetailScreen(
                 share = current,
                 contentPadding = innerPadding,
                 onOpen = { onOpenShare(current.id) },
-                onAddToHomescreen = { /* TODO: PWA install / shortcut */ },
+                onAddToHomescreen = {
+                    val label = current.nickname.ifBlank { "Untitled share" }
+                    if (!addToHomescreen(context, current.id, label)) {
+                        Toast.makeText(
+                            context,
+                            "Your launcher doesn't support adding shortcuts",
+                            Toast.LENGTH_SHORT,
+                        ).show()
+                    }
+                },
                 onRemove = { confirmRemove = true },
             )
         }

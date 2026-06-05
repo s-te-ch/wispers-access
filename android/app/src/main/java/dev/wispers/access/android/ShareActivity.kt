@@ -27,6 +27,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.pm.ShortcutInfoCompat
+import androidx.core.content.pm.ShortcutManagerCompat
+import androidx.core.graphics.drawable.IconCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
@@ -97,13 +100,36 @@ class ShareActivity : ComponentActivity() {
 
     companion object {
         fun launch(context: Context, shareId: ShareId) {
-            val intent = Intent(context, ShareActivity::class.java).apply {
+            context.startActivity(intentFor(context, shareId))
+        }
+
+        /**
+         * Intent that opens [shareId]'s WebView. The unique data URI doubles as the
+         * per-share Recents task key (see `documentLaunchMode="intoExisting"`); the
+         * ACTION_VIEW is required because pinned-shortcut intents must carry an action.
+         */
+        fun intentFor(context: Context, shareId: ShareId): Intent =
+            Intent(context, ShareActivity::class.java).apply {
+                action = Intent.ACTION_VIEW
                 data = "wispers-access://share/${shareId.value}".toUri()
                 addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
             }
-            context.startActivity(intent)
-        }
     }
+}
+
+/**
+ * Requests that the launcher pin a home-screen shortcut that opens [shareId].
+ * Returns false if the current launcher doesn't support pinning shortcuts.
+ */
+fun addToHomescreen(context: Context, shareId: ShareId, label: String): Boolean {
+    if (!ShortcutManagerCompat.isRequestPinShortcutSupported(context)) return false
+    val shortcut = ShortcutInfoCompat.Builder(context, "share-${shareId.value}")
+        .setShortLabel(label)
+        .setLongLabel(label)
+        .setIcon(IconCompat.createWithResource(context, R.mipmap.ic_launcher))
+        .setIntent(ShareActivity.intentFor(context, shareId))
+        .build()
+    return ShortcutManagerCompat.requestPinShortcut(context, shortcut, null)
 }
 
 @Composable
