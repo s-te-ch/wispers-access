@@ -4,6 +4,8 @@ import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
 import android.os.Bundle
+import android.util.Base64
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -38,6 +40,7 @@ import dev.wispers.access.android.storage.ShareRepository
 import dev.wispers.access.android.ui.theme.WispersAccessTheme
 import javax.inject.Inject
 import kotlinx.coroutines.launch
+import org.json.JSONObject
 
 /**
  * Hosts a single WebView pointed at the local proxy for one share.
@@ -69,6 +72,7 @@ class ShareActivity : ComponentActivity() {
                     url = "http://${shareId.value}.localhost:${proxyServer.port}/",
                     savedState = savedInstanceState,
                     onWebViewReady = { webView = it },
+                    onIconJson = { json -> handleHarvestedIcon(shareId, json) },
                 )
             }
         }
@@ -97,6 +101,25 @@ class ShareActivity : ComponentActivity() {
         webView?.saveState(outState)
     }
 
+    /**
+     * Receives an icon-harvest result from the page (via [IconBridge]). Stores the
+     * icon only if it out-ranks what's cached, then refreshes any pinned shortcut in
+     * place. Best-effort — a failure just leaves the existing icon untouched.
+     */
+    private fun handleHarvestedIcon(shareId: ShareId, json: String) {
+        lifecycleScope.launch {
+            val obj = runCatching { JSONObject(json) }.getOrNull() ?: return@launch
+            val rank = obj.optInt("rank", 0)
+            val dataUrl = obj.optString("dataUrl", "")
+            if (rank <= 0 || dataUrl.isEmpty()) return@launch
+            if (rank <= repo.currentIconRank(shareId)) return@launch
+            val bytes = decodeDataUrl(dataUrl) ?: return@launch
+            repo.updateIcon(shareId, bytes, rank)
+            val nickname = repo.getShare(shareId)?.nickname.orEmpty()
+            refreshShortcut(this@ShareActivity, shareId, nickname, bytes)
+        }
+    }
+
     companion object {
         fun launch(context: Context, shareId: ShareId) {
             context.startActivity(intentFor(context, shareId))
@@ -116,27 +139,120 @@ class ShareActivity : ComponentActivity() {
     }
 }
 
+private fun buildShortcut(
+    context: Context,
+    shareId: ShareId,
+    nickname: String,
+    iconPng: ByteArray?,
+): ShortcutInfoCompat {
+    val label = nickname.ifBlank { "Untitled share" }
+    return ShortcutInfoCompat.Builder(context, "share-${shareId.value}")
+        .setShortLabel(label)
+        .setLongLabel(label)
+        .setIcon(shareIcon(context, nickname, iconPng))
+        .setIntent(ShareActivity.intentFor(context, shareId))
+        .build()
+}
+
 /**
  * Requests that the launcher pin a home-screen shortcut that opens [shareId].
  * Returns false if the current launcher doesn't support pinning shortcuts.
  */
-fun addToHomescreen(context: Context, shareId: ShareId, nickname: String): Boolean {
+fun addToHomescreen(
+    context: Context,
+    shareId: ShareId,
+    nickname: String,
+    iconPng: ByteArray?,
+): Boolean {
     if (!ShortcutManagerCompat.isRequestPinShortcutSupported(context)) return false
-    val label = nickname.ifBlank { "Untitled share" }
-    val shortcut = ShortcutInfoCompat.Builder(context, "share-${shareId.value}")
-        .setShortLabel(label)
-        .setLongLabel(label)
-        .setIcon(shareIcon(context, nickname))
-        .setIntent(ShareActivity.intentFor(context, shareId))
-        .build()
-    return ShortcutManagerCompat.requestPinShortcut(context, shortcut, null)
+    return ShortcutManagerCompat.requestPinShortcut(
+        context,
+        buildShortcut(context, shareId, nickname, iconPng),
+        null,
+    )
 }
+
+/**
+ * Updates an already-pinned shortcut's icon/label in place. A no-op unless a
+ * pinned or dynamic shortcut with this id exists, so it's safe to call always.
+ */
+fun refreshShortcut(context: Context, shareId: ShareId, nickname: String, iconPng: ByteArray?) {
+    ShortcutManagerCompat.updateShortcuts(
+        context,
+        listOf(buildShortcut(context, shareId, nickname, iconPng)),
+    )
+}
+
+/** Decodes a `data:` URL's base64 payload, or null if malformed. */
+private fun decodeDataUrl(dataUrl: String): ByteArray? {
+    val comma = dataUrl.indexOf(',')
+    if (comma < 0) return null
+    return runCatching { Base64.decode(dataUrl.substring(comma + 1), Base64.DEFAULT) }.getOrNull()
+}
+
+/** Bridge the page's JS uses to hand a harvested icon (JSON `{rank, dataUrl}`) to native code. */
+private class IconBridge(private val onJson: (String) -> Unit) {
+    @JavascriptInterface
+    fun onIcon(json: String) = onJson(json)
+}
+
+/**
+ * Same-origin JS that picks the best available site icon — manifest maskable (4) >
+ * manifest (3) > apple-touch-icon (2) > favicon (1) — fetches it (with credentials,
+ * so the proxy's identity header and any cookies apply and auth-gated icons
+ * resolve), and hands it back as a data URL via [IconBridge]. It runs on every
+ * page-finish; native discards anything that doesn't out-rank the cached icon.
+ */
+private const val HARVEST_JS = """
+(function () {
+  function abs(u) { try { return new URL(u, location.href).href; } catch (e) { return null; } }
+  function done(rank, dataUrl) {
+    try { WAIcon.onIcon(JSON.stringify({ rank: rank, dataUrl: dataUrl || '' })); } catch (e) {}
+  }
+  async function run() {
+    var best = null;
+    var ml = document.querySelector('link[rel~="manifest"]');
+    if (ml && ml.href) {
+      try {
+        var m = await (await fetch(ml.href, { credentials: 'include' })).json();
+        (m.icons || []).forEach(function (ic) {
+          var sizes = String(ic.sizes || '').split(/\s+/).map(function (s) { return parseInt(s) || 0; });
+          var size = Math.max.apply(null, [0].concat(sizes));
+          var rank = String(ic.purpose || '').indexOf('maskable') >= 0 ? 4 : 3;
+          if (!best || rank > best.rank || (rank === best.rank && size > best.size)) {
+            best = { rank: rank, size: size, url: abs(ic.src) };
+          }
+        });
+      } catch (e) {}
+    }
+    if (!best || best.rank < 2) {
+      var at = document.querySelector('link[rel~="apple-touch-icon"], link[rel~="apple-touch-icon-precomposed"]');
+      if (at && at.href) best = { rank: 2, size: 0, url: abs(at.href) };
+    }
+    if (!best) {
+      var fav = document.querySelector('link[rel~="icon"]');
+      var url = fav && fav.href ? abs(fav.href) : abs('/favicon.ico');
+      if (url) best = { rank: 1, size: 0, url: url };
+    }
+    if (!best || !best.url) { done(0); return; }
+    try {
+      var blob = await (await fetch(best.url, { credentials: 'include' })).blob();
+      var reader = new FileReader();
+      reader.onloadend = function () { done(best.rank, reader.result); };
+      reader.onerror = function () { done(0); };
+      reader.readAsDataURL(blob);
+    } catch (e) { done(0); }
+  }
+  run();
+})();
+"""
 
 @Composable
 private fun ShareWebViewScreen(
     url: String,
     savedState: Bundle?,
     onWebViewReady: (WebView) -> Unit,
+    onIconJson: (String) -> Unit,
 ) {
     var loading by remember { mutableStateOf(true) }
 
@@ -147,10 +263,15 @@ private fun ShareWebViewScreen(
                 WebView(context).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
+                    addJavascriptInterface(IconBridge(onIconJson), "WAIcon")
                     webChromeClient = WebChromeClient()
                     webViewClient = object : WebViewClient() {
                         override fun onPageCommitVisible(view: WebView?, url: String?) {
                             loading = false
+                        }
+
+                        override fun onPageFinished(view: WebView?, url: String?) {
+                            view?.evaluateJavascript(HARVEST_JS, null)
                         }
                     }
                     if (savedState != null) {

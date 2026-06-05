@@ -11,16 +11,23 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
-import dev.wispers.access.android.shareLetterTile
+import dev.wispers.access.android.shareBitmap
 
 /**
- * The share's icon as a rounded tile. Currently always the generated sage letter
- * tile; Phase 2 will swap in a cached site icon when one has been discovered.
+ * The share's icon as a rounded tile: the harvested site icon when one has been
+ * cached, otherwise the generated sage letter tile.
  */
 @Composable
-fun ShareAvatar(nickname: String, modifier: Modifier = Modifier, size: Dp = 48.dp) {
+fun ShareAvatar(
+    nickname: String,
+    iconPng: ByteArray?,
+    modifier: Modifier = Modifier,
+    size: Dp = 48.dp,
+) {
     val context = LocalContext.current
-    val bitmap = remember(nickname) { shareLetterTile(context, nickname).asImageBitmap() }
+    val bitmap = remember(nickname, iconPng?.contentHashCode()) {
+        shareBitmap(context, nickname, iconPng).asImageBitmap()
+    }
     Image(
         bitmap = bitmap,
         contentDescription = null,

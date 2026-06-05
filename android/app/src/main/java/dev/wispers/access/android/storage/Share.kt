@@ -10,4 +10,5 @@ data class Share(
     val nickname: String,
     val createdAt: Instant,
     val lastConnectedAt: Instant?,
+    val iconPng: ByteArray?,
 )

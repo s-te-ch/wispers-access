@@ -4,23 +4,34 @@ import android.content.Context
 import androidx.room.Database
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
-@Database(entities = [ShareEntity::class], version = 1, exportSchema = true)
+@Database(entities = [ShareEntity::class], version = 2, exportSchema = true)
 internal abstract class ShareDatabase : RoomDatabase() {
 
     abstract fun shareDao(): ShareDao
 
     companion object {
+        // v2: cached site icon. NOT destructive — the table holds the node keys,
+        // so wiping it would un-join every share.
+        private val MIGRATION_1_2 = object : Migration(1, 2) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE shares ADD COLUMN iconPng BLOB")
+                db.execSQL("ALTER TABLE shares ADD COLUMN iconRank INTEGER NOT NULL DEFAULT 0")
+            }
+        }
+
         fun create(context: Context, passphrase: ByteArray): ShareDatabase {
             System.loadLibrary("sqlcipher")
-            var builder = Room.databaseBuilder(
+            return Room.databaseBuilder(
                 context.applicationContext,
                 ShareDatabase::class.java,
                 "shares.db",
             )
-            return builder
                 .openHelperFactory(SupportOpenHelperFactory(passphrase))
+                .addMigrations(MIGRATION_1_2)
                 .build()
         }
     }

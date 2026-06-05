@@ -2,6 +2,7 @@ package dev.wispers.access.android
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Typeface
@@ -39,9 +40,23 @@ fun shareLetterTile(context: Context, nickname: String): Bitmap {
     return bitmap
 }
 
+/** Decodes the cached PNG, or null if absent / undecodable. */
+private fun decodeCached(iconPng: ByteArray?): Bitmap? =
+    iconPng?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
+
+/** The share's display bitmap: the harvested site icon if cached, else the letter tile. */
+fun shareBitmap(context: Context, nickname: String, iconPng: ByteArray?): Bitmap =
+    decodeCached(iconPng) ?: shareLetterTile(context, nickname)
+
 /**
- * Adaptive home-screen-shortcut icon for a share. Phase 2 will prefer an icon
- * harvested from the site (manifest/favicon) and fall back to this tile.
+ * Home-screen-shortcut icon for a share. A harvested site icon is used as a
+ * legacy (standalone) icon; the generated tile is full-bleed adaptive.
  */
-fun shareIcon(context: Context, nickname: String): IconCompat =
-    IconCompat.createWithAdaptiveBitmap(shareLetterTile(context, nickname))
+fun shareIcon(context: Context, nickname: String, iconPng: ByteArray?): IconCompat {
+    val cached = decodeCached(iconPng)
+    return if (cached != null) {
+        IconCompat.createWithBitmap(cached)
+    } else {
+        IconCompat.createWithAdaptiveBitmap(shareLetterTile(context, nickname))
+    }
+}
