@@ -116,6 +116,14 @@ class AddShareViewModel @Inject constructor(
             repo.markConnected(id)
             completeStep(JoinStep.ACTIVATING)
 
+            // Adopt the connectivity group's display name as the share's label, but make it
+            // best-effort. The share is already joined and usable at this point, so a failure
+            // fetching group info must not fail the join.
+            runCatching { node.groupInfo().name }
+                .getOrNull()
+                ?.takeIf { it.isNotBlank() }
+                ?.let { repo.setNickname(id, it) }
+
             val nickname = repo.getShare(id)?.nickname.orEmpty()
             _state.update { it.copy(phase = Phase.Joined(shareId = id, nickname = nickname)) }
         } catch (e: CancellationException) {
