@@ -9,7 +9,7 @@ use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use tokio::net::TcpStream;
-use tracing::warn;
+use tracing::{info, warn};
 
 /// Body type used in responses we send back to the peer. Boxed so we can return
 /// either the upstream's streamed body or a locally-generated error body.
@@ -73,12 +73,17 @@ async fn try_forward(
     let (mut parts, body) = req.into_parts();
     strip_hop_by_hop(&mut parts.headers);
     inject_identity(&mut parts.headers, user_id.as_deref());
+    // "forwarding" appearing means the request was fully received from the peer
+    // over its QUIC stream and is now going to the local app.
+    let uri_for_log = parts.uri.clone();
+    info!(method = %parts.method, uri = %parts.uri, "forwarding to upstream");
     let forwarded = hyper::Request::from_parts(parts, body);
 
     let upstream_resp = sender
         .send_request(forwarded)
         .await
         .context("upstream send_request")?;
+    info!(status = %upstream_resp.status(), uri = %uri_for_log, "upstream responded");
 
     // Rewrite the response on the way back.
     let (mut parts, body) = upstream_resp.into_parts();

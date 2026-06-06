@@ -191,19 +191,26 @@ async fn forward(
     };
 
     // ... and open a stream to it.
-    let Ok(fwd_stream) = stream_factory.open_stream(&share).await else {
-        return Ok(error_response(
-            StatusCode::BAD_GATEWAY,
-            "Wispers Access server unavailable",
-        ));
+    let fwd_stream = match stream_factory.open_stream(&share).await {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[{}] open_stream failed: {:#}", share, e);
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                "Wispers Access server unavailable",
+            ));
+        }
     };
     let fwd_io = quic_stream_io::wrap(fwd_stream);
-    let handshake = http1_client::handshake(fwd_io).await;
-    let Ok((mut sender, conn)) = handshake else {
-        return Ok(error_response(
-            StatusCode::BAD_GATEWAY,
-            "Wispers Access server unavailable",
-        ));
+    let (mut sender, conn) = match http1_client::handshake(fwd_io).await {
+        Ok(hs) => hs,
+        Err(e) => {
+            eprintln!("[{}] client handshake failed: {:#}", share, e);
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                "Wispers Access server unavailable",
+            ));
+        }
     };
     tokio::spawn(async move {
         if let Err(e) = conn.await {
@@ -217,15 +224,15 @@ async fn forward(
     let rewritten = hyper::Request::from_parts(parts, body);
 
     // Forward to upstream and get response.
-    let resp = sender
-        .send_request(rewritten)
-        .await
-        .context("upstream send_request");
-    let Ok(resp) = resp else {
-        return Ok(error_response(
-            StatusCode::BAD_GATEWAY,
-            "Wispers Access server unavailable",
-        ));
+    let resp = match sender.send_request(rewritten).await {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[{}] send_request failed: {:#}", share, e);
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                "Wispers Access server unavailable",
+            ));
+        }
     };
 
     // Rewrite the response on the way back.
@@ -321,7 +328,10 @@ impl StreamFactory {
         // connection has died and needed reestablishing.
         match self.try_open_stream(cg_id, &node).await {
             Ok(s) => Ok(s),
-            Err(_) => self.try_open_stream(cg_id, &node).await,
+            Err(e) => {
+                eprintln!("[{}] open_stream attempt 1 failed, retrying once: {:#}", cg_id, e);
+                self.try_open_stream(cg_id, &node).await
+            }
         }
     }
 
@@ -336,7 +346,10 @@ impl StreamFactory {
         };
         // Get or establish the connection.
         let conn = cell
-            .get_or_try_init(|| async { node.connect_quic(1).await.map(Arc::new) })
+            .get_or_try_init(|| async {
+                eprintln!("[{}] establishing QUIC connection", cg_id);
+                node.connect_quic(1).await.map(Arc::new)
+            })
             .await?
             .clone();
         // Open a stream. If this fails, the underlying connection has broken
@@ -345,6 +358,7 @@ impl StreamFactory {
         match conn.open_stream().await {
             Ok(stream) => Ok(stream),
             Err(e) => {
+                eprintln!("[{}] conn.open_stream failed, evicting connection: {:#}", cg_id, e);
                 let mut pool = self.pool.lock().await;
                 if let Some(entry) = pool.get(cg_id)
                     && Arc::ptr_eq(&entry.cell, &cell)
