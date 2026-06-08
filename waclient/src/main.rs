@@ -221,6 +221,15 @@ async fn forward(
     // Rewrite the query.
     let (mut parts, body) = req.into_parts();
     strip_hop_by_hop_headers(&mut parts.headers);
+    // One QUIC stream per request: force close so hyper FINs the stream on both
+    // ends after the single response, instead of holding it open in keep-alive.
+    // Otherwise the stream is never finished or dropped, quiche never collects
+    // it, and the peer never returns MAX_STREAMS credit — so open_stream
+    // eventually blocks and requests hang under load.
+    parts.headers.insert(
+        hyper::header::CONNECTION,
+        hyper::header::HeaderValue::from_static("close"),
+    );
     let rewritten = hyper::Request::from_parts(parts, body);
 
     // Forward to upstream and get response.
