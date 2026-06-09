@@ -21,7 +21,7 @@ pub async fn handle_quic_stream(
     local_port: u16,
     user_id: Option<String>,
 ) -> Result<()> {
-    let io = quic_stream_io::wrap(stream);
+    let io = TokioIo::new(stream);
     let service =
         hyper::service::service_fn(move |req| forward(req, local_port, user_id.clone()));
     http1_server::Builder::new()

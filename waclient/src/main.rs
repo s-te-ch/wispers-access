@@ -201,7 +201,7 @@ async fn forward(
             ));
         }
     };
-    let fwd_io = quic_stream_io::wrap(fwd_stream);
+    let fwd_io = TokioIo::new(fwd_stream);
     let (mut sender, conn) = match http1_client::handshake(fwd_io).await {
         Ok(hs) => hs,
         Err(e) => {

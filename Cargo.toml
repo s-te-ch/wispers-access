@@ -3,5 +3,11 @@ resolver = "2"
 members = [
     "waserver",
     "waclient",
-    "lib/quic_stream_io",
 ]
+
+# TEMPORARY: test the local wispers-connect (native QuicStream poll-IO + the
+# driver-exit fix) without a release. Relative path resolves on both dev machine
+# and server (sibling repos under ~/git). Revert to the released crate once 0.9.2
+# ships.
+[patch.crates-io]
+wispers-connect = { path = "../wispers-client/wispers-connect" }
