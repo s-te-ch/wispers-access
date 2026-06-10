@@ -15,6 +15,7 @@ import io.ktor.utils.io.readAvailable
 import io.ktor.utils.io.readFully
 import io.ktor.utils.io.writeFully
 import java.io.IOException
+import kotlinx.coroutines.withTimeout
 
 /**
  * Forwards a single HTTP request from an inbound Ktor call to upstream over a QUIC stream.
@@ -33,9 +34,15 @@ internal class UpstreamClient(
 ) {
     suspend fun forward(call: ApplicationCall) {
         val request = buildOutboundRequest(call)
-        sendRequest(request, call.receiveChannel())
         val reader = StreamReader(stream)
-        val response = readResponseHead(reader)
+        // Deadline on request + response head: a connection that died silently (e.g.
+        // network handover while idle) blackholes packets and would otherwise hang
+        // this read forever — no error, no eviction, no recovery. The body pipe below
+        // is exempt so large/slow transfers aren't cut off.
+        val response = withTimeout(EXCHANGE_TIMEOUT_MS) {
+            sendRequest(request, call.receiveChannel())
+            readResponseHead(reader)
+        }
         Log.d(TAG, "${request.method} ${request.target} → ${response.status}")
         respond(call, response, reader)
         // Half-close our send side only after the full response cycle. Calling finish()
@@ -235,6 +242,7 @@ internal class UpstreamClient(
     private companion object {
         const val TAG = "UpstreamClient"
         const val BUFFER_SIZE = 8192
+        const val EXCHANGE_TIMEOUT_MS = 15_000L
         val CRLF = byteArrayOf(0x0D, 0x0A)
         val FINAL_CHUNK = "0\r\n\r\n".toByteArray(Charsets.ISO_8859_1)
         val HOP_BY_HOP = setOf(

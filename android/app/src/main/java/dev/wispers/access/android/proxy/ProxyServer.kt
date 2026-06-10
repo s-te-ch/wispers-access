@@ -2,6 +2,7 @@ package dev.wispers.access.android.proxy
 
 import android.util.Log
 import dev.wispers.access.android.storage.ShareId
+import io.ktor.http.ContentType
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.application.ApplicationCallPipeline
@@ -11,6 +12,7 @@ import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.header
 import io.ktor.server.response.respond
+import io.ktor.server.response.respondText
 import javax.inject.Inject
 import javax.inject.Singleton
 
@@ -50,22 +52,59 @@ class ProxyServer @Inject constructor(
         val shareId = parseShareFromHost(host)
             ?: return call.respond(HttpStatusCode.NotFound, "unknown host")
 
-        val stream = try {
+        val lease = try {
             sessionManager.openStream(shareId)
         } catch (e: Exception) {
             Log.w(TAG, "openStream failed: ${e.message}")
-            return call.respond(HttpStatusCode.BadGateway, "Wispers Access server unavailable")
+            return respondErrorPage(call, e.message)
         }
 
         try {
-            UpstreamClient(stream, rewriter, shareId).forward(call)
+            UpstreamClient(lease.stream, rewriter, shareId).forward(call)
         } catch (e: Exception) {
             Log.w(TAG, "proxy error: ${e.message}")
-            // If we haven't responded yet, surface as 502; if we have, this is a no-op.
-            runCatching { call.respond(HttpStatusCode.BadGateway, e.message ?: "proxy error") }
+            // A failure mid-request usually means the connection died under us
+            // (stream opens still succeed on a dead connection) — evict it so the
+            // next request reconnects instead of hitting the same corpse.
+            sessionManager.invalidate(shareId, lease)
+            // If we haven't responded yet, surface the error page; if we have, this is a no-op.
+            runCatching { respondErrorPage(call, e.message) }
         } finally {
-            runCatching { stream.close() }
+            runCatching { lease.stream.close() }
         }
+    }
+
+    private suspend fun respondErrorPage(call: ApplicationCall, message: String?) {
+        val safe = (message ?: "unknown error")
+            .replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        call.respondText(
+            """
+            <!doctype html>
+            <html>
+            <head>
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Connection problem</title>
+            <style>
+              body { font-family: sans-serif; margin: 0; min-height: 100vh; display: flex;
+                     align-items: center; justify-content: center; background: #f4f4ee; color: #333; }
+              main { text-align: center; padding: 2rem; max-width: 28rem; }
+              p { color: #777; font-size: 0.85rem; overflow-wrap: anywhere; }
+              button { font-size: 1rem; padding: 0.75rem 2.5rem; border: none; border-radius: 1.5rem;
+                       background: #3b3a64; color: white; }
+            </style>
+            </head>
+            <body>
+            <main>
+              <h2>Connection problem</h2>
+              <p>$safe</p>
+              <button onclick="location.reload()">Retry</button>
+            </main>
+            </body>
+            </html>
+            """.trimIndent(),
+            ContentType.Text.Html,
+            HttpStatusCode.BadGateway,
+        )
     }
 
     private fun parseShareFromHost(host: String): ShareId? {

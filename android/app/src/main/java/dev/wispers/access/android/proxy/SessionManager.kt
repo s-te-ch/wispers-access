@@ -8,15 +8,23 @@ import dev.wispers.connect.handles.QuicConnection
 import dev.wispers.connect.handles.QuicStream
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 
 /**
  * Per-share Node + QuicConnection cache. Equivalent of waclient's `StreamFactory`.
  *
  * Connections are established lazily on first stream request and reused across requests.
  * Stream opens get one retry — if the cached connection has died, we drop it from the
- * pool and reconnect on the second attempt.
+ * pool and reconnect on the second attempt. Opening a stream on a dead connection can
+ * still succeed (it's local bookkeeping), so callers must report mid-request failures
+ * via [invalidate] — otherwise the dead connection stays cached and every later request
+ * fails the same way.
  */
 @Singleton
 class SessionManager @Inject constructor(
@@ -28,22 +36,47 @@ class SessionManager @Inject constructor(
     private val connMutex = Mutex()
     private val connections = mutableMapOf<ShareId, QuicConnection>()
 
-    suspend fun openStream(shareId: ShareId): QuicStream = try {
-        tryOpen(shareId)
-    } catch (_: Exception) {
-        tryOpen(shareId)
+    /** A stream plus the connection it came from, so [invalidate] can evict exactly that connection. */
+    class StreamLease internal constructor(
+        val stream: QuicStream,
+        internal val connection: QuicConnection,
+    )
+
+    // Connect/open can hang silently (e.g. the network changed under an idle
+    // connection and packets blackhole), so each attempt gets a deadline.
+    suspend fun openStream(shareId: ShareId): StreamLease = try {
+        withTimeout(OPEN_TIMEOUT_MS) { tryOpen(shareId) }
+    } catch (e: Exception) {
+        coroutineContext.ensureActive()
+        withTimeout(OPEN_TIMEOUT_MS) { tryOpen(shareId) }
     }
 
-    private suspend fun tryOpen(shareId: ShareId): QuicStream {
+    /** Evicts and closes [lease]'s connection (unless already replaced by a newer one). */
+    suspend fun invalidate(shareId: ShareId, lease: StreamLease) {
+        evict(shareId, lease.connection)
+    }
+
+    private suspend fun tryOpen(shareId: ShareId): StreamLease {
         val node = getNode(shareId)
         val conn = getConnection(shareId, node)
         return try {
-            conn.openStream()
+            StreamLease(conn.openStream(), conn)
         } catch (e: Exception) {
-            connMutex.withLock { connections.remove(shareId) }
+            evict(shareId, conn)
             throw e
         }
     }
+
+    // NonCancellable: eviction is triggered from catch blocks that may themselves be
+    // running cancellation (open timeout) — it must complete anyway, or the dead
+    // connection stays cached and every later request hits it.
+    private suspend fun evict(shareId: ShareId, conn: QuicConnection) =
+        withContext(NonCancellable) {
+            connMutex.withLock {
+                if (connections[shareId] === conn) connections.remove(shareId)
+            }
+            runCatching { conn.closeAsync() }
+        }
 
     private suspend fun getNode(shareId: ShareId): Node = nodeMutex.withLock {
         nodes.getOrPut(shareId) {
@@ -60,5 +93,6 @@ class SessionManager @Inject constructor(
 
     private companion object {
         const val SERVING_NODE_NUMBER = 1
+        const val OPEN_TIMEOUT_MS = 10_000L
     }
 }
