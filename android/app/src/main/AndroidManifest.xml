@@ -32,7 +32,8 @@
             android:documentLaunchMode="intoExisting"
             android:exported="false"
             android:label="@string/app_name"
-            android:theme="@style/Theme.WispersAccess" />
+            android:theme="@style/Theme.WispersAccess"
+            android:windowSoftInputMode="adjustPan" />
     </application>
 
 </manifest>

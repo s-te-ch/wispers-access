@@ -11,13 +11,17 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.activity.ComponentActivity
 import androidx.activity.OnBackPressedCallback
+import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.CircularProgressIndicator
@@ -63,6 +67,19 @@ class ShareActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // The app theme is always light, so pick dark bar icons explicitly instead
+        // of letting edge-to-edge follow the system dark-mode setting.
+        enableEdgeToEdge(
+            statusBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+            ),
+            navigationBarStyle = SystemBarStyle.light(
+                android.graphics.Color.TRANSPARENT,
+                android.graphics.Color.TRANSPARENT,
+            ),
+        )
 
         val shareId = intent.data?.lastPathSegment?.let(::ShareId) ?: run {
             finish()
@@ -266,9 +283,12 @@ private fun ShareWebViewScreen(
         modifier = Modifier
             .fillMaxSize()
             .background(MaterialTheme.colorScheme.background)
-            // The proxied page can't know about the phone's bars/cutouts/keyboard,
-            // so inset the WebView to the safe area instead of drawing under them.
-            .windowInsetsPadding(WindowInsets.safeDrawing),
+            // The proxied page can't know about the phone's bars/cutouts, so inset
+            // the WebView to the safe area instead of drawing under them. The IME is
+            // deliberately excluded: shrinking the viewport makes position:fixed
+            // footers cover the page, so let the keyboard overlay instead and rely
+            // on adjustPan (manifest) to keep the focused field visible.
+            .windowInsetsPadding(WindowInsets.safeDrawing.exclude(WindowInsets.ime)),
     ) {
         AndroidView(
             modifier = Modifier.fillMaxSize(),
