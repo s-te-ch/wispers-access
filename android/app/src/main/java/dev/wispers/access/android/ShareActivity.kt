@@ -296,6 +296,11 @@ private fun ShareWebViewScreen(
                 WebView(context).apply {
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
+                    // Honor the page's viewport meta tag like Chrome does. Without
+                    // this the WebView lays out with legacy defaults, and pages built
+                    // for device-width viewports (fixed overlays, vh units) misrender.
+                    settings.useWideViewPort = true
+                    settings.loadWithOverviewMode = true
                     addJavascriptInterface(IconBridge(onIconJson), "WAIcon")
                     webChromeClient = WebChromeClient()
                     webViewClient = object : WebViewClient() {
