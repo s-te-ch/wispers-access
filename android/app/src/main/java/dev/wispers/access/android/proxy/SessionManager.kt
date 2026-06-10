@@ -56,6 +56,34 @@ class SessionManager @Inject constructor(
         evict(shareId, lease.connection)
     }
 
+    /**
+     * Drops and closes every cached connection. Called when the device's default
+     * network changes: connections on the old network blackhole silently, so
+     * reconnecting eagerly beats waiting for per-request timeouts to flush them.
+     *
+     * @return the affected share ids, for an optional [prewarm].
+     */
+    suspend fun evictAll(): List<ShareId> {
+        val stale = connMutex.withLock {
+            val all = connections.toMap()
+            connections.clear()
+            all
+        }
+        for (conn in stale.values) runCatching { conn.closeAsync() }
+        return stale.keys.toList()
+    }
+
+    /**
+     * Re-establishes connections for [shareIds] ahead of traffic, so the next
+     * request doesn't pay the connection setup (ICE is the expensive part).
+     * Failures are swallowed — the per-request path retries lazily anyway.
+     */
+    suspend fun prewarm(shareIds: List<ShareId>) {
+        for (id in shareIds) {
+            runCatching { getConnection(id, getNode(id)) }
+        }
+    }
+
     private suspend fun tryOpen(shareId: ShareId): StreamLease {
         val node = getNode(shareId)
         val conn = getConnection(shareId, node)

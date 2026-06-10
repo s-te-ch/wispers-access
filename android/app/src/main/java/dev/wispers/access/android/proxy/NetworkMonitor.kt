@@ -5,6 +5,7 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
+import dev.wispers.access.android.ForegroundTracker
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -18,11 +19,16 @@ import kotlinx.coroutines.launch
  * This is what Chrome does on handover: the OS push signal beats waiting for
  * blackholed connections to hit their request timeouts, so the first request
  * after a Wi-Fi/cellular switch reconnects immediately instead of stalling.
+ * While the app is visible the evicted connections are also re-established
+ * eagerly, hiding the ICE setup cost from the user's next tap; in the
+ * background we evict only, to avoid re-ICE-ing on every handover while the
+ * phone roams unused.
  */
 @Singleton
 class NetworkMonitor @Inject constructor(
     @param:ApplicationContext private val context: Context,
     private val sessionManager: SessionManager,
+    private val foregroundTracker: ForegroundTracker,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
@@ -37,7 +43,13 @@ class NetworkMonitor @Inject constructor(
                 lastNetwork = network
                 if (previous != null && previous != network) {
                     Log.i(TAG, "Default network changed, evicting cached connections")
-                    scope.launch { sessionManager.evictAll() }
+                    scope.launch {
+                        val evicted = sessionManager.evictAll()
+                        if (evicted.isNotEmpty() && foregroundTracker.isForeground) {
+                            Log.i(TAG, "Pre-warming ${evicted.size} connection(s)")
+                            sessionManager.prewarm(evicted)
+                        }
+                    }
                 }
             }
         })
