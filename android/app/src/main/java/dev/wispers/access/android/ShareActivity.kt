@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import android.os.Bundle
 import android.util.Base64
+import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebView
@@ -294,6 +295,13 @@ private fun ShareWebViewScreen(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
                 WebView(context).apply {
+                    // Explicit match-parent layout params: without them Chromium
+                    // treats the view as wrap-content and resolves CSS viewport
+                    // units (vh/dvh/...) against a zero-height viewport.
+                    layoutParams = ViewGroup.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                        ViewGroup.LayoutParams.MATCH_PARENT,
+                    )
                     settings.javaScriptEnabled = true
                     settings.domStorageEnabled = true
                     // Honor the page's viewport meta tag like Chrome does. Without
