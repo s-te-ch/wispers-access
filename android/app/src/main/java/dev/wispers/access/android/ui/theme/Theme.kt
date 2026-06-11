@@ -7,7 +7,8 @@ import androidx.compose.ui.graphics.Color
 
 private val WispersAccessColors = lightColorScheme(
     primary = AccessPrimaryLight,
-    onPrimary = Color.White,
+    // Dark forest on the light green: white fails contrast (~1.8:1) there.
+    onPrimary = AccessPrimaryDark,
     primaryContainer = AccessPrimaryLight,
     onPrimaryContainer = AccessPrimaryDark,
     secondary = AccessPrimaryDark,

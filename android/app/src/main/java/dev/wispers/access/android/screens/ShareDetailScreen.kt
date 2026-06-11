@@ -174,7 +174,11 @@ fun ShareDetailScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { confirmRemove = false }) { Text("Cancel") }
+                TextButton(onClick = { confirmRemove = false }) {
+                    // TextButton defaults to primary (light green) — illegible on the
+                    // dialog surface; plain text color reads as the neutral action.
+                    Text("Cancel", color = MaterialTheme.colorScheme.onSurface)
+                }
             },
         )
     }
