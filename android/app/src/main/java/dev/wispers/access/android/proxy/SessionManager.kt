@@ -85,6 +85,20 @@ class SessionManager @Inject constructor(
     }
 
     /**
+     * Tears down [shareId]'s session and deregisters the node from the hub,
+     * revoking this device from the share's roster. Deregistration is
+     * best-effort: if the hub is unreachable, local removal proceeds anyway
+     * and the roster entry lingers until pruned elsewhere.
+     */
+    suspend fun removeShare(shareId: ShareId) {
+        connMutex.withLock { connections.remove(shareId) }
+            ?.let { runCatching { it.closeAsync() } }
+        val node = nodeMutex.withLock { nodes.remove(shareId) }
+            ?: runCatching { repo.storageFor(shareId).restoreOrInitNode().first }.getOrNull()
+        node?.let { runCatching { it.logout() } }
+    }
+
+    /**
      * Hub-reported availability of the share's serving node, or null when the
      * hub can't be reached (status unknown — typically this device is offline).
      */

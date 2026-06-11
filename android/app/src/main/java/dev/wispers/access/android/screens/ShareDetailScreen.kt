@@ -43,8 +43,12 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import android.content.Context
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.wispers.access.android.addToHomescreen
+import dev.wispers.access.android.disableShortcut
+import dev.wispers.access.android.proxy.SessionManager
 import dev.wispers.access.android.proxy.ShareStatusTracker
 import dev.wispers.access.android.storage.Share
 import dev.wispers.access.android.storage.ShareId
@@ -64,7 +68,9 @@ import kotlinx.coroutines.launch
 class ShareDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val repo: ShareRepository,
+    private val sessionManager: SessionManager,
     statusTracker: ShareStatusTracker,
+    @param:ApplicationContext private val appContext: Context,
 ) : ViewModel() {
 
     private val shareId: ShareId =
@@ -90,7 +96,9 @@ class ShareDetailViewModel @Inject constructor(
 
     fun onRemove() {
         viewModelScope.launch {
+            sessionManager.removeShare(shareId)
             repo.deleteShare(shareId)
+            disableShortcut(appContext, shareId, "This share was removed")
             _removed.value = true
         }
     }

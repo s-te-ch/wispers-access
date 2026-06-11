@@ -207,6 +207,15 @@ fun refreshShortcut(context: Context, shareId: ShareId, nickname: String, iconPn
     )
 }
 
+/**
+ * Disables any pinned shortcut for [shareId]. Apps can't delete pinned
+ * shortcuts — disabling greys the icon and shows [message] when tapped.
+ * Safe to call when no shortcut exists.
+ */
+fun disableShortcut(context: Context, shareId: ShareId, message: String) {
+    ShortcutManagerCompat.disableShortcuts(context, listOf("share-${shareId.value}"), message)
+}
+
 /** Decodes a `data:` URL's base64 payload, or null if malformed. */
 private fun decodeDataUrl(dataUrl: String): ByteArray? {
     val comma = dataUrl.indexOf(',')
