@@ -9,3 +9,12 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# Release signing material — never commit.
+keystore.properties
+*.jks
+*.keystore
+
+# Android Studio "Generate Signed Bundle" output.
+app/release/
+*.aab
