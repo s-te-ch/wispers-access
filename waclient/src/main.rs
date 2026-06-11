@@ -338,7 +338,10 @@ impl StreamFactory {
         match self.try_open_stream(cg_id, &node).await {
             Ok(s) => Ok(s),
             Err(e) => {
-                eprintln!("[{}] open_stream attempt 1 failed, retrying once: {:#}", cg_id, e);
+                eprintln!(
+                    "[{}] open_stream attempt 1 failed, retrying once: {:#}",
+                    cg_id, e
+                );
                 self.try_open_stream(cg_id, &node).await
             }
         }
@@ -367,7 +370,10 @@ impl StreamFactory {
         match conn.open_stream().await {
             Ok(stream) => Ok(stream),
             Err(e) => {
-                eprintln!("[{}] conn.open_stream failed, evicting connection: {:#}", cg_id, e);
+                eprintln!(
+                    "[{}] conn.open_stream failed, evicting connection: {:#}",
+                    cg_id, e
+                );
                 let mut pool = self.pool.lock().await;
                 if let Some(entry) = pool.get(cg_id)
                     && Arc::ptr_eq(&entry.cell, &cell)
