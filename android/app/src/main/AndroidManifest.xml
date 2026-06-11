@@ -5,11 +5,13 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!-- Backups are off by design: share/node keys are wrapped by a
+         hardware-bound Keystore key that never leaves the device, so restored
+         data would be undecryptable — and a node identity is meant to be
+         device-bound anyway. New device = rejoin with a fresh invite. -->
     <application
         android:name=".WispersAccessApp"
-        android:allowBackup="true"
-        android:dataExtractionRules="@xml/data_extraction_rules"
-        android:fullBackupContent="@xml/backup_rules"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"
