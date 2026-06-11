@@ -17,6 +17,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -43,6 +44,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.wispers.access.android.addToHomescreen
+import dev.wispers.access.android.proxy.ShareStatusTracker
 import dev.wispers.access.android.storage.Share
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
@@ -53,6 +55,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -60,6 +63,7 @@ import kotlinx.coroutines.launch
 class ShareDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val repo: ShareRepository,
+    statusTracker: ShareStatusTracker,
 ) : ViewModel() {
 
     private val shareId: ShareId =
@@ -71,6 +75,15 @@ class ShareDetailViewModel @Inject constructor(
         initialValue = null,
     )
 
+    /** Serving-node availability; null = not known (yet). Shared with the list screen. */
+    val online: StateFlow<Boolean?> = statusTracker.statuses
+        .map { it[shareId] }
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(5_000),
+            initialValue = null,
+        )
+
     private val _removed = MutableStateFlow(false)
     val removed: StateFlow<Boolean> = _removed.asStateFlow()
 
@@ -79,6 +92,10 @@ class ShareDetailViewModel @Inject constructor(
             repo.deleteShare(shareId)
             _removed.value = true
         }
+    }
+
+    private companion object {
+        const val STATUS_REFRESH_MS = 30_000L
     }
 }
 
@@ -90,6 +107,7 @@ fun ShareDetailScreen(
     viewModel: ShareDetailViewModel = hiltViewModel(),
 ) {
     val share by viewModel.share.collectAsState()
+    val online by viewModel.online.collectAsState()
     val removed by viewModel.removed.collectAsState()
     var confirmRemove by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -114,6 +132,7 @@ fun ShareDetailScreen(
         if (current != null) {
             ShareDetailContent(
                 share = current,
+                online = online,
                 contentPadding = innerPadding,
                 onOpen = { onOpenShare(current.id) },
                 onAddToHomescreen = {
@@ -157,6 +176,7 @@ fun ShareDetailScreen(
 @Composable
 private fun ShareDetailContent(
     share: Share,
+    online: Boolean?,
     contentPadding: PaddingValues,
     onOpen: () -> Unit,
     onAddToHomescreen: () -> Unit,
@@ -169,7 +189,7 @@ private fun ShareDetailContent(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        StatusRow(online = false)
+        StatusRow(online = online)
         ShareAvatar(nickname = share.nickname, iconPng = share.iconPng, size = 64.dp)
         Text(
             text = share.nickname.ifBlank { "Untitled share" },
@@ -206,21 +226,33 @@ private fun ShareDetailContent(
 }
 
 @Composable
-private fun StatusRow(online: Boolean) {
+private fun StatusRow(online: Boolean?) {
     Row(
         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        androidx.compose.foundation.layout.Box(
-            modifier = Modifier
-                .size(10.dp)
-                .background(
-                    color = if (online) Color(0xFF34A853) else MaterialTheme.colorScheme.outline,
-                    shape = CircleShape,
-                ),
-        )
+        if (online == null) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(10.dp),
+                strokeWidth = 1.5.dp,
+                color = MaterialTheme.colorScheme.outline,
+            )
+        } else {
+            androidx.compose.foundation.layout.Box(
+                modifier = Modifier
+                    .size(10.dp)
+                    .background(
+                        color = if (online) Color(0xFF34A853) else MaterialTheme.colorScheme.outline,
+                        shape = CircleShape,
+                    ),
+            )
+        }
         Text(
-            text = if (online) "ONLINE" else "OFFLINE",
+            text = when (online) {
+                true -> "ONLINE"
+                false -> "OFFLINE"
+                null -> "CHECKING…"
+            },
             style = MaterialTheme.typography.labelMedium,
         )
     }

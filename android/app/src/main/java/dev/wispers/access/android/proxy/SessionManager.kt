@@ -84,6 +84,18 @@ class SessionManager @Inject constructor(
         }
     }
 
+    /**
+     * Hub-reported availability of the share's serving node, or null when the
+     * hub can't be reached (status unknown — typically this device is offline).
+     */
+    suspend fun isServingNodeOnline(shareId: ShareId): Boolean? = try {
+        getNode(shareId).groupInfo()
+            .nodes.firstOrNull { it.nodeNumber == SERVING_NODE_NUMBER }
+            ?.isOnline
+    } catch (_: Exception) {
+        null
+    }
+
     private suspend fun tryOpen(shareId: ShareId): StreamLease {
         val node = getNode(shareId)
         val conn = getConnection(shareId, node)

@@ -24,6 +24,7 @@ import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -42,6 +43,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.wispers.access.android.R
+import dev.wispers.access.android.proxy.ShareStatusTracker
 import dev.wispers.access.android.storage.Share
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
@@ -56,6 +58,7 @@ import kotlinx.coroutines.flow.stateIn
 @HiltViewModel
 class ShareListViewModel @Inject constructor(
     repo: ShareRepository,
+    statusTracker: ShareStatusTracker,
 ) : ViewModel() {
 
     val shares: StateFlow<List<Share>> = repo.observeShares()
@@ -64,6 +67,9 @@ class ShareListViewModel @Inject constructor(
             started = SharingStarted.WhileSubscribed(5_000),
             initialValue = emptyList(),
         )
+
+    /** Per-share serving-node availability; absent key = not checked yet, null = unknown. */
+    val online: StateFlow<Map<ShareId, Boolean?>> = statusTracker.statuses
 }
 
 @Composable
@@ -73,6 +79,7 @@ fun ShareListScreen(
     viewModel: ShareListViewModel = hiltViewModel(),
 ) {
     val shares by viewModel.shares.collectAsState()
+    val online by viewModel.online.collectAsState()
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -101,7 +108,7 @@ fun ShareListScreen(
             if (shares.isEmpty()) {
                 EmptyShareList()
             } else {
-                ShareList(shares = shares, onShareClick = onShareClick)
+                ShareList(shares = shares, online = online, onShareClick = onShareClick)
             }
         }
     }
@@ -142,20 +149,28 @@ private fun SectionHeader(count: Int) {
 }
 
 @Composable
-private fun ShareList(shares: List<Share>, onShareClick: (ShareId) -> Unit) {
+private fun ShareList(
+    shares: List<Share>,
+    online: Map<ShareId, Boolean?>,
+    onShareClick: (ShareId) -> Unit,
+) {
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(bottom = 96.dp),
     ) {
         items(shares, key = { it.id.value }) { share ->
-            ShareCard(share = share, onClick = { onShareClick(share.id) })
+            ShareCard(
+                share = share,
+                online = online[share.id],
+                onClick = { onShareClick(share.id) },
+            )
         }
     }
 }
 
 @Composable
-private fun ShareCard(share: Share, onClick: () -> Unit) {
+private fun ShareCard(share: Share, online: Boolean?, onClick: () -> Unit) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
@@ -177,9 +192,9 @@ private fun ShareCard(share: Share, onClick: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    StatusDot(online = true)
+                    StatusDot(online = online)
                     Text(
-                        text = statusLine(share.lastConnectedAt),
+                        text = statusLine(online, share.lastConnectedAt),
                         style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 1.sp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -201,15 +216,27 @@ private fun ShareCard(share: Share, onClick: () -> Unit) {
 }
 
 @Composable
-private fun StatusDot(online: Boolean) {
-    Box(
-        modifier = Modifier
-            .size(8.dp)
-            .background(
-                color = if (online) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline,
-                shape = CircleShape,
-            ),
-    )
+private fun StatusDot(online: Boolean?) {
+    if (online == null) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(8.dp),
+            strokeWidth = 1.dp,
+            color = MaterialTheme.colorScheme.outline,
+        )
+    } else {
+        Box(
+            modifier = Modifier
+                .size(8.dp)
+                .background(
+                    color = if (online) {
+                        MaterialTheme.colorScheme.primary
+                    } else {
+                        MaterialTheme.colorScheme.outline
+                    },
+                    shape = CircleShape,
+                ),
+        )
+    }
 }
 
 @Composable
@@ -226,8 +253,14 @@ private fun EmptyShareList() {
     }
 }
 
-private fun statusLine(lastConnected: Instant?): String =
-    "ONLINE · LAST ${formatLastConnectedShort(lastConnected)}"
+private fun statusLine(online: Boolean?, lastConnected: Instant?): String {
+    val status = when (online) {
+        true -> "ONLINE"
+        false -> "OFFLINE"
+        null -> "CHECKING"
+    }
+    return "$status · LAST ${formatLastConnectedShort(lastConnected)}"
+}
 
 private fun formatLastConnectedShort(instant: Instant?): String {
     if (instant == null) return "NEVER"
