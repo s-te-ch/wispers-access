@@ -85,12 +85,14 @@ class ProxyServer @Inject constructor(
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <title>Connection problem</title>
             <style>
+              /* Matches the app theme (ui/theme/Color.kt): cream background,
+                 light-green primary with dark-forest text. */
               body { font-family: sans-serif; margin: 0; min-height: 100vh; display: flex;
-                     align-items: center; justify-content: center; background: #f4f4ee; color: #333; }
+                     align-items: center; justify-content: center; background: #f7f7f2; color: #1a1a1a; }
               main { text-align: center; padding: 2rem; max-width: 28rem; }
-              p { color: #777; font-size: 0.85rem; overflow-wrap: anywhere; }
+              p { color: #6b6b68; font-size: 0.85rem; overflow-wrap: anywhere; }
               button { font-size: 1rem; padding: 0.75rem 2.5rem; border: none; border-radius: 1.5rem;
-                       background: #3b3a64; color: white; }
+                       background: #a1d283; color: #4a6b36; font-weight: 600; }
             </style>
             </head>
             <body>
