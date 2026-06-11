@@ -214,13 +214,7 @@ private fun ShareDetailContent(
                 onClick = onAddToHomescreen,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
-                    Text("Add to homescreen")
-                    Text("Setup", style = MaterialTheme.typography.labelMedium)
-                }
+                Text("Add to homescreen")
             }
             OutlinedButton(
                 onClick = onRemove,
