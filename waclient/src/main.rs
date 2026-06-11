@@ -32,7 +32,7 @@ struct Cli {
 enum Command {
     /// Join a Wispers Accept share.
     Join {
-        /// Invite code for the share, produced by waserver.
+        /// Invite code for the share (`wax_…`), produced by `waserver invite`.
         invite_code: String,
     },
     Serve {
@@ -68,8 +68,8 @@ async fn async_main(command: Command) -> Result<()> {
 
 async fn join(invite_code: &str) -> Result<()> {
     // Parse the invite code.
-    let Some((registration_token, activation_code)) = invite_code.split_once('/') else {
-        anyhow::bail!("invalid invite code");
+    let Some((registration_token, activation_code)) = parse_wax_code(invite_code) else {
+        anyhow::bail!("invalid invite code (expected wax_<token>_<code>)");
     };
 
     // Create a new DB row.
@@ -106,6 +106,18 @@ async fn join(invite_code: &str) -> Result<()> {
         node.node_number().unwrap(),
     );
     Ok(())
+}
+
+/// Parses a `wax_<token>_<activation_code>` invite code into its
+/// (registration_token, activation_code) parts. The token is lowercase hex,
+/// so the first `_` after the prefix unambiguously ends it; the activation
+/// code keeps its native `<node>-<secret>` form.
+fn parse_wax_code(code: &str) -> Option<(&str, &str)> {
+    let (token, activation) = code.trim().strip_prefix("wax_")?.split_once('_')?;
+    if token.is_empty() || activation.is_empty() {
+        return None;
+    }
+    Some((token, activation))
 }
 
 /// Free-form name -> DNS-label-safe slug, or None if nothing usable remains.
@@ -388,4 +400,34 @@ impl StreamFactory {
 
 struct PoolEntry {
     cell: Arc<OnceCell<Arc<wc::QuicConnection>>>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_wax_code() {
+        assert_eq!(
+            parse_wax_code("wax_ab12cd_1-xyz789"),
+            Some(("ab12cd", "1-xyz789"))
+        );
+    }
+
+    #[test]
+    fn tolerates_pasted_whitespace() {
+        assert_eq!(
+            parse_wax_code("  wax_ab12cd_1-xyz789\n"),
+            Some(("ab12cd", "1-xyz789"))
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_codes() {
+        assert_eq!(parse_wax_code("ab12cd/1-xyz789"), None); // old test format
+        assert_eq!(parse_wax_code("wax_ab12cd"), None); // missing activation code
+        assert_eq!(parse_wax_code("wax__1-xyz789"), None); // empty token
+        assert_eq!(parse_wax_code("wax_ab12cd_"), None); // empty activation code
+        assert_eq!(parse_wax_code(""), None);
+    }
 }
