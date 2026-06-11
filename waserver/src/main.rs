@@ -70,6 +70,9 @@ enum Command {
         node_name: String,
         /// User identification (e.g. email address) of the user.
         user_id: String,
+        /// Also write the invite QR code as a PNG (for emailing) to this path.
+        #[arg(long, value_name = "PATH")]
+        png: Option<std::path::PathBuf>,
     },
     /// Revoke access.
     Revoke {
@@ -142,7 +145,8 @@ async fn async_main(command: Command) -> Result<()> {
             share,
             node_name,
             user_id,
-        } => invite(&share, &node_name, &user_id).await,
+            png,
+        } => invite(&share, &node_name, &user_id, png.as_deref()).await,
         Command::Revoke { share, node_number } => revoke(&share, &node_number).await,
         Command::Nodes { share } => nodes(&share).await,
     }
@@ -301,8 +305,12 @@ fn logs(follow: bool, share: &str) -> Result<()> {
     Ok(())
 }
 
-async fn invite(share: &str, node_name: &str, user_id: &str) -> Result<()> {
-    println!("invite({}, {});", share, user_id);
+async fn invite(
+    share: &str,
+    node_name: &str,
+    user_id: &str,
+    png: Option<&std::path::Path>,
+) -> Result<()> {
     let Ok(mut client) = ipc::Client::connect(share).await else {
         anyhow::bail!("cannot connect to server for share {}", share);
     };
@@ -315,8 +323,24 @@ async fn invite(share: &str, node_name: &str, user_id: &str) -> Result<()> {
             data: ipc::ResponseData::Invite(invite),
             ..
         }) => {
-            println!("Token: {}", invite.registration_token);
-            println!("Code: {}", invite.activation_code);
+            let code = compose_wax_code(&invite.registration_token, &invite.activation_code);
+            let qr = qrcode::QrCode::new(code.as_bytes()).context("cannot build QR code")?;
+            println!("Invite code (valid for 24 hours):\n\n  {}\n", code);
+            println!(
+                "{}",
+                qr.render::<qrcode::render::unicode::Dense1x2>()
+                    .quiet_zone(true)
+                    .build()
+            );
+            if let Some(path) = png {
+                let img = qr
+                    .render::<image::Luma<u8>>()
+                    .min_dimensions(360, 360)
+                    .build();
+                img.save(path)
+                    .with_context(|| format!("cannot write {}", path.display()))?;
+                println!("QR code written to {}", path.display());
+            }
         }
         Ok(ipc::Response::Success { .. }) => {
             anyhow::bail!("unexpected response from server");
@@ -329,6 +353,13 @@ async fn invite(share: &str, node_name: &str, user_id: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Composes the user-facing invite code from its raw parts. The activation
+/// code keeps its native `<node>-<secret>` form so the endorsing node stays
+/// encoded; the `wax_` prefix makes codes recognizable and greppable.
+fn compose_wax_code(registration_token: &str, activation_code: &str) -> String {
+    format!("wax_{}_{}", registration_token, activation_code)
 }
 
 async fn revoke(share: &str, node_number: &i32) -> Result<()> {
@@ -366,4 +397,17 @@ async fn nodes(share: &str) -> Result<()> {
     }
     tw.flush().unwrap();
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wax_code_keeps_activation_code_verbatim() {
+        assert_eq!(
+            compose_wax_code("ab12cd", "1-xyz789"),
+            "wax_ab12cd_1-xyz789"
+        );
+    }
 }

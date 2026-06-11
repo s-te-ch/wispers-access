@@ -60,7 +60,11 @@ impl ServingHandle {
         let Some(handle) = self.wc_handle().await else {
             anyhow::bail!("Not connected to hub");
         };
-        let code = handle.generate_activation_code().await?;
+        // Invites are delivered out-of-band (chat, email, QR), so use the
+        // long-lived profile; the interactive one expires in two minutes.
+        let code = handle
+            .generate_activation_code_with_ttl(wc::TtlProfile::Asynchronous)
+            .await?;
         Ok(code.format())
     }
 
@@ -145,7 +149,10 @@ async fn handle_quic_conn(
     let user_id = resolve_identity(&node, peer).await;
     match &user_id {
         Some(uid) => info!(peer, user_id = %uid, "resolved peer identity"),
-        None => warn!(peer, "no identity resolved; forwarding without identity header"),
+        None => warn!(
+            peer,
+            "no identity resolved; forwarding without identity header"
+        ),
     }
 
     loop {
