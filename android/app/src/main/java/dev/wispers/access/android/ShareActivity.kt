@@ -39,6 +39,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
@@ -312,7 +313,11 @@ private fun ShareWebViewScreen(
         AndroidView(
             modifier = Modifier.fillMaxSize(),
             factory = { context ->
-                WebView(context).apply {
+                // Created first so the page-load callbacks can stop its spinner.
+                // SwipeRefreshLayout only fires the gesture when the WebView is
+                // scrolled to the top, so it doesn't fight the page's own scroll.
+                val swipeRefresh = SwipeRefreshLayout(context)
+                val webView = WebView(context).apply {
                     // Explicit match-parent layout params: without them Chromium
                     // treats the view as wrap-content and resolves CSS viewport
                     // units (vh/dvh/...) against a zero-height viewport.
@@ -335,6 +340,7 @@ private fun ShareWebViewScreen(
                         }
 
                         override fun onPageFinished(view: WebView?, url: String?) {
+                            swipeRefresh.isRefreshing = false
                             view?.evaluateJavascript(HARVEST_JS, null)
                         }
                     }
@@ -344,6 +350,14 @@ private fun ShareWebViewScreen(
                         loadUrl(url)
                     }
                     onWebViewReady(this)
+                }
+                swipeRefresh.apply {
+                    addView(webView)
+                    setOnRefreshListener { webView.reload() }
+                    // On-brand spinner: dark forest arrow on the light-green
+                    // primary, matching ui/theme/Color.kt.
+                    setColorSchemeColors(0xFF4A6B36.toInt())
+                    setProgressBackgroundColorSchemeColor(0xFFA1D283.toInt())
                 }
             },
         )

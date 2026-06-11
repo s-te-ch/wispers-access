@@ -17,8 +17,10 @@ hiltNavigationCompose = "1.2.0"
 navigationCompose = "2.9.8"
 ktor = "3.2.3"
 zxingEmbedded = "4.3.0"
+swipeRefresh = "1.1.0"
 
 [libraries]
+androidx-swiperefreshlayout = { group = "androidx.swiperefreshlayout", name = "swiperefreshlayout", version.ref = "swipeRefresh" }
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxingEmbedded" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
