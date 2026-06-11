@@ -23,8 +23,10 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SecondaryTabRow
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
@@ -32,11 +34,15 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.unit.dp
+import com.journeyapps.barcodescanner.ScanContract
+import com.journeyapps.barcodescanner.ScanOptions
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.wispers.access.android.InviteCode
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
 import dev.wispers.access.android.storage.restoreOrInitNode
@@ -86,13 +92,24 @@ class AddShareViewModel @Inject constructor(
 
     fun onJoinClick() {
         if (_state.value.phase !is Phase.Idle) return
-        val parts = _state.value.code.trim().split("/")
-        if (parts.size != 2 || parts.any(String::isBlank)) {
-            _state.update { it.copy(error = "Code must be in the form regtok/activation.") }
+        val invite = InviteCode.parse(_state.value.code)
+        if (invite == null) {
+            _state.update { it.copy(error = "Invite codes look like wax_…") }
             return
         }
-        val (token, activation) = parts
-        viewModelScope.launch { runJoin(token, activation) }
+        viewModelScope.launch { runJoin(invite.registrationToken, invite.activationCode) }
+    }
+
+    /** Handles a scanned QR payload: joins on a valid invite code, errors otherwise. */
+    fun onScanResult(contents: String) {
+        if (_state.value.phase !is Phase.Idle) return
+        val invite = InviteCode.parse(contents)
+        if (invite == null) {
+            _state.update { it.copy(error = "That QR code is not a Wispers invite.") }
+            return
+        }
+        _state.update { it.copy(code = contents.trim(), error = null) }
+        viewModelScope.launch { runJoin(invite.registrationToken, invite.activationCode) }
     }
 
     private suspend fun runJoin(token: String, activation: String) {
@@ -195,6 +212,7 @@ fun AddShareScreen(
                     onTabChange = viewModel::onTabChange,
                     onCodeChange = viewModel::onCodeChange,
                     onJoin = viewModel::onJoinClick,
+                    onScanResult = viewModel::onScanResult,
                 )
                 is AddShareViewModel.Phase.Joining -> JoinProgress(phase = phase)
                 is AddShareViewModel.Phase.Joined -> JoinSuccess(
@@ -215,6 +233,7 @@ private fun IdleContent(
     onTabChange: (AddShareViewModel.Tab) -> Unit,
     onCodeChange: (String) -> Unit,
     onJoin: () -> Unit,
+    onScanResult: (String) -> Unit,
 ) {
     SecondaryTabRow(selectedTabIndex = tab.ordinal) {
         Tab(
@@ -235,7 +254,10 @@ private fun IdleContent(
             onCodeChange = onCodeChange,
             onJoin = onJoin,
         )
-        AddShareViewModel.Tab.SCAN_QR -> ScanQrPlaceholder()
+        AddShareViewModel.Tab.SCAN_QR -> ScanQrContent(
+            error = error,
+            onScanResult = onScanResult,
+        )
     }
 }
 
@@ -248,12 +270,20 @@ private fun EnterCodeContent(
 ) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text("Invitation code", style = MaterialTheme.typography.labelLarge)
+        val clipboard = LocalClipboardManager.current
         OutlinedTextField(
             value = code,
             onValueChange = onCodeChange,
-            placeholder = { Text("regtok/activation") },
+            placeholder = { Text("wax_…") },
             singleLine = true,
             isError = error != null,
+            trailingIcon = {
+                TextButton(
+                    onClick = { clipboard.getText()?.text?.let(onCodeChange) },
+                ) {
+                    Text("Paste")
+                }
+            },
             modifier = Modifier.fillMaxWidth(),
         )
         if (error != null) {
@@ -278,9 +308,40 @@ private fun EnterCodeContent(
 }
 
 @Composable
-private fun ScanQrPlaceholder() {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        Text("QR scanning coming soon.")
+private fun ScanQrContent(
+    error: String?,
+    onScanResult: (String) -> Unit,
+) {
+    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
+        // contents is null when the user backs out of the scanner.
+        result.contents?.let(onScanResult)
+    }
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Button(
+            onClick = {
+                scanLauncher.launch(
+                    ScanOptions().apply {
+                        setDesiredBarcodeFormats(ScanOptions.QR_CODE)
+                        setPrompt("Scan the invite QR code")
+                        setBeepEnabled(false)
+                    },
+                )
+            },
+            modifier = Modifier.fillMaxWidth(),
+        ) {
+            Text("Open camera")
+        }
+        if (error != null) {
+            Text(
+                error,
+                color = MaterialTheme.colorScheme.error,
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+        Text(
+            "Point the camera at the QR code from the invite.",
+            style = MaterialTheme.typography.bodySmall,
+        )
     }
 }
 

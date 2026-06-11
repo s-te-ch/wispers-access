@@ -16,8 +16,10 @@ wispersConnect = "0.9.0"
 hiltNavigationCompose = "1.2.0"
 navigationCompose = "2.9.8"
 ktor = "3.2.3"
+zxingEmbedded = "4.3.0"
 
 [libraries]
+zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxingEmbedded" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 androidx-junit = { group = "androidx.test.ext", name = "junit", version.ref = "junitVersion" }

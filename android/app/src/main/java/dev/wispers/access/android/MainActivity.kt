@@ -61,12 +61,17 @@ private fun AppNavHost() {
             )
         }
         composable(Route.ADD_SHARE) {
+            val context = LocalContext.current
             AddShareScreen(
                 onBack = { navController.popBackStack() },
                 onOpenShare = { id ->
+                    // Open the share itself; park the nav stack on the detail
+                    // screen so leaving the WebView doesn't land back on the
+                    // completed join flow.
                     navController.navigate(Route.shareDetail(id.value)) {
                         popUpTo(Route.SHARE_LIST)
                     }
+                    ShareActivity.launch(context, id)
                 },
             )
         }
