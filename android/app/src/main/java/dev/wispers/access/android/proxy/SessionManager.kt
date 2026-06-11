@@ -140,10 +140,20 @@ class SessionManager @Inject constructor(
         }
     }
 
-    private suspend fun getConnection(shareId: ShareId, node: Node): QuicConnection =
-        connMutex.withLock {
-            connections.getOrPut(shareId) { node.connectQuic(SERVING_NODE_NUMBER) }
+    private suspend fun getConnection(shareId: ShareId, node: Node): QuicConnection {
+        var established = false
+        val conn = connMutex.withLock {
+            connections.getOrPut(shareId) {
+                established = true
+                node.connectQuic(SERVING_NODE_NUMBER)
+            }
         }
+        // A cache miss means we just reached the serving node — record the
+        // contact (cache hits reuse a live connection, so they aren't "new").
+        // Done outside the lock to keep the DB write off the connect path.
+        if (established) runCatching { repo.markConnected(shareId) }
+        return conn
+    }
 
     private companion object {
         const val SERVING_NODE_NUMBER = 1
