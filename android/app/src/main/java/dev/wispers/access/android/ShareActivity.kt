@@ -181,6 +181,14 @@ private fun buildShortcut(
 /**
  * Requests that the launcher pin a home-screen shortcut that opens [shareId].
  * Returns false if the current launcher doesn't support pinning shortcuts.
+ *
+ * Also registers the share as a dynamic shortcut. This is deliberate, for two
+ * reasons: it puts the share in the app icon's long-press menu (quick access),
+ * and — crucially — that menu's pin (+) affordance uses the launcher's own
+ * drag-pin path, which reliably places the icon. The programmatic
+ * requestPinShortcut below silently wedges on the Pixel Launcher (Android 16):
+ * the pin registers but the icon never lands on the workspace. So the dynamic
+ * shortcut is the working fallback; the UI points users to it.
  */
 fun addToHomescreen(
     context: Context,
@@ -189,11 +197,9 @@ fun addToHomescreen(
     iconPng: ByteArray?,
 ): Boolean {
     if (!ShortcutManagerCompat.isRequestPinShortcutSupported(context)) return false
-    return ShortcutManagerCompat.requestPinShortcut(
-        context,
-        buildShortcut(context, shareId, nickname, iconPng),
-        null,
-    )
+    val shortcut = buildShortcut(context, shareId, nickname, iconPng)
+    runCatching { ShortcutManagerCompat.pushDynamicShortcut(context, shortcut) }
+    return ShortcutManagerCompat.requestPinShortcut(context, shortcut, null)
 }
 
 /**
@@ -208,12 +214,15 @@ fun refreshShortcut(context: Context, shareId: ShareId, nickname: String, iconPn
 }
 
 /**
- * Disables any pinned shortcut for [shareId]. Apps can't delete pinned
- * shortcuts — disabling greys the icon and shows [message] when tapped.
- * Safe to call when no shortcut exists.
+ * Tears down a removed share's shortcuts: drops the dynamic entry (so it leaves
+ * the app's long-press menu) and disables any pinned home-screen shortcut. Apps
+ * can't delete pinned shortcuts — disabling greys the icon and shows [message]
+ * when tapped. Safe to call when no shortcut exists.
  */
 fun disableShortcut(context: Context, shareId: ShareId, message: String) {
-    ShortcutManagerCompat.disableShortcuts(context, listOf("share-${shareId.value}"), message)
+    val id = "share-${shareId.value}"
+    ShortcutManagerCompat.removeDynamicShortcuts(context, listOf(id))
+    ShortcutManagerCompat.disableShortcuts(context, listOf(id), message)
 }
 
 /** Decodes a `data:` URL's base64 payload, or null if malformed. */

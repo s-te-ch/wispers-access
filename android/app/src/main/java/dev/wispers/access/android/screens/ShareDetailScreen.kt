@@ -228,6 +228,12 @@ private fun ShareDetailContent(
             ) {
                 Text("Add to homescreen")
             }
+            Text(
+                "When the dialog appears, drag the icon onto your home screen. " +
+                    "(On some phones the “Add automatically” button does nothing.)",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
             OutlinedButton(
                 onClick = onRemove,
                 modifier = Modifier.fillMaxWidth(),
