@@ -87,9 +87,7 @@ async fn try_forward(
     // Rewrite the response on the way back.
     let (mut parts, body) = upstream_resp.into_parts();
     strip_hop_by_hop(&mut parts.headers);
-    let body: BoxedBody = body
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-        .boxed();
+    let body: BoxedBody = body.map_err(std::io::Error::other).boxed();
     Ok(hyper::Response::from_parts(parts, body))
 }
 

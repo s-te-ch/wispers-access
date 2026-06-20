@@ -3,7 +3,6 @@
 use crate::storage;
 use crate::wcbe;
 use anyhow::{Context, Result};
-use wispers_connect;
 
 /// Initialise a new app share.
 pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
@@ -12,7 +11,7 @@ pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
         anyhow::bail!("Invalid share name '{}'", share);
     }
     let store = storage::ShareStateStore::new(share)?;
-    if let Some(_) = store.load_share_config()? {
+    if store.load_share_config()?.is_some() {
         anyhow::bail!("Share {} already exists", share);
     }
 
@@ -21,7 +20,7 @@ pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
     let cg_id = wcbe_client.add_connectivity_group(display_name).await?;
 
     // Write the ShareConfig.
-    let cfg = storage::ShareConfig::new(&api_key, &cg_id);
+    let cfg = storage::ShareConfig::new(api_key, &cg_id);
     store.save_share_config(&cfg)?;
 
     // Create the serving Wispers node.
@@ -30,7 +29,7 @@ pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
 
     // Register the node with the Wispers backend.
     let token = wcbe_client
-        .get_registration_token(&cg_id, Some("Server".into()), None /* metadata */)
+        .get_registration_token(&cg_id, Some("Server"), None /* metadata */)
         .await?;
     node.register(&token).await.context("registration failed")?;
 

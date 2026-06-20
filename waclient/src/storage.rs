@@ -1,7 +1,6 @@
 //! Persistent storage for waclient.
 
 use anyhow::{Context, Result};
-use rusqlite;
 use rusqlite_migration::Migrations;
 use std::fs;
 use std::path::PathBuf;

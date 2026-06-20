@@ -286,7 +286,6 @@ async fn send_response(mut writer: WriteHalf, resp: Response) {
     }
     if let Err(e) = writer.flush().await {
         error!(error = %e, "Failed to flush");
-        return;
     }
 }
 

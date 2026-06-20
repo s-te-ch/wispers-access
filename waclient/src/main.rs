@@ -62,7 +62,7 @@ fn main() -> Result<()> {
 async fn async_main(command: Command) -> Result<()> {
     match command {
         Command::Join { invite_code } => join(&invite_code).await,
-        Command::Serve { port } => serve(port.clone()).await,
+        Command::Serve { port } => serve(port).await,
     }
 }
 
@@ -102,7 +102,7 @@ async fn join(invite_code: &str) -> Result<()> {
         "Joined share: {}\n  Hostname: {}\n  Connectivity group: {}\n  Node: {}\n",
         display_name,
         hostname,
-        node.connectivity_group_id().unwrap().to_string(),
+        node.connectivity_group_id().unwrap(),
         node.node_number().unwrap(),
     );
     Ok(())
@@ -259,9 +259,7 @@ async fn forward(
     // Rewrite the response on the way back.
     let (mut parts, body) = resp.into_parts();
     strip_hop_by_hop_headers(&mut parts.headers);
-    let body: BoxedBody = body
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
-        .boxed();
+    let body: BoxedBody = body.map_err(std::io::Error::other).boxed();
     Ok(hyper::Response::from_parts(parts, body))
 }
 
@@ -347,14 +345,14 @@ impl StreamFactory {
         };
         // Open a stream with a single retry. This covers the case when the
         // connection has died and needed reestablishing.
-        match self.try_open_stream(cg_id, &node).await {
+        match self.try_open_stream(cg_id, node).await {
             Ok(s) => Ok(s),
             Err(e) => {
                 eprintln!(
                     "[{}] open_stream attempt 1 failed, retrying once: {:#}",
                     cg_id, e
                 );
-                self.try_open_stream(cg_id, &node).await
+                self.try_open_stream(cg_id, node).await
             }
         }
     }
