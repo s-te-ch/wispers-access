@@ -1,0 +1,452 @@
+<!DOCTYPE html>
+<html lang="de-CH">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<link rel="icon" href="/favicon.png">
+<title>Einsatzplan · Birrer Haustechnik</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#EEF1F4;
+    --surface:#FFFFFF;
+    --ink:#1A2430;
+    --muted:#69727F;
+    --faint:#9AA2AC;
+    --line:#E4E8ED;
+    --line-strong:#D4DAE1;
+    --brand:#0F766E;
+    --brand-ink:#0B5A53;
+    --brand-wash:#E5F1EF;
+    --open:#B45309;
+    --open-wash:#FBEFDD;
+    --route:#1D6FB8;
+    --route-wash:#E4EFF8;
+    --done:#5C8A4A;
+    --done-wash:#EAF1E5;
+    --sans:"IBM Plex Sans",system-ui,-apple-system,sans-serif;
+    --mono:"IBM Plex Mono",ui-monospace,monospace;
+    --shadow:0 1px 2px rgba(20,30,45,.05),0 4px 16px rgba(20,30,45,.06);
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;}
+  body{
+    background:var(--bg);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:15px;
+    line-height:1.45;
+    -webkit-font-smoothing:antialiased;
+  }
+  .app{
+    max-width:460px;
+    margin:0 auto;
+    min-height:100vh;
+    background:var(--bg);
+    display:flex;
+    flex-direction:column;
+  }
+
+  /* ---------- app bar ---------- */
+  .bar{
+    position:sticky;top:0;z-index:20;
+    background:var(--surface);
+    border-bottom:1px solid var(--line);
+    padding:14px 16px 12px;
+  }
+  .bar-top{display:flex;align-items:center;justify-content:space-between;gap:12px;}
+  .brand{display:flex;align-items:center;gap:10px;min-width:0;}
+  .logo{
+    flex:none;width:34px;height:34px;border-radius:9px;
+    background:linear-gradient(150deg,var(--brand),var(--brand-ink));
+    display:flex;align-items:center;justify-content:center;
+    box-shadow:0 2px 6px rgba(15,118,110,.28);
+  }
+  .logo svg{width:20px;height:20px;color:#fff;}
+  .brand-name{font-weight:700;font-size:15.5px;letter-spacing:-.01em;line-height:1.1;}
+  .brand-sub{font-size:11px;color:var(--muted);letter-spacing:.02em;}
+
+  .user{display:flex;align-items:center;gap:8px;}
+  .user-text{text-align:right;line-height:1.15;}
+  .user-name{font-size:12.5px;font-weight:600;display:flex;align-items:center;gap:4px;justify-content:flex-end;}
+  .user-role{font-size:10.5px;color:var(--muted);}
+  .verptr{color:var(--brand);display:inline-flex;}
+  .verptr svg{width:12px;height:12px;}
+  .avatar{
+    flex:none;width:34px;height:34px;border-radius:50%;
+    display:flex;align-items:center;justify-content:center;
+    font-size:12px;font-weight:600;color:#fff;letter-spacing:.02em;
+  }
+
+  /* ---------- day tabs ---------- */
+  .days{
+    display:flex;gap:6px;margin-top:14px;
+  }
+  .day{
+    flex:1;border:1px solid var(--line);background:var(--surface);
+    border-radius:10px;padding:7px 0 6px;text-align:center;cursor:pointer;
+    transition:border-color .15s,background .15s,color .15s;
+  }
+  .day .dow{font-size:11px;font-weight:600;color:var(--muted);letter-spacing:.04em;text-transform:uppercase;}
+  .day .dnum{font-size:16px;font-weight:600;margin-top:1px;font-family:var(--mono);}
+  .day.today .dow{color:var(--brand);}
+  .day.active{background:var(--brand);border-color:var(--brand);}
+  .day.active .dow,.day.active .dnum{color:#fff;}
+
+  /* ---------- summary strip ---------- */
+  .summary{
+    display:flex;align-items:center;gap:14px;
+    padding:11px 16px;border-bottom:1px solid var(--line);
+    background:var(--surface);
+  }
+  .stat{display:flex;align-items:baseline;gap:5px;}
+  .stat .n{font-family:var(--mono);font-weight:600;font-size:15px;}
+  .stat .l{font-size:12px;color:var(--muted);}
+  .stat .dot{width:7px;height:7px;border-radius:50%;display:inline-block;margin-right:2px;}
+
+  /* ---------- filter chips ---------- */
+  .filters{
+    display:flex;gap:7px;overflow-x:auto;padding:12px 16px 4px;
+    -webkit-overflow-scrolling:touch;scrollbar-width:none;
+  }
+  .filters::-webkit-scrollbar{display:none;}
+  .chip{
+    flex:none;display:flex;align-items:center;gap:6px;
+    border:1px solid var(--line-strong);background:var(--surface);
+    border-radius:999px;padding:5px 12px 5px 6px;font-size:12.5px;font-weight:500;
+    color:var(--ink);cursor:pointer;transition:all .15s;white-space:nowrap;
+  }
+  .chip.all{padding-left:12px;}
+  .chip .av{width:20px;height:20px;border-radius:50%;font-size:9.5px;}
+  .chip.active{background:var(--ink);border-color:var(--ink);color:#fff;}
+  .chip.active .av{outline:1.5px solid rgba(255,255,255,.5);}
+
+  /* ---------- job list ---------- */
+  .list{padding:12px 16px 28px;display:flex;flex-direction:column;gap:10px;flex:1;}
+  .job{
+    background:var(--surface);border:1px solid var(--line);border-radius:13px;
+    box-shadow:var(--shadow);overflow:hidden;cursor:pointer;
+    transition:border-color .15s;
+  }
+  .job:hover{border-color:var(--line-strong);}
+  .job-main{display:flex;gap:12px;padding:13px 14px;align-items:flex-start;}
+  .job-time{
+    flex:none;width:50px;text-align:center;padding-top:1px;
+  }
+  .job-time .t{font-family:var(--mono);font-weight:600;font-size:14px;}
+  .job-time .dur{font-size:10.5px;color:var(--faint);margin-top:2px;}
+  .job-body{flex:1;min-width:0;}
+  .job-top{display:flex;align-items:center;gap:8px;}
+  .job-cust{font-weight:600;font-size:14.5px;letter-spacing:-.005em;flex:1;min-width:0;
+    overflow:hidden;text-overflow:ellipsis;white-space:nowrap;}
+  .status{
+    flex:none;display:inline-flex;align-items:center;gap:5px;
+    font-size:11px;font-weight:600;padding:3px 8px;border-radius:6px;white-space:nowrap;
+  }
+  .status .sd{width:6px;height:6px;border-radius:50%;}
+  .status.offen{background:var(--open-wash);color:var(--open);}
+  .status.offen .sd{background:var(--open);}
+  .status.unterwegs{background:var(--route-wash);color:var(--route);}
+  .status.unterwegs .sd{background:var(--route);}
+  .status.erledigt{background:var(--done-wash);color:var(--done);}
+  .status.erledigt .sd{background:var(--done);}
+  .job-meta{display:flex;align-items:center;gap:7px;margin-top:4px;color:var(--muted);font-size:12.5px;}
+  .job-meta .typ{color:var(--ink);font-weight:500;}
+  .job-meta .sep{color:var(--line-strong);}
+  .job-tech{display:flex;align-items:center;gap:6px;margin-top:9px;}
+  .job-tech .av{width:20px;height:20px;border-radius:50%;font-size:9.5px;}
+  .job-tech .tn{font-size:12px;color:var(--muted);}
+
+  .job-detail{
+    max-height:0;overflow:hidden;
+    border-top:0 solid var(--line);
+    transition:max-height .28s ease;
+  }
+  .job.open .job-detail{max-height:240px;border-top:1px solid var(--line);}
+  .detail-inner{padding:12px 14px 14px;}
+  .drow{display:flex;gap:8px;font-size:13px;margin-bottom:7px;color:var(--ink);}
+  .drow svg{width:15px;height:15px;color:var(--faint);flex:none;margin-top:2px;}
+  .drow .dnote{color:var(--muted);}
+  .dactions{display:flex;gap:8px;margin-top:11px;}
+  .dbtn{
+    flex:1;display:flex;align-items:center;justify-content:center;gap:6px;
+    border:1px solid var(--line-strong);background:var(--surface);border-radius:9px;
+    padding:9px 0;font-size:12.5px;font-weight:600;color:var(--brand-ink);cursor:pointer;
+  }
+  .dbtn svg{width:15px;height:15px;}
+  .dbtn.primary{background:var(--brand);border-color:var(--brand);color:#fff;}
+
+  .empty{
+    text-align:center;color:var(--muted);padding:48px 20px;font-size:13.5px;
+  }
+
+  .foot{
+    padding:14px 16px 26px;border-top:1px solid var(--line);
+    font-size:11px;color:var(--faint);text-align:center;letter-spacing:.02em;
+  }
+  .foot .v{color:var(--muted);}
+
+  .chev{transition:transform .25s;color:var(--faint);}
+  .job.open .chev{transform:rotate(180deg);}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+
+  <header class="bar">
+    <div class="bar-top">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3c0 4-4 5-4 9a4 4 0 0 0 8 0c0-4-4-5-4-9z"/>
+          </svg>
+        </span>
+        <div>
+          <div class="brand-name">Birrer Haustechnik</div>
+          <div class="brand-sub">Einsatzplan Aussendienst</div>
+        </div>
+      </div>
+      <div class="user">
+        <div class="user-text">
+          <div class="user-name">
+            <span id="userName">M. Scheidegger</span>
+            <span class="verptr" title="Identität verifiziert">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+            </span>
+          </div>
+          <div class="user-role">Disponent</div>
+        </div>
+        <span class="avatar" id="userAvatar" style="background:#475569">MS</span>
+      </div>
+    </div>
+    <nav class="days" id="days"></nav>
+  </header>
+
+  <div class="summary" id="summary"></div>
+  <div class="filters" id="filters"></div>
+  <main class="list" id="list"></main>
+
+  <footer class="foot">
+    Birrer Haustechnik AG · Uster &nbsp;·&nbsp; <span class="v">Internes Dispositionssystem</span>
+  </footer>
+
+</div>
+
+<script>
+(function(){
+  "use strict";
+
+  /* ===========================================================
+     IDENTITY — same seam as the guest book. The signed-in
+     dispatcher's verified name comes from Access; there is no
+     login screen. Override for recordings with ?as=Name
+     =========================================================== */
+  function getIdentity(){
+    var inj = window.WISPERS_IDENTITY, q = new URLSearchParams(location.search);
+    return { name: q.get("as") || (inj&&inj.name) || "Matthias Scheidegger" };
+  }
+  var me = getIdentity();
+  (function setUser(){
+    var parts = me.name.trim().split(/\s+/);
+    var short = parts.length>1 ? (parts[0][0]+". "+parts[parts.length-1]) : me.name;
+    var ini = (parts[0][0]+(parts.length>1?parts[parts.length-1][0]:"")).toUpperCase();
+    document.getElementById("userName").textContent = short;
+    document.getElementById("userAvatar").textContent = ini;
+  })();
+
+  /* ---- technicians ---- */
+  var TECH = {
+    RF:{name:"Reto Furrer",   color:"#1D6FB8"},
+    AK:{name:"Aline Koch",    color:"#0F766E"},
+    DY:{name:"Deniz Yilmaz",  color:"#B45309"},
+    SB:{name:"Sandra Bühler", color:"#7C3AED"}
+  };
+
+  /* ---- the week (Mo–Fr), seeded with realistic dispatch ---- */
+  var DAYS = [
+    {key:"mo",dow:"Mo"}, {key:"di",dow:"Di"}, {key:"mi",dow:"Mi"},
+    {key:"do",dow:"Do"}, {key:"fr",dow:"Fr"}
+  ];
+
+  var JOBS = {
+    mo:[
+      {t:"07:45",dur:"1.5h",cust:"Familie Brunner",town:"Küsnacht",typ:"Service Wärmepumpe",tech:"RF",st:"erledigt",
+       addr:"Seestrasse 14, 8700 Küsnacht",tel:"044 910 22 18",note:"Jahresservice WP, Filter ersetzen."},
+      {t:"09:30",dur:"2h",cust:"Restaurant Sonne",town:"Uster",typ:"Lüftung Inspektion",tech:"AK",st:"unterwegs",
+       addr:"Bahnhofstrasse 3, 8610 Uster",tel:"044 940 67 02",note:"Küchenlüftung, Lärmreklamation vom Vormieter."},
+      {t:"10:15",dur:"1h",cust:"Alterszentrum Tannacker",town:"Wetzikon",typ:"Heizung Wartung",tech:"DY",st:"offen",
+       addr:"Tannackerstrasse 22, 8620 Wetzikon",tel:"043 833 41 00",note:"Wartung vor Heizsaison. Hauswart vor Ort: Hr. Imhof."},
+      {t:"13:00",dur:"2.5h",cust:"Birrer (Eigenobjekt)",town:"Dübendorf",typ:"Inbetriebnahme WP",tech:"RF",st:"offen",
+       addr:"Industriestrasse 7, 8600 Dübendorf",tel:"—",note:"Neue Sole-WP, Inbetriebnahme + Einregulierung."},
+      {t:"15:00",dur:"1h",cust:"Familie Steiner",town:"Stäfa",typ:"Offerte vor Ort",tech:"SB",st:"offen",
+       addr:"Rebbergweg 9, 8712 Stäfa",tel:"079 412 88 31",note:"Beratung Boilerersatz, Foto vom Anschluss machen."}
+    ],
+    di:[
+      {t:"08:00",dur:"1h",cust:"Garage Lüthi AG",town:"Volketswil",typ:"Störung Heizung",tech:"DY",st:"unterwegs",
+       addr:"Zürichstrasse 41, 8604 Volketswil",tel:"044 945 12 60",note:"Keine Wärme in Werkstatt. Priorität hoch."},
+      {t:"08:30",dur:"2h",cust:"Familie Meier",town:"Herrliberg",typ:"Boiler-Ersatz",tech:"RF",st:"offen",
+       addr:"Forchstrasse 88, 8704 Herrliberg",tel:"044 915 33 47",note:"Alter Boiler 300L raus, neuer rein. Wasser abstellen lassen."},
+      {t:"10:00",dur:"1.5h",cust:"Praxis Dr. Wyss",town:"Meilen",typ:"Service Wärmepumpe",tech:"AK",st:"offen",
+       addr:"Dorfstrasse 26, 8706 Meilen",tel:"044 923 70 70",note:"Service nur vor 11:30 möglich (Sprechstunde)."},
+      {t:"11:30",dur:"45min",cust:"Coiffure Bella",town:"Uster",typ:"Sanitär Notfall",tech:"SB",st:"offen",
+       addr:"Poststrasse 12, 8610 Uster",tel:"044 941 19 05",note:"Abfluss verstopft, Wasser läuft nicht ab."},
+      {t:"14:00",dur:"2h",cust:"Wohnbaugen. Seefeld",town:"Zürich",typ:"Heizung Wartung",tech:"DY",st:"offen",
+       addr:"Seefeldstrasse 201, 8008 Zürich",tel:"044 380 55 00",note:"3 Liegenschaften, Schlüssel bei Verwaltung abholen."},
+      {t:"16:00",dur:"1h",cust:"Familie Tanner",town:"Thalwil",typ:"Offerte vor Ort",tech:"RF",st:"offen",
+       addr:"Seestrasse 55, 8800 Thalwil",tel:"079 220 41 12",note:"Interesse an PV + WP Kombination."}
+    ],
+    mi:[
+      {t:"07:30",dur:"3h",cust:"Schreinerei Hug",town:"Wetzikon",typ:"Lüftung Inspektion",tech:"AK",st:"offen",
+       addr:"Gewerbestrasse 18, 8620 Wetzikon",tel:"043 488 21 33",note:"Absauganlage + Hallenlüftung. Ganzer Vormittag."},
+      {t:"09:00",dur:"1.5h",cust:"Familie Roth",town:"Horgen",typ:"Service Wärmepumpe",tech:"RF",st:"offen",
+       addr:"Bergstrasse 4, 8810 Horgen",tel:"044 725 60 18",note:"Kunde meldet leichtes Brummen nachts."},
+      {t:"11:00",dur:"1h",cust:"Kita Sonnenschein",town:"Dübendorf",typ:"Heizung Wartung",tech:"DY",st:"offen",
+       addr:"Hochbordstrasse 9, 8600 Dübendorf",tel:"044 821 04 40",note:"Wartung während Mittagsschlaf der Kinder, leise arbeiten."},
+      {t:"14:00",dur:"2h",cust:"Familie Keller",town:"Rapperswil",typ:"Inbetriebnahme WP",tech:"SB",st:"offen",
+       addr:"Halsgasse 31, 8640 Rapperswil",tel:"055 210 88 02",note:"Einregulierung + Kundeneinweisung."}
+    ],
+    do:[
+      {t:"08:00",dur:"1h",cust:"Migros Filiale",town:"Uster",typ:"Störung Heizung",tech:"DY",st:"offen",
+       addr:"Zürichstrasse 1, 8610 Uster",tel:"044 905 30 30",note:"Eingang zieht kalt. Vor Ladenöffnung erledigen."},
+      {t:"09:30",dur:"2.5h",cust:"Familie Frei",town:"Erlenbach",typ:"Boiler-Ersatz",tech:"RF",st:"offen",
+       addr:"Seestrasse 76, 8703 Erlenbach",tel:"044 910 14 73",note:"Enger Heizraum, kleines Gerät einplanen."},
+      {t:"10:00",dur:"1.5h",cust:"Architekt Brand & Co",town:"Zürich",typ:"Offerte vor Ort",tech:"SB",st:"offen",
+       addr:"Limmatquai 92, 8001 Zürich",tel:"043 444 12 00",note:"Aufnahme für Sanierung MFH, Pläne mitbringen."},
+      {t:"13:30",dur:"2h",cust:"Familie Gerber",town:"Männedorf",typ:"Service Wärmepumpe",tech:"AK",st:"offen",
+       addr:"Bahnhofstrasse 40, 8708 Männedorf",tel:"044 920 51 66",note:"Service + Garantiecheck Jahr 2."},
+      {t:"15:30",dur:"1h",cust:"Bäckerei Stutz",town:"Wetzikon",typ:"Sanitär Notfall",tech:"DY",st:"offen",
+       addr:"Bahnhofstrasse 88, 8620 Wetzikon",tel:"044 930 22 11",note:"Leck unter Spülbecken Backstube."}
+    ],
+    fr:[
+      {t:"07:45",dur:"2h",cust:"Familie Widmer",town:"Zollikon",typ:"Inbetriebnahme WP",tech:"RF",st:"offen",
+       addr:"Alte Landstrasse 19, 8702 Zollikon",tel:"044 391 70 25",note:"Inbetriebnahme, Bauherr anwesend."},
+      {t:"09:00",dur:"1.5h",cust:"Tennisclub Uster",town:"Uster",typ:"Heizung Wartung",tech:"DY",st:"offen",
+       addr:"Sportzentrum, 8610 Uster",tel:"044 940 33 12",note:"Wartung Hallenheizung vor Wochenendturnier."},
+      {t:"10:30",dur:"1h",cust:"Familie Bachmann",town:"Küsnacht",typ:"Service Wärmepumpe",tech:"AK",st:"offen",
+       addr:"Untere Heslibachstrasse 5, 8700 Küsnacht",tel:"044 913 27 80",note:"Routineservice."},
+      {t:"13:00",dur:"30min",cust:"Büro Birrer",town:"Uster",typ:"Wochenrapport",tech:"SB",st:"offen",
+       addr:"Industriestrasse 12, 8610 Uster",tel:"—",note:"Material nachbestellen, Rapporte abgeben."}
+    ]
+  };
+
+  /* ---- week dates (real current week, Mo–Fr) ---- */
+  function weekDates(){
+    var now=new Date(); var d=now.getDay(); // 0=Sun..6=Sat
+    var offsetToMon=(d===0?-6:1-d);
+    var mon=new Date(now); mon.setDate(now.getDate()+offsetToMon);
+    var out=[];
+    for(var i=0;i<5;i++){var x=new Date(mon);x.setDate(mon.getDate()+i);out.push(x);}
+    return {dates:out, todayIdx:(d>=1&&d<=5)?d-1:0};
+  }
+  var WK=weekDates();
+
+  var state={ day:DAYS[WK.todayIdx].key, filter:"all" };
+
+  function avatar(ini,color,cls){
+    return '<span class="avatar av '+(cls||'')+'" style="background:'+color+'">'+ini+'</span>';
+  }
+  function esc(s){var d=document.createElement("div");d.textContent=s;return d.innerHTML;}
+
+  /* ---- day tabs ---- */
+  function renderDays(){
+    var html="";
+    DAYS.forEach(function(D,i){
+      var act=state.day===D.key, today=i===WK.todayIdx;
+      html+='<button class="day'+(act?' active':'')+(today?' today':'')+'" data-day="'+D.key+'">'
+          +   '<div class="dow">'+D.dow+'</div>'
+          +   '<div class="dnum">'+WK.dates[i].getDate()+'</div>'
+          + '</button>';
+    });
+    document.getElementById("days").innerHTML=html;
+  }
+
+  /* ---- summary ---- */
+  function renderSummary(){
+    var jobs=JOBS[state.day]||[];
+    var techs={}; jobs.forEach(function(j){techs[j.tech]=1;});
+    var open=jobs.filter(function(j){return j.st==="offen";}).length;
+    var route=jobs.filter(function(j){return j.st==="unterwegs";}).length;
+    document.getElementById("summary").innerHTML=
+        '<div class="stat"><span class="n">'+jobs.length+'</span><span class="l">Aufträge</span></div>'
+      + '<div class="stat"><span class="n">'+Object.keys(techs).length+'</span><span class="l">Techniker</span></div>'
+      + '<div class="stat"><span class="dot" style="background:var(--open)"></span><span class="n">'+open+'</span><span class="l">offen</span></div>'
+      + '<div class="stat"><span class="dot" style="background:var(--route)"></span><span class="n">'+route+'</span><span class="l">unterwegs</span></div>';
+  }
+
+  /* ---- filter chips ---- */
+  function renderFilters(){
+    var html='<button class="chip all'+(state.filter==="all"?' active':'')+'" data-f="all">Alle</button>';
+    Object.keys(TECH).forEach(function(k){
+      var t=TECH[k],act=state.filter===k;
+      html+='<button class="chip'+(act?' active':'')+'" data-f="'+k+'">'
+          + avatar(k,t.color)+t.name.split(" ")[0]+'</button>';
+    });
+    document.getElementById("filters").innerHTML=html;
+  }
+
+  var statusLabel={offen:"Offen",unterwegs:"Unterwegs",erledigt:"Erledigt"};
+
+  /* ---- job list ---- */
+  function renderList(){
+    var jobs=(JOBS[state.day]||[]).slice();
+    if(state.filter!=="all") jobs=jobs.filter(function(j){return j.tech===state.filter;});
+    jobs.sort(function(a,b){return a.t.localeCompare(b.t);});
+
+    if(!jobs.length){
+      document.getElementById("list").innerHTML='<div class="empty">Keine Aufträge für diese Auswahl.</div>';
+      return;
+    }
+    var html="";
+    jobs.forEach(function(j,idx){
+      var t=TECH[j.tech];
+      html+='<article class="job" data-idx="'+idx+'">'
+        + '<div class="job-main">'
+        +   '<div class="job-time"><div class="t">'+j.t+'</div><div class="dur">'+j.dur+'</div></div>'
+        +   '<div class="job-body">'
+        +     '<div class="job-top">'
+        +       '<span class="job-cust">'+esc(j.cust)+'</span>'
+        +       '<span class="status '+j.st+'"><span class="sd"></span>'+statusLabel[j.st]+'</span>'
+        +     '</div>'
+        +     '<div class="job-meta"><span class="typ">'+esc(j.typ)+'</span><span class="sep">·</span><span>'+esc(j.town)+'</span></div>'
+        +     '<div class="job-tech">'+avatar(j.tech,t.color)+'<span class="tn">'+esc(t.name)+'</span>'
+        +       '<svg class="chev" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-left:auto"><path d="m6 9 6 6 6-6"/></svg>'
+        +     '</div>'
+        +   '</div>'
+        + '</div>'
+        + '<div class="job-detail"><div class="detail-inner">'
+        +   '<div class="drow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 10c0 6-8 12-8 12s-8-6-8-12a8 8 0 0 1 16 0z"/><circle cx="12" cy="10" r="3"/></svg><span>'+esc(j.addr)+'</span></div>'
+        +   '<div class="drow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3.1-8.7A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.4-1.2a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/></svg><span>'+esc(j.tel)+'</span></div>'
+        +   '<div class="drow"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3v4a1 1 0 0 0 1 1h4"/><path d="M17 21H7a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7l5 5v11a2 2 0 0 1-2 2z"/></svg><span class="dnote">'+esc(j.note)+'</span></div>'
+        +   '<div class="dactions">'
+        +     '<button class="dbtn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="3 11 22 2 13 21 11 13 3 11"/></svg>Navigation</button>'
+        +     '<button class="dbtn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 16.9v3a2 2 0 0 1-2.2 2 19.8 19.8 0 0 1-8.6-3.1 19.5 19.5 0 0 1-6-6 19.8 19.8 0 0 1-3.1-8.7A2 2 0 0 1 4.1 2h3a2 2 0 0 1 2 1.7c.1.9.4 1.8.7 2.7a2 2 0 0 1-.5 2.1L8.1 9.9a16 16 0 0 0 6 6l1.4-1.2a2 2 0 0 1 2.1-.4c.9.3 1.8.6 2.7.7a2 2 0 0 1 1.7 2z"/></svg>Anrufen</button>'
+        +   '</div>'
+        + '</div></div>'
+        + '</article>';
+    });
+    document.getElementById("list").innerHTML=html;
+  }
+
+  function renderAll(){ renderDays(); renderSummary(); renderFilters(); renderList(); }
+  renderAll();
+
+  /* ---- interactions ---- */
+  document.getElementById("days").addEventListener("click",function(e){
+    var b=e.target.closest(".day"); if(!b)return;
+    state.day=b.dataset.day; renderAll();
+  });
+  document.getElementById("filters").addEventListener("click",function(e){
+    var b=e.target.closest(".chip"); if(!b)return;
+    state.filter=b.dataset.f; renderFilters(); renderList();
+  });
+  document.getElementById("list").addEventListener("click",function(e){
+    if(e.target.closest(".dbtn")){e.stopPropagation();return;}
+    var j=e.target.closest(".job"); if(!j)return;
+    j.classList.toggle("open");
+  });
+})();
+</script>
+</body>
+</html>
