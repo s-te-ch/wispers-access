@@ -1,5 +1,6 @@
 //! Share initialisation & tear-down
 
+use crate::ipc;
 use crate::storage;
 use crate::wcbe;
 use anyhow::{Context, Result};
@@ -41,6 +42,32 @@ pub async fn down(share: &str) -> Result<()> {
     let Some(cfg) = store.load_share_config()? else {
         anyhow::bail!("Could not find share '{}'", share);
     };
+
+    // Refuse to tear down a share while its server is still running.
+    if let Ok(mut client) = ipc::Client::connect(share).await {
+        // A reachable socket means a daemon is serving this share. Name its
+        // port in the message if it answers promptly, but don't hang on a
+        // wedged daemon.
+        let port_hint = match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.request(&ipc::Request::Status),
+        )
+        .await
+        {
+            Ok(Ok(ipc::Response::Success {
+                data: ipc::ResponseData::Status(status),
+                ..
+            })) => format!(" on port {}", status.local_port),
+            _ => String::new(),
+        };
+        anyhow::bail!(
+            "share '{}' has a running server{}; stop it first with `waserver stop {}`",
+            share,
+            port_hint,
+            share
+        );
+    }
+
     // Remove the Wispers connectivity group. This deregisters all nodes.
     let wcbe_client = wcbe::Client::new(&cfg.api_key);
     wcbe_client
