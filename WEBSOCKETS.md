@@ -41,30 +41,56 @@ stream for its lifetime.
 - [x] Capture browser-side + QUIC-side `OnUpgrade`, `splice_upgrade` on `101`
 - [x] Stream FINs via `QuicStream::poll_shutdown` when `copy_bidirectional` ends
 
-### Android — Ktor inbound + hand-rolled HTTP over QUIC stream
-- [ ] Inbound: respond with `OutgoingContent.ProtocolUpgrade`; copy upstream
-      `101` headers (incl. `Sec-WebSocket-Accept`) into the upgrade response.
-      Branch in `ProxyServer.handleProxy` (`ProxyServer.kt:49`) on `Upgrade: websocket`
-- [ ] `UpstreamClient`: on `101`, two coroutines splice browser↔stream, then `finish()`/`close()`
-- [ ] **Flush `StreamReader`'s buffered prefix** to browser before splice loop
-      (8 KB reads already buffer post-header bytes, `UpstreamClient.kt:307-309`)
-- [ ] Skip `Connection: close` (`:73`) and post-head `finish()` (`:52`) for upgrades
-- [ ] Timeout (`EXCHANGE_TIMEOUT_MS`, `:42`) covers handshake only, not splice
-- [ ] Verify concurrent read+write on one `QuicStream` across the JNA bridge
+### Android — Ktor inbound + hand-rolled HTTP over QUIC stream ✅ DONE
+All in `UpstreamClient.kt` (no `ProxyServer.kt` change needed — the branch lives in `forward`).
+- [x] Inbound: respond with `OutgoingContent.ProtocolUpgrade`; upstream 101 headers
+      (incl. `Sec-WebSocket-Accept`) replayed via the content's `headers` property
+      (Ktor routes `Upgrade` through its `safeOnly=false` path; CIO adds none itself)
+- [x] **BUGFIX (device-found):** canonicalise the `Upgrade`/`Connection` header NAMES when
+      building the ProtocolUpgrade headers. Ktor's `commitHeaders` only allows the
+      engine-reserved `Upgrade` through via a CASE-SENSITIVE match on `HttpHeaders.Upgrade`
+      (`"Upgrade"`); hyper sends it lowercased (`upgrade`), so it hit the safe-append path
+      and threw `UnsafeHeaderException("…upgrade… controlled by the engine")` → the catch
+      invalidated the QUIC connection → WebView stuck "connecting". Desktop unaffected
+      (hyper writes the 101 itself, no Ktor check).
+- [x] `isUpgradeRequest` matches Ktor CIO's `expectHttpUpgrade` (GET + Upgrade + Connection:upgrade)
+      so `respond(ProtocolUpgrade)` is never rejected
+- [x] On `101`: two pumps splice browser↔stream in a `coroutineScope`; FIN via
+      `stream.finish()` on browser EOF, `output.flushAndClose()` on stream EOF
+- [x] Buffered prefix handled — `readSome()` already returns buffered bytes before reading fresh
+- [x] Skip `Connection: close` and post-head `finish()` for upgrades
+- [x] `EXCHANGE_TIMEOUT_MS` wraps only handshake; relay (respond) is outside it
+- [x] Relay errors caught inside the root coroutine (Ktor only join()s it → would be uncaught)
+- [x] Concurrent read+write on one `QuicStream` — source-verified safe (see Concurrency note below),
+      now also exercised live on-device (relay flowing) → JNA concurrent r/w confirmed working.
+
+## Concurrency note (the two-pump / copy_bidirectional safety)
+Verified against `wispers-client/wispers-connect/src/quic.rs`. `read`/`write`/`finish`
+take `&self` and lock the connection mutex ONLY for the brief quiche call — never
+across the await that waits for the other direction. `read` arms a notification,
+locks, tries `stream_recv`, and on `Done` releases the lock BEFORE `notified.await`,
+so a parked reader holds nothing and a concurrent `write` proceeds freely. Directions
+are independent (`recv_fin`/`sent_fin` atomics, separate notify). Poll path documents
+"conn lock is taken with try_lock (never held across an .await)". → No deadlock; covers
+both the Android two pumps and the Rust `copy_bidirectional`. Note: the library's
+hub-free `loopback_pair()` tests exist but `test_loopback_poll_io` is sequential, so a
+true full-duplex-on-one-stream test is a (deferred) gap one could fill in wispers-client.
 
 ### Cross-cutting
 - [x] Upgrade-aware header logic in waserver + waclient (preserve `Connection`+`Upgrade`
       on upgrades, keep stripping `proxy-*`/`te`/`trailers`/`keep-alive`)
-- [ ] Same header logic for Android (with Android impl)
+- [x] Same header logic for Android (`UPGRADE_HEADERS` kept in both directions)
 - [ ] Test idle socket vs ICE consent ~30s stall (access-stall-consent-freshness memory)
-- [ ] Test: echo-WS upstream + browser `new WebSocket(...)`, desktop + Android separately
+- [x] Test: echo-WS upstream + browser `new WebSocket(...)`, desktop ✅ + Android ✅ (Pixel 8, device-verified)
 
 ## Status
-**Rust pair (waserver + waclient): implemented.** Builds clean, clippy clean,
-existing tests pass. Source-verified against hyper 1.9 upgrade internals
-(`upgrade::on` claims the receiver; conn keeps its own `Pending` sender, so the
-upgrade still fires; `Upgraded` prepends buffered bytes via `Rewind`).
-NOT yet runtime-verified end-to-end — needs the live QUIC path (provisioned
-share + hub) or the Android client, neither available in this env yet.
+**Rust pair: implemented + verified working end-to-end (committed).**
+**Android: implemented + verified working on-device (Pixel 8).** WebView shows
+"connected"; logs show `GET /ws → 101` with no follow-on error; relay flowing.
+Required one device-found bugfix (Upgrade header-name casing — see BUGFIX above).
+`:app:compileDebugKotlin` + `:app:lintDebug` clean. **Android changes not yet committed.**
 
-Next: Android (Ktor `OutgoingContent.ProtocolUpgrade` + raw splice in `UpstreamClient`).
+Test upstream: `demo/ws-echo.py` (serves page + WS on one port; works for Android too).
+Repro tip: `adb forward tcp:10774 tcp:10774` + replay the handshake from the Mac, and
+`adb logcat -d ProxyServer:V UpstreamClient:V '*:S'` to see per-request status + errors.
+waserver (daemon) logs: `~/Library/Logs/waserver/<share>/waserver.log.<date>`.
