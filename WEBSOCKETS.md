@@ -26,18 +26,20 @@ stream for its lifetime.
 
 ## Checklist
 
-### waserver (`src/http.rs`) — hyper server on QUIC side, hyper client to local app
-- [ ] `.with_upgrades()` on server conn (`http.rs:27`)
-- [ ] Capture `hyper::upgrade::on(&mut req)` (peer side) before forwarding
-- [ ] On `101`: capture `hyper::upgrade::on(&mut resp)` (upstream side), spawn
-      task → `tokio::io::copy_bidirectional` between the two `TokioIo`-wrapped halves
-- [ ] Return the `101` with upgrade headers intact
+### waserver (`src/http.rs`) — hyper server on QUIC side, hyper client to local app ✅ DONE
+- [x] `.with_upgrades()` on server conn
+- [x] `conn.with_upgrades()` on upstream client conn
+- [x] Capture `hyper::upgrade::on(&mut req)` (peer side) before forwarding
+- [x] On `101`: capture `hyper::upgrade::on(&mut resp)`, spawn `splice_upgrade`
+      → `try_join!` both `OnUpgrade` → `copy_bidirectional` over `TokioIo` halves
+- [x] Return the `101` with handshake headers intact (empty body)
 
-### waclient (`src/main.rs`) — hyper server to browser, hyper client on QUIC stream
-- [ ] `.with_upgrades()` on server conn (`main.rs:185`)
-- [ ] Skip `Connection: close` injection for upgrades (`main.rs:241-244`)
-- [ ] Capture browser-side + QUIC-side `OnUpgrade`, `copy_bidirectional` on `101`
-- [ ] Ensure stream is finished/dropped on teardown (credit-leak memory)
+### waclient (`src/main.rs`) — hyper server to browser, hyper client on QUIC stream ✅ DONE
+- [x] `.with_upgrades()` on browser-facing server conn
+- [x] `conn.with_upgrades()` on QUIC-stream client conn
+- [x] Skip `Connection: close` injection for upgrades (exempt; FINs at socket close)
+- [x] Capture browser-side + QUIC-side `OnUpgrade`, `splice_upgrade` on `101`
+- [x] Stream FINs via `QuicStream::poll_shutdown` when `copy_bidirectional` ends
 
 ### Android — Ktor inbound + hand-rolled HTTP over QUIC stream
 - [ ] Inbound: respond with `OutgoingContent.ProtocolUpgrade`; copy upstream
@@ -51,10 +53,18 @@ stream for its lifetime.
 - [ ] Verify concurrent read+write on one `QuicStream` across the JNA bridge
 
 ### Cross-cutting
-- [ ] Upgrade-aware header logic (preserve `Connection: upgrade` + `Upgrade`,
-      keep stripping `proxy-*`/`te`/`trailers`/`keep-alive`) — touches all 3 strip fns
+- [x] Upgrade-aware header logic in waserver + waclient (preserve `Connection`+`Upgrade`
+      on upgrades, keep stripping `proxy-*`/`te`/`trailers`/`keep-alive`)
+- [ ] Same header logic for Android (with Android impl)
 - [ ] Test idle socket vs ICE consent ~30s stall (access-stall-consent-freshness memory)
 - [ ] Test: echo-WS upstream + browser `new WebSocket(...)`, desktop + Android separately
 
 ## Status
-Not started — plan only.
+**Rust pair (waserver + waclient): implemented.** Builds clean, clippy clean,
+existing tests pass. Source-verified against hyper 1.9 upgrade internals
+(`upgrade::on` claims the receiver; conn keeps its own `Pending` sender, so the
+upgrade still fires; `Upgraded` prepends buffered bytes via `Rewind`).
+NOT yet runtime-verified end-to-end — needs the live QUIC path (provisioned
+share + hub) or the Android client, neither available in this env yet.
+
+Next: Android (Ktor `OutgoingContent.ProtocolUpgrade` + raw splice in `UpstreamClient`).

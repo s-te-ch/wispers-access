@@ -183,12 +183,14 @@ async fn handle_connection(
     let service = hyper::service::service_fn(move |req| forward(req, stream_factory.clone()));
     http1_server::Builder::new()
         .serve_connection(tcp_stream, service)
+        // Allow a 101 to hand the browser socket over for raw relaying (WebSocket).
+        .with_upgrades()
         .await
         .context("HTTP/1 connection error")
 }
 
 async fn forward(
-    req: hyper::Request<Incoming>,
+    mut req: hyper::Request<Incoming>,
     stream_factory: Arc<StreamFactory>,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
     // Determine upstream server...
@@ -225,27 +227,36 @@ async fn forward(
         }
     };
     tokio::spawn(async move {
-        if let Err(e) = conn.await {
+        if let Err(e) = conn.with_upgrades().await {
             eprintln!("upstream connection error: {:#}", e);
         }
     });
 
+    // An Upgrade request (e.g. WebSocket) keeps its handshake headers and, on a
+    // 101, becomes a raw byte relay. Capture the browser-side upgrade now, before
+    // the request is consumed; it resolves once we send the 101 back.
+    let upgrade = is_upgrade_request(req.headers());
+    let peer_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
+
     // Rewrite the query.
     let (mut parts, body) = req.into_parts();
-    strip_hop_by_hop_headers(&mut parts.headers);
-    // One QUIC stream per request: force close so hyper FINs the stream on both
-    // ends after the single response, instead of holding it open in keep-alive.
-    // Otherwise the stream is never finished or dropped, quiche never collects
-    // it, and the peer never returns MAX_STREAMS credit — so open_stream
-    // eventually blocks and requests hang under load.
-    parts.headers.insert(
-        hyper::header::CONNECTION,
-        hyper::header::HeaderValue::from_static("close"),
-    );
+    strip_hop_by_hop_headers(&mut parts.headers, upgrade);
+    if !upgrade {
+        // One QUIC stream per request: force close so hyper FINs the stream on both
+        // ends after the single response, instead of holding it open in keep-alive.
+        // Otherwise the stream is never finished or dropped, quiche never collects
+        // it, and the peer never returns MAX_STREAMS credit — so open_stream
+        // eventually blocks and requests hang under load. An upgrade is exempt: it
+        // deliberately holds one stream open for the socket's lifetime, then FINs.
+        parts.headers.insert(
+            hyper::header::CONNECTION,
+            hyper::header::HeaderValue::from_static("close"),
+        );
+    }
     let rewritten = hyper::Request::from_parts(parts, body);
 
     // Forward to upstream and get response.
-    let resp = match sender.send_request(rewritten).await {
+    let mut resp = match sender.send_request(rewritten).await {
         Ok(r) => r,
         Err(e) => {
             eprintln!("[{}] send_request failed: {:#}", share, e);
@@ -256,11 +267,47 @@ async fn forward(
         }
     };
 
+    // Successful upgrade: hand both raw byte streams to a relay task and return
+    // the 101 to the browser with its handshake headers intact.
+    if resp.status() == StatusCode::SWITCHING_PROTOCOLS {
+        match peer_upgrade {
+            Some(peer_upgrade) => {
+                let upstream_upgrade = hyper::upgrade::on(&mut resp);
+                tokio::spawn(splice_upgrade(peer_upgrade, upstream_upgrade));
+            }
+            None => eprintln!("[{}] server returned 101 without an upgrade request", share),
+        }
+        let (mut parts, _body) = resp.into_parts();
+        strip_hop_by_hop_headers(&mut parts.headers, true);
+        return Ok(hyper::Response::from_parts(parts, empty_body()));
+    }
+
     // Rewrite the response on the way back.
     let (mut parts, body) = resp.into_parts();
-    strip_hop_by_hop_headers(&mut parts.headers);
+    strip_hop_by_hop_headers(&mut parts.headers, false);
     let body: BoxedBody = body.map_err(std::io::Error::other).boxed();
     Ok(hyper::Response::from_parts(parts, body))
+}
+
+/// Relay raw bytes both ways between the browser side and the QUIC-stream side
+/// after a successful protocol upgrade. Each direction ends at its own EOF — a
+/// half-close on one side is forwarded as a FIN while the opposite direction
+/// keeps flowing — so this returns only once both directions have closed. Both
+/// `Upgraded` halves carry any bytes hyper buffered past the handshake, so
+/// nothing is lost.
+async fn splice_upgrade(peer: hyper::upgrade::OnUpgrade, upstream: hyper::upgrade::OnUpgrade) {
+    let (peer, upstream) = match tokio::try_join!(peer, upstream) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("upgrade handshake did not complete: {:#}", e);
+            return;
+        }
+    };
+    let mut peer = TokioIo::new(peer);
+    let mut upstream = TokioIo::new(upstream);
+    if let Err(e) = tokio::io::copy_bidirectional(&mut peer, &mut upstream).await {
+        eprintln!("upgraded relay error: {:#}", e);
+    }
 }
 
 /// Extract host from the request. Works with both HTTP 1 & 2.
@@ -290,23 +337,49 @@ fn extract_share(host: &str) -> Result<String> {
 }
 
 /// Remove HTTP/1 hop-by-hop headers (RFC 7230 §6.1). `Transfer-Encoding` is
-/// handled by hyper itself, so we leave it alone.
+/// handled by hyper itself, so we leave it alone. On an Upgrade exchange,
+/// `Connection` and `Upgrade` are preserved — they carry the handshake.
 //
 // Note: To be fully compliant, this should also process the `Connection`
 // header's value to remove the headers it names. De facto, `keep-alive` and
 // `close` are the only headers getting set.
-fn strip_hop_by_hop_headers(headers: &mut hyper::HeaderMap) {
+fn strip_hop_by_hop_headers(headers: &mut hyper::HeaderMap, is_upgrade: bool) {
     for name in [
-        "connection",
         "keep-alive",
         "proxy-authenticate",
         "proxy-authorization",
         "te",
         "trailers",
-        "upgrade",
     ] {
         headers.remove(name);
     }
+    if !is_upgrade {
+        headers.remove("connection");
+        headers.remove("upgrade");
+    }
+}
+
+/// True if this is an HTTP/1.1 Upgrade request (e.g. WebSocket): a `Connection`
+/// header listing the `upgrade` token plus an `Upgrade` header naming the target
+/// protocol.
+fn is_upgrade_request(headers: &hyper::HeaderMap) -> bool {
+    headers.contains_key(hyper::header::UPGRADE) && connection_lists_upgrade(headers)
+}
+
+fn connection_lists_upgrade(headers: &hyper::HeaderMap) -> bool {
+    headers
+        .get(hyper::header::CONNECTION)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| {
+            v.split(',')
+                .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
+        })
+}
+
+fn empty_body() -> BoxedBody {
+    Full::new(Bytes::new())
+        .map_err(|never: Infallible| match never {})
+        .boxed()
 }
 
 fn error_response(status: hyper::StatusCode, msg: &str) -> hyper::Response<BoxedBody> {
