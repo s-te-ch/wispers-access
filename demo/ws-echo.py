@@ -25,6 +25,10 @@ import time
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+# Set by the --quiet flag: suppress the periodic server push so the socket sits
+# truly idle (no traffic either way) — for the consent/keepalive idle test.
+QUIET = False
+
 PAGE = ("""<!doctype html>
 <html>
 <head>
@@ -44,40 +48,62 @@ PAGE = ("""<!doctype html>
 </head>
 <body>
   <h2>Wispers Access — WebSocket test</h2>
-  <p>Status: <span id="status" class="bad">connecting…</span></p>
+  <p>Status: <span id="status" class="bad">connecting…</span>
+     &nbsp;·&nbsp; Idle: <span id="idle">0</span>s since last frame</p>
 
   <h3>Echo (client → server → client)</h3>
   <div id="echo" class="log"></div>
   <input id="msg" placeholder="type a message" autofocus>
   <button id="send">Send</button>
 
-  <h3>Server push (server → client, every 2s)</h3>
+  <h3 id="pushhead">Server push (server → client, every 2s)</h3>
   <div id="push" class="log"></div>
 
 <script>
   const scheme = location.protocol === "https:" ? "wss" : "ws";
   const url = scheme + "://" + location.host + "/ws";
+  const QUIET = __QUIET__;
   const statusEl = document.getElementById("status");
   const echoEl = document.getElementById("echo");
   const pushEl = document.getElementById("push");
+  const idleEl = document.getElementById("idle");
+  const pushHeadEl = document.getElementById("pushhead");
   function line(el, s) { const d = document.createElement("div"); d.textContent = s; el.appendChild(d); el.scrollTop = el.scrollHeight; }
+
+  let lastActivity = performance.now();
+  let pendingSend = null;
+  function markActivity() { lastActivity = performance.now(); }
+  setInterval(() => { idleEl.textContent = ((performance.now() - lastActivity) / 1000).toFixed(0); }, 250);
+  if (QUIET) pushHeadEl.textContent = "Server push — OFF (quiet/idle mode): socket stays silent until you Send";
 
   let ws;
   function connect() {
     line(echoEl, "→ connecting to " + url);
     ws = new WebSocket(url);
-    ws.onopen = () => { statusEl.textContent = "connected"; statusEl.className = "ok"; ws.send("hello from the browser"); };
+    ws.onopen = () => { statusEl.textContent = "connected"; statusEl.className = "ok"; send("hello from the browser"); };
     ws.onclose = () => { statusEl.textContent = "closed"; statusEl.className = "bad"; };
     ws.onerror = () => { statusEl.textContent = "error"; statusEl.className = "bad"; };
     ws.onmessage = (e) => {
-      if (e.data.startsWith("push ")) line(pushEl, e.data);
-      else line(echoEl, "← " + e.data);
+      markActivity();
+      if (e.data.startsWith("push ")) { line(pushEl, e.data); return; }
+      if (pendingSend !== null) {
+        const ms = (performance.now() - pendingSend).toFixed(0);
+        line(echoEl, "← " + e.data + "  (" + ms + " ms round-trip)");
+        pendingSend = null;
+      } else {
+        line(echoEl, "← " + e.data);
+      }
     };
   }
-  document.getElementById("send").onclick = () => {
-    const v = document.getElementById("msg").value;
-    if (v && ws && ws.readyState === 1) { line(echoEl, "→ " + v); ws.send(v); }
-  };
+  function send(v) {
+    if (!v || !ws || ws.readyState !== 1) return;
+    const idle = ((performance.now() - lastActivity) / 1000).toFixed(0);
+    line(echoEl, "→ " + v + "  (after " + idle + "s idle)");
+    pendingSend = performance.now();
+    markActivity();
+    ws.send(v);
+  }
+  document.getElementById("send").onclick = () => send(document.getElementById("msg").value || "ping");
   document.getElementById("msg").addEventListener("keydown", (e) => { if (e.key === "Enter") document.getElementById("send").click(); });
   connect();
 </script>
@@ -188,11 +214,12 @@ def serve_ws(conn: Conn, key: str, peer):
                     text = payload.decode("utf-8", "replace")
                     print(f"[{peer}] recv: {text!r}")
                     conn.sock.sendall(encode_text(("echo: " + text).encode()))
-            now = time.monotonic()
-            if now - last_push >= 2.0:
-                push_n += 1
-                last_push = now
-                conn.sock.sendall(encode_text(f"push #{push_n} @ {time.strftime('%H:%M:%S')}".encode()))
+            if not QUIET:
+                now = time.monotonic()
+                if now - last_push >= 2.0:
+                    push_n += 1
+                    last_push = now
+                    conn.sock.sendall(encode_text(f"push #{push_n} @ {time.strftime('%H:%M:%S')}".encode()))
     except (ConnectionError, OSError):
         print(f"[{peer}] websocket dropped")
 
@@ -209,7 +236,7 @@ def handle(sock, addr):
         if path.split("?")[0] == "/ws" and is_ws:
             serve_ws(conn, headers.get("sec-websocket-key", ""), peer)
         elif method == "GET":
-            body = PAGE
+            body = PAGE.replace(b"__QUIET__", b"true" if QUIET else b"false")
             head = (
                 "HTTP/1.1 200 OK\r\n"
                 "Content-Type: text/html; charset=utf-8\r\n"
@@ -229,12 +256,17 @@ def handle(sock, addr):
 
 
 def main():
-    port = int(sys.argv[1]) if len(sys.argv) > 1 else 8080
+    global QUIET
+    args = sys.argv[1:]
+    QUIET = "--quiet" in args
+    ports = [a for a in args if not a.startswith("-")]
+    port = int(ports[0]) if ports else 8080
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     srv.bind(("127.0.0.1", port))
     srv.listen(64)
-    print(f"ws-echo listening on http://127.0.0.1:{port}  (page at /, websocket at /ws)")
+    mode = "  [QUIET: no server push — idle test]" if QUIET else ""
+    print(f"ws-echo listening on http://127.0.0.1:{port}  (page at /, websocket at /ws){mode}")
     try:
         while True:
             sock, addr = srv.accept()
