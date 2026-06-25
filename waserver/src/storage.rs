@@ -167,10 +167,10 @@ impl wc::NodeStateStore for ShareStateStore {
 
     fn save(&self, state: &wc::PersistedNodeState) -> Result<(), wc::StorageError> {
         ensure_dir_exists(&self.dir)?;
-        write_atomically(&self.dir, &ROOT_KEY_FILENAME, state.root_key_bytes())?;
+        write_atomically(&self.dir, ROOT_KEY_FILENAME, state.root_key_bytes())?;
         if let Some(reg) = state.registration() {
             let bytes = wc::serialize_registration(reg);
-            write_atomically(&self.dir, &REGISTRATION_FILENAME, &bytes)?;
+            write_atomically(&self.dir, REGISTRATION_FILENAME, &bytes)?;
         } else {
             let path = self.dir.join(REGISTRATION_FILENAME);
             if path.exists() {

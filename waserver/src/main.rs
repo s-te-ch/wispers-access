@@ -107,11 +107,8 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     // Daemonising must happen before starting tokio.
-    match &cli.command {
-        Command::Start { .. } => {
-            start_daemon()?;
-        }
-        _ => {}
+    if let Command::Start { .. } = &cli.command {
+        start_daemon()?;
     }
 
     // Start async mode.
@@ -385,7 +382,7 @@ async fn nodes(share: &str) -> Result<()> {
 
     // Render it.
     let mut tw = TabWriter::new(std::io::stdout().lock()).padding(2);
-    write!(&mut tw, "Number\tName\tStatus\n").unwrap();
+    writeln!(&mut tw, "Number\tName\tStatus").unwrap();
     for node in &group_info.nodes {
         let status = if node.is_online { "online" } else { "offline" };
         let name = if node.name.is_empty() {
@@ -393,7 +390,7 @@ async fn nodes(share: &str) -> Result<()> {
         } else {
             &node.name
         };
-        write!(&mut tw, "{}\t{}\t{}\n", node.node_number, name, status).unwrap();
+        writeln!(&mut tw, "{}\t{}\t{}", node.node_number, name, status).unwrap();
     }
     tw.flush().unwrap();
     Ok(())

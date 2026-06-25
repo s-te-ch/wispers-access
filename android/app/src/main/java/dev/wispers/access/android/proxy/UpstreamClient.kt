@@ -3,11 +3,15 @@ package dev.wispers.access.android.proxy
 import android.util.Log
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.connect.handles.QuicStream
+import io.ktor.http.Headers
+import io.ktor.http.HttpHeaders
 import io.ktor.http.HttpStatusCode
+import io.ktor.http.content.OutgoingContent
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.httpMethod
 import io.ktor.server.request.receiveChannel
 import io.ktor.server.request.uri
+import io.ktor.server.response.respond
 import io.ktor.server.response.respondBytesWriter
 import io.ktor.utils.io.ByteReadChannel
 import io.ktor.utils.io.ByteWriteChannel
@@ -15,6 +19,12 @@ import io.ktor.utils.io.readAvailable
 import io.ktor.utils.io.readFully
 import io.ktor.utils.io.writeFully
 import java.io.IOException
+import kotlin.coroutines.CoroutineContext
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeout
 
 /**
@@ -33,17 +43,28 @@ internal class UpstreamClient(
     private val shareId: ShareId,
 ) {
     suspend fun forward(call: ApplicationCall) {
-        val request = buildOutboundRequest(call)
+        val upgrade = isUpgradeRequest(call)
+        val request = buildOutboundRequest(call, upgrade)
         val reader = StreamReader(stream)
         // Deadline on request + response head: a connection that died silently (e.g.
         // network handover while idle) blackholes packets and would otherwise hang
-        // this read forever — no error, no eviction, no recovery. The body pipe below
-        // is exempt so large/slow transfers aren't cut off.
+        // this read forever — no error, no eviction, no recovery. The body pipe (and
+        // the upgraded relay) below are exempt so large/slow/long-lived transfers
+        // aren't cut off.
         val response = withTimeout(EXCHANGE_TIMEOUT_MS) {
             sendRequest(request, call.receiveChannel())
-            readResponseHead(reader)
+            readResponseHead(reader, upgrade)
         }
         Log.d(TAG, "${request.method} ${request.target} → ${response.status}")
+
+        if (upgrade && response.status == HttpStatusCode.SwitchingProtocols.value) {
+            // Hand the browser socket and the QUIC stream to a raw bidirectional
+            // relay for the socket's lifetime. respond() suspends here until either
+            // side closes; ProxyServer closes the stream afterwards.
+            call.respond(upgradeContent(response, reader))
+            return
+        }
+
         respond(call, response, reader)
         // Half-close our send side only after the full response cycle. Calling finish()
         // immediately after the request head confuses upstream hyper into reporting an
@@ -54,23 +75,32 @@ internal class UpstreamClient(
 
     // ---- Outbound (request) ----
 
-    private fun buildOutboundRequest(call: ApplicationCall): OutboundRequest {
+    private fun buildOutboundRequest(call: ApplicationCall, isUpgrade: Boolean): OutboundRequest {
         val method = call.request.httpMethod.value
         val target = call.request.uri
-        val body = detectRequestBody(call)
+        // An Upgrade handshake is a bodyless GET; the post-101 bytes are relayed raw.
+        val body = if (isUpgrade) RequestBody.None else detectRequestBody(call)
 
         val headers = mutableListOf<Header>().apply {
             for ((name, values) in call.request.headers.entries()) {
                 val lower = name.lowercase()
-                if (lower in HOP_BY_HOP || lower in FRAMING) continue
+                if (lower in FRAMING) continue
+                // Preserve Connection/Upgrade for an upgrade — they carry the
+                // handshake; strip the rest of hop-by-hop either way.
+                if (lower in HOP_BY_HOP && !(isUpgrade && lower in UPGRADE_HEADERS)) continue
                 for (v in values) add(Header(name, v))
             }
-            when (body) {
-                is RequestBody.Fixed -> add(Header("Content-Length", body.length.toString()))
-                RequestBody.Chunked -> add(Header("Transfer-Encoding", "chunked"))
-                RequestBody.None -> Unit
+            if (isUpgrade) {
+                // Keep the browser's Connection/Upgrade/Sec-WebSocket-* as sent, and
+                // hold the stream open for the socket's lifetime (no Connection: close).
+            } else {
+                when (body) {
+                    is RequestBody.Fixed -> add(Header("Content-Length", body.length.toString()))
+                    RequestBody.Chunked -> add(Header("Transfer-Encoding", "chunked"))
+                    RequestBody.None -> Unit
+                }
+                add(Header("Connection", "close"))
             }
-            add(Header("Connection", "close"))
         }
         rewriter.rewriteRequest(method, target, headers, shareId)
         return OutboundRequest(method, target, headers, body)
@@ -130,7 +160,7 @@ internal class UpstreamClient(
 
     // ---- Inbound (response) ----
 
-    private suspend fun readResponseHead(reader: StreamReader): ResponseHead {
+    private suspend fun readResponseHead(reader: StreamReader, isUpgrade: Boolean): ResponseHead {
         val statusLine = reader.readLine() ?: throw IOException("upstream closed before status line")
         val status = statusLine.split(' ', limit = 3).getOrNull(1)?.toIntOrNull()
             ?: throw IOException("malformed status line: $statusLine")
@@ -142,6 +172,18 @@ internal class UpstreamClient(
             val colon = line.indexOf(':')
             if (colon < 0) continue
             headers.add(Header(line.substring(0, colon).trim(), line.substring(colon + 1).trim()))
+        }
+
+        if (isUpgrade && status == HttpStatusCode.SwitchingProtocols.value) {
+            // Preserve the handshake (Connection/Upgrade/Sec-WebSocket-*); drop only
+            // non-handshake hop-by-hop and framing. No body follows — the bytes after
+            // the head are the upgraded protocol, relayed raw. Framing is unused here.
+            headers.removeAll {
+                val l = it.name.lowercase()
+                (l in HOP_BY_HOP && l !in UPGRADE_HEADERS) || l in FRAMING
+            }
+            rewriter.rewriteResponse(status, headers, shareId)
+            return ResponseHead(status, headers, BodyFraming.UntilEof)
         }
 
         val framing = detectFraming(headers)
@@ -209,6 +251,95 @@ internal class UpstreamClient(
         }
     }
 
+    // ---- Upgrade (WebSocket and other HTTP/1.1 Upgrades) ----
+
+    /**
+     * Matches Ktor CIO's own upgrade trigger (`expectHttpUpgrade`): a `GET` with an
+     * `Upgrade` header and a `Connection` header listing the `upgrade` token. We must
+     * not respond with a [OutgoingContent.ProtocolUpgrade] unless this holds, or the
+     * engine rejects it (it only arms the upgrade for such requests).
+     */
+    private fun isUpgradeRequest(call: ApplicationCall): Boolean {
+        if (!call.request.httpMethod.value.equals("GET", ignoreCase = true)) return false
+        if (call.request.headers["Upgrade"].isNullOrBlank()) return false
+        val connection = call.request.headers["Connection"] ?: return false
+        return connection.split(',').any { it.trim().equals("upgrade", ignoreCase = true) }
+    }
+
+    /**
+     * A [OutgoingContent.ProtocolUpgrade] that replays the upstream 101 headers to the
+     * browser, then relays raw bytes both ways for the socket's lifetime. The engine
+     * writes the 101 line + [headers], calls [upgrade], and awaits the returned [Job].
+     */
+    private fun upgradeContent(head: ResponseHead, reader: StreamReader) =
+        object : OutgoingContent.ProtocolUpgrade() {
+            override val headers: Headers = Headers.build {
+                for (h in head.headers) {
+                    // Ktor treats `Upgrade` as engine-reserved and only lets a
+                    // ProtocolUpgrade set it when the name matches HttpHeaders.Upgrade
+                    // exactly (case-sensitive). Upstream (hyper) sends it lowercased,
+                    // which would trip the "controlled by the engine" rejection — so
+                    // canonicalise the handshake header names.
+                    val name = when {
+                        h.name.equals(HttpHeaders.Upgrade, ignoreCase = true) -> HttpHeaders.Upgrade
+                        h.name.equals(HttpHeaders.Connection, ignoreCase = true) -> HttpHeaders.Connection
+                        else -> h.name
+                    }
+                    append(name, h.value)
+                }
+            }
+
+            override suspend fun upgrade(
+                input: ByteReadChannel,
+                output: ByteWriteChannel,
+                engineContext: CoroutineContext,
+                userContext: CoroutineContext,
+            ): Job = CoroutineScope(engineContext).launch {
+                // Two independent pumps: each ends at its own EOF (mirroring a TCP
+                // half-close), so one direction closing doesn't tear down the other.
+                // The relay ends only once both finish; an error in either cancels
+                // both (the connection is gone). Reads and writes hit opposite halves
+                // of the QUIC stream, so they run concurrently.
+                //
+                // This is a root coroutine and Ktor only join()s it (swallowing the
+                // result), so a mid-socket failure would otherwise surface as an
+                // uncaught exception. Catch it here; Ktor still closes the channels.
+                try {
+                    coroutineScope {
+                        launch { pumpStreamToBrowser(reader, output) }
+                        launch { pumpBrowserToStream(input) }
+                    }
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: Exception) {
+                    Log.d(TAG, "websocket relay ended: ${e.message}")
+                }
+            }
+        }
+
+    private suspend fun pumpBrowserToStream(input: ByteReadChannel) {
+        val buf = ByteArray(BUFFER_SIZE)
+        while (true) {
+            val n = input.readAvailable(buf, 0, buf.size)
+            if (n < 0) break // browser closed its write side
+            if (n == 0) continue
+            stream.write(buf.copyOfRange(0, n))
+        }
+        // Forward the half-close as a FIN so upstream sees end-of-input.
+        runCatching { stream.finish() }
+    }
+
+    private suspend fun pumpStreamToBrowser(reader: StreamReader, output: ByteWriteChannel) {
+        // readSome() hands back any bytes already buffered past the 101 head before
+        // it reads fresh from the stream, so the post-handshake prefix isn't dropped.
+        while (true) {
+            val chunk = reader.readSome() ?: break // upstream sent FIN
+            output.writeFully(chunk)
+            output.flush()
+        }
+        runCatching { output.flushAndClose() }
+    }
+
     // ---- helpers ----
 
     private fun headerValue(headers: List<Header>, name: String): String? =
@@ -254,6 +385,10 @@ internal class UpstreamClient(
             "trailers",
             "upgrade",
         )
+
+        // Hop-by-hop headers that carry an Upgrade handshake, so they're kept (not
+        // stripped) on an upgrade exchange in both directions.
+        val UPGRADE_HEADERS = setOf("connection", "upgrade")
         val FRAMING = setOf("content-length", "transfer-encoding")
         val METHODS_WITH_BODY = setOf("POST", "PUT", "PATCH", "DELETE")
     }

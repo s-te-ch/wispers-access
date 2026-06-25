@@ -243,8 +243,9 @@ private class IconBridge(private val onJson: (String) -> Unit) {
  * Same-origin JS that picks the best available site icon — manifest maskable (4) >
  * manifest (3) > apple-touch-icon (2) > favicon (1) — fetches it (with credentials,
  * so the proxy's identity header and any cookies apply and auth-gated icons
- * resolve), and hands it back as a data URL via [IconBridge]. It runs on every
- * page-finish; native discards anything that doesn't out-rank the cached icon.
+ * resolve), and — only when the response is OK and an actual image — hands it
+ * back as a data URL via [IconBridge]. It runs on every page-finish; native
+ * discards anything that doesn't out-rank the cached icon.
  */
 private const val HARVEST_JS = """
 (function () {
@@ -279,7 +280,13 @@ private const val HARVEST_JS = """
     }
     if (!best || !best.url) { done(0); return; }
     try {
-      var blob = await (await fetch(best.url, { credentials: 'include' })).blob();
+      // fetch() resolves on 4xx/5xx too, so guard on resp.ok and an image
+      // content-type — otherwise a missing /favicon.ico hands back the server's
+      // HTML error page, which gets cached as a (rank-1, undecodable) "icon".
+      var resp = await fetch(best.url, { credentials: 'include' });
+      if (!resp.ok) { done(0); return; }
+      var blob = await resp.blob();
+      if (!/^image\//.test(blob.type)) { done(0); return; }
       var reader = new FileReader();
       reader.onloadend = function () { done(best.rank, reader.result); };
       reader.onerror = function () { done(0); };

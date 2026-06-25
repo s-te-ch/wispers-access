@@ -1,9 +1,9 @@
 //! Share initialisation & tear-down
 
+use crate::ipc;
 use crate::storage;
 use crate::wcbe;
 use anyhow::{Context, Result};
-use wispers_connect;
 
 /// Initialise a new app share.
 pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
@@ -12,7 +12,7 @@ pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
         anyhow::bail!("Invalid share name '{}'", share);
     }
     let store = storage::ShareStateStore::new(share)?;
-    if let Some(_) = store.load_share_config()? {
+    if store.load_share_config()?.is_some() {
         anyhow::bail!("Share {} already exists", share);
     }
 
@@ -21,7 +21,7 @@ pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
     let cg_id = wcbe_client.add_connectivity_group(display_name).await?;
 
     // Write the ShareConfig.
-    let cfg = storage::ShareConfig::new(&api_key, &cg_id);
+    let cfg = storage::ShareConfig::new(api_key, &cg_id);
     store.save_share_config(&cfg)?;
 
     // Create the serving Wispers node.
@@ -30,7 +30,7 @@ pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
 
     // Register the node with the Wispers backend.
     let token = wcbe_client
-        .get_registration_token(&cg_id, Some("Server".into()), None /* metadata */)
+        .get_registration_token(&cg_id, Some("Server"), None /* metadata */)
         .await?;
     node.register(&token).await.context("registration failed")?;
 
@@ -42,6 +42,32 @@ pub async fn down(share: &str) -> Result<()> {
     let Some(cfg) = store.load_share_config()? else {
         anyhow::bail!("Could not find share '{}'", share);
     };
+
+    // Refuse to tear down a share while its server is still running.
+    if let Ok(mut client) = ipc::Client::connect(share).await {
+        // A reachable socket means a daemon is serving this share. Name its
+        // port in the message if it answers promptly, but don't hang on a
+        // wedged daemon.
+        let port_hint = match tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.request(&ipc::Request::Status),
+        )
+        .await
+        {
+            Ok(Ok(ipc::Response::Success {
+                data: ipc::ResponseData::Status(status),
+                ..
+            })) => format!(" on port {}", status.local_port),
+            _ => String::new(),
+        };
+        anyhow::bail!(
+            "share '{}' has a running server{}; stop it first with `waserver stop {}`",
+            share,
+            port_hint,
+            share
+        );
+    }
+
     // Remove the Wispers connectivity group. This deregisters all nodes.
     let wcbe_client = wcbe::Client::new(&cfg.api_key);
     wcbe_client

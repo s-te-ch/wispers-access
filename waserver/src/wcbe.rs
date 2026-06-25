@@ -4,7 +4,6 @@
 //! register new guest nodes.
 
 use anyhow::{Context, Result};
-use reqwest;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
