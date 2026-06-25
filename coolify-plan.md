@@ -1,7 +1,7 @@
 # Wispers Access × Coolify integration plan
 
-> Status: research + scoping notes. First connector item shipped — **#3 WebSocket
-> support is done**; the rest is not yet built.
+> Status: research + scoping notes. Connector items **#2 (host:port)** and **#3
+> (WebSockets)** are done; the rest is not yet built.
 
 ## Goal
 
@@ -68,9 +68,14 @@ apps opt in via a domain field).
    it's one share per daemon. Includes a defined volume layout for multi-share
    state (`share_config.json`, `root_key.bin`, `registration.pb` per share) and
    share **deletion**.
-2. **Address `host:port`, not just port.** Upstream is hardcoded to `127.0.0.1`
-   (`waserver/src/http.rs:57`); `strip_hop_by_hop` also drops the target. In a
-   compose stack the app is at a Docker DNS name like `app:3000`. Needed regardless.
+2. **Address `host:port`, not just port — ✅ DONE (on `main`; not yet merged into this branch).**
+   The `serve`/`start` CLI now takes a `[host:]port` upstream (bare port ⇒ `127.0.0.1`;
+   `app:3000` for a Docker compose service; `:3000` also accepted), validated by a
+   `parse_upstream` helper, threaded as the dial address and connected via
+   `TcpStream::connect` (tokio resolves DNS names). `local_port`→`upstream` throughout,
+   including the IPC status field. (The earlier note that `strip_hop_by_hop` "drops the
+   target" was inaccurate — it only removes hop-by-hop headers; Host-header handling is
+   item #5.)
 3. **WebSocket support — ✅ DONE.**
    `try_forward` now detects an HTTP/1.1 Upgrade, preserves the `Connection`/`Upgrade`
    handshake headers, and on a `101` splices raw bytes both ways via `hyper::upgrade`
@@ -90,6 +95,21 @@ apps opt in via a domain field).
    - a healthcheck
    - multi-arch build (**arm64** — home-lab / Pi users are core Coolify audience)
    - run in **foreground**, not the daemonize path
+
+   **IPC version skew (CLI vs daemon).** Coolify's web terminal (#7) runs `waserver`
+   subcommands against the *running* daemon, which after an image-pull + restart may be an
+   older binary than the CLI. The local IPC (serde-JSON over a unix socket) must tolerate
+   that within reason. Rule: evolve **additively** — serde ignores unknown fields by
+   default, so new fields (`#[serde(default)]` / `Option`) are forward- and
+   backward-compatible; never rename/retype/remove a field in place (the `local_port` →
+   `upstream` retype in #2 was a genuine break — fine only because nothing had shipped).
+   Gate the rare unavoidable break behind a dedicated **IPC protocol version** — a current
+   + min-compatible window that fails soft ("daemon too old, restart it"), keyed off the
+   protocol, *not* the package version (which churns without wire changes). `stop` stays
+   robust regardless: freeze the `Shutdown` request wire form (bare unit variant, no
+   envelope, every daemon understands it) and confirm death by socket-close rather than
+   parsing the reply. (In-container, the orchestrator's SIGTERM is the usual stop path —
+   hence the graceful-SIGTERM bullet above.)
 5. **Host-header behavior.** Clients reach shares as `<share>.localhost:<port>`;
    that Host header currently passes through. Apps validating Host/Origin (CSRF,
    absolute-URL generation) will misbehave. Decide: documented base-URL convention
@@ -149,9 +169,9 @@ apps opt in via a domain field).
 
 ## Suggested order
 
-1. Connector engineering first: items #1, #2, #4 (multi-share, host:port, container
-   plumbing) — none Coolify-specific, all needed under any outcome. (#3 WebSockets
-   already done.)
+1. Connector engineering first: items #1, #4 (multi-share, container plumbing) —
+   none Coolify-specific, all needed under any outcome. (#2 host:port and #3
+   WebSockets already done.)
 2. Both gating design decisions (#8 admin access, #9 target discovery) are settled,
    so engineering can proceed without further blocking decisions.
 3. Then the runtime CLI subcommands (#7: invite/members/revoke) and host-header
