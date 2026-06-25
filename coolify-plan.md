@@ -1,6 +1,7 @@
 # Wispers Access × Coolify integration plan
 
-> Status: research + scoping notes. Nothing built yet.
+> Status: research + scoping notes. First connector item shipped — **#3 WebSocket
+> support is done** (on `main`); the rest is not yet built.
 
 ## Goal
 
@@ -70,11 +71,16 @@ apps opt in via a domain field).
 2. **Address `host:port`, not just port.** Upstream is hardcoded to `127.0.0.1`
    (`waserver/src/http.rs:57`); `strip_hop_by_hop` also drops the target. In a
    compose stack the app is at a Docker DNS name like `app:3000`. Needed regardless.
-3. **WebSocket support — hard gap, not nice-to-have.** `try_forward` does a plain
-   HTTP/1 request/response and strips the `Upgrade` header
-   (`waserver/src/http.rs:128`); there's no `hyper::upgrade` tunnel path. A large
-   share of self-hosted apps (dashboards, chat, Gitea live updates) break without
-   it. Peer of item #2 in priority.
+3. **WebSocket support — ✅ DONE (on `main`; not yet merged into this branch).**
+   `try_forward` now detects an HTTP/1.1 Upgrade, preserves the `Connection`/`Upgrade`
+   handshake headers, and on a `101` splices raw bytes both ways via `hyper::upgrade`
+   + `tokio::io::copy_bidirectional` — `serve_connection(...).with_upgrades()` on the
+   QUIC-server side, `conn.with_upgrades()` on the upstream-client side. Protocol-
+   agnostic (no frame parsing), so subprotocols / binary / `permessage-deflate` pass
+   through untouched. Mirrored on waclient and the Android client (the latter via Ktor
+   `OutgoingContent.ProtocolUpgrade`). Verified end-to-end on desktop + a Pixel 8,
+   including a foreground idle socket holding well past the ICE consent window. The
+   dashboards / chat / Gitea-live-updates class works now.
 4. **Container-conventions plumbing** (small individually, all required):
    - non-interactive, env-driven init (`WC_API_KEY`, share name, target), idempotent
      across restarts (init only if state volume empty)
@@ -143,8 +149,9 @@ apps opt in via a domain field).
 
 ## Suggested order
 
-1. Connector engineering first: items #1–#4 (multi-share, host:port, WebSockets,
-   container plumbing) — none Coolify-specific, all needed under any outcome.
+1. Connector engineering first: items #1, #2, #4 (multi-share, host:port, container
+   plumbing) — none Coolify-specific, all needed under any outcome. (#3 WebSockets
+   already done.)
 2. Both gating design decisions (#8 admin access, #9 target discovery) are settled,
    so engineering can proceed without further blocking decisions.
 3. Then the runtime CLI subcommands (#7: invite/members/revoke) and host-header
