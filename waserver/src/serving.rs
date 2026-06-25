@@ -19,23 +19,24 @@ struct Inner {
     wc_handle: RwLock<Option<wc::ServingHandle>>,
     wcbe_client: wcbe::Client,
     connectivity_group_id: String,
-    local_port: u16,
+    upstream: Arc<str>,
 }
 
 impl ServingHandle {
-    pub fn new(local_port: u16, api_key: &str, cg_id: &str) -> Self {
+    pub fn new(upstream: Arc<str>, api_key: &str, cg_id: &str) -> Self {
         Self {
             inner: Arc::new(Inner {
                 wc_handle: RwLock::new(None),
                 wcbe_client: wcbe::Client::new(api_key),
                 connectivity_group_id: cg_id.to_owned(),
-                local_port,
+                upstream,
             }),
         }
     }
 
-    pub fn local_port(&self) -> u16 {
-        self.inner.local_port
+    /// The upstream address (`host:port`) this server proxies to.
+    pub fn upstream(&self) -> &str {
+        &self.inner.upstream
     }
 
     pub async fn connected_to_hub(&self) -> bool {
@@ -84,7 +85,8 @@ impl ServingHandle {
     }
 }
 
-pub async fn serve(share: &str, port: u16) -> Result<()> {
+pub async fn serve(share: &str, upstream: String) -> Result<()> {
+    let upstream: Arc<str> = upstream.into();
     let store = storage::ShareStateStore::new(share)?;
     let Some(cfg) = store.load_share_config()? else {
         anyhow::bail!("Share {} is not initialised", share);
@@ -102,7 +104,7 @@ pub async fn serve(share: &str, port: u16) -> Result<()> {
             anyhow::bail!("server node not registered");
         }
     };
-    let serving_handle = ServingHandle::new(port, &cfg.api_key, &cg_id);
+    let serving_handle = ServingHandle::new(upstream.clone(), &cfg.api_key, &cg_id);
     let ipc_server = ipc::Server::bind(share).await?;
     tokio::spawn(ipc_server.run(serving_handle.clone()));
 
@@ -122,7 +124,7 @@ pub async fn serve(share: &str, port: u16) -> Result<()> {
         tokio::select! {
             // Incoming QUIC connection.
             Some(result) = incoming.quic.recv() => {
-                tokio::spawn(handle_quic_conn(result, port, node.clone()));
+                tokio::spawn(handle_quic_conn(result, upstream.clone(), node.clone()));
             },
             // Session end.
             result = &mut session_task => break handle_session_end(result),
@@ -132,7 +134,7 @@ pub async fn serve(share: &str, port: u16) -> Result<()> {
 
 async fn handle_quic_conn(
     r: Result<wc::QuicConnection, wc::P2pError>,
-    port: u16,
+    upstream: Arc<str>,
     node: Arc<wc::Node>,
 ) {
     let conn = match r {
@@ -159,8 +161,9 @@ async fn handle_quic_conn(
         match conn.accept_stream().await {
             Ok(stream) => {
                 let user_id = user_id.clone();
+                let upstream = upstream.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = http::handle_quic_stream(stream, port, user_id).await {
+                    if let Err(e) = http::handle_quic_stream(stream, upstream, user_id).await {
                         error!(error = format!("{:#}", e), "QUIC stream handler error");
                     }
                 });

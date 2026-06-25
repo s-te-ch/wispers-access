@@ -183,7 +183,7 @@ pub enum ResponseData {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusData {
     pub connected_to_hub: bool,
-    pub local_port: u16,
+    pub upstream: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -238,7 +238,7 @@ async fn parse_request(mut reader: BufReader<ReadHalf>) -> std::result::Result<R
 async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
     Response::success(ResponseData::Status(StatusData {
         connected_to_hub: handle.connected_to_hub().await,
-        local_port: handle.local_port(),
+        upstream: handle.upstream().to_string(),
     }))
 }
 

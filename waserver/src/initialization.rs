@@ -57,7 +57,7 @@ pub async fn down(share: &str) -> Result<()> {
             Ok(Ok(ipc::Response::Success {
                 data: ipc::ResponseData::Status(status),
                 ..
-            })) => format!(" on port {}", status.local_port),
+            })) => format!(" on {}", status.upstream),
             _ => String::new(),
         };
         anyhow::bail!(

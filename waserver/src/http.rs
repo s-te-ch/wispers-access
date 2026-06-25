@@ -8,6 +8,7 @@ use hyper::client::conn::http1 as http1_client;
 use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
@@ -15,14 +16,15 @@ use tracing::{info, warn};
 /// either the upstream's streamed body or a locally-generated error body.
 type BoxedBody = BoxBody<Bytes, std::io::Error>;
 
-/// Serve HTTP/1 over a single QUIC stream, forwarding to the local port.
+/// Serve HTTP/1 over a single QUIC stream, forwarding to the upstream address.
 pub async fn handle_quic_stream(
     stream: wispers_connect::QuicStream,
-    local_port: u16,
+    upstream: Arc<str>,
     user_id: Option<String>,
 ) -> Result<()> {
     let io = TokioIo::new(stream);
-    let service = hyper::service::service_fn(move |req| forward(req, local_port, user_id.clone()));
+    let service =
+        hyper::service::service_fn(move |req| forward(req, upstream.clone(), user_id.clone()));
     http1_server::Builder::new()
         .serve_connection(io, service)
         // Allow a 101 to hand the QUIC stream over for raw relaying (WebSocket).
@@ -35,10 +37,10 @@ pub async fn handle_quic_stream(
 /// are converted to 5xx responses rather than connection errors.
 async fn forward(
     req: hyper::Request<Incoming>,
-    local_port: u16,
+    upstream: Arc<str>,
     user_id: Option<String>,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
-    match try_forward(req, local_port, user_id).await {
+    match try_forward(req, upstream, user_id).await {
         Ok(resp) => Ok(resp),
         Err(e) => {
             warn!(error = format!("{:#}", e), "forward error");
@@ -52,15 +54,16 @@ async fn forward(
 
 async fn try_forward(
     mut req: hyper::Request<Incoming>,
-    local_port: u16,
+    upstream: Arc<str>,
     user_id: Option<String>,
 ) -> Result<hyper::Response<BoxedBody>> {
-    // Open upstream on the localhost.
-    let upstream = TcpStream::connect(("127.0.0.1", local_port))
+    // Open a connection to the upstream app. `upstream` is `host:port`; tokio
+    // resolves DNS names (e.g. a Docker compose service) and parses IP:port.
+    let tcp = TcpStream::connect(upstream.as_ref())
         .await
-        .with_context(|| format!("connect to upstream 127.0.0.1:{}", local_port))?;
+        .with_context(|| format!("connect to upstream {}", upstream))?;
 
-    let (mut sender, conn) = http1_client::handshake(TokioIo::new(upstream))
+    let (mut sender, conn) = http1_client::handshake(TokioIo::new(tcp))
         .await
         .context("upstream handshake")?;
     // Drive the connection I/O in its own task. `with_upgrades` keeps it alive to

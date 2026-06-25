@@ -38,15 +38,21 @@ enum Command {
     Serve {
         /// Name of the application share.
         share: String,
-        /// Local port to proxy.
-        local_port: u16,
+        /// Upstream to proxy: `host:port`, or a bare `port` (host defaults to
+        /// 127.0.0.1). E.g. `3000`, `127.0.0.1:8080`, or `app:3000` (a Docker
+        /// compose service name).
+        #[arg(value_parser = parse_upstream)]
+        upstream: String,
     },
     /// Runs the server in the background.
     Start {
         /// Name of the application share.
         share: String,
-        /// Local port to proxy.
-        local_port: u16,
+        /// Upstream to proxy: `host:port`, or a bare `port` (host defaults to
+        /// 127.0.0.1). E.g. `3000`, `127.0.0.1:8080`, or `app:3000` (a Docker
+        /// compose service name).
+        #[arg(value_parser = parse_upstream)]
+        upstream: String,
     },
     /// Stops a server that is running in the background.
     Stop {
@@ -127,13 +133,13 @@ async fn async_main(command: Command) -> Result<()> {
             display_name,
         } => initialization::up(&api_key, &share, &display_name).await,
         Command::Deinit { share } => initialization::down(&share).await,
-        Command::Serve { share, local_port } => {
+        Command::Serve { share, upstream } => {
             let _log = logging::init_foreground(&share)?;
-            serving::serve(&share, local_port).await
+            serving::serve(&share, upstream).await
         }
-        Command::Start { share, local_port } => {
+        Command::Start { share, upstream } => {
             let _log = logging::init_background(&share)?;
-            serving::serve(&share, local_port).await
+            serving::serve(&share, upstream).await
         }
         Command::Stop { share } => stop(&share).await,
         Command::Status => status().await,
@@ -214,9 +220,9 @@ async fn status() -> Result<()> {
                         ..
                     }) => {
                         if status.connected_to_hub {
-                            format!("serving, local port {}", status.local_port)
+                            format!("serving, upstream {}", status.upstream)
                         } else {
-                            format!("connecting, local port {}", status.local_port)
+                            format!("connecting, upstream {}", status.upstream)
                         }
                     }
                     Ok(ipc::Response::Success { .. }) => {
@@ -396,6 +402,29 @@ async fn nodes(share: &str) -> Result<()> {
     Ok(())
 }
 
+/// Parse an upstream dial target in `[host:]port` form into a normalized
+/// `host:port` string. A bare port (no colon) uses host `127.0.0.1`; an empty
+/// host (e.g. `:3000`) defaults the same way. A non-numeric or out-of-range port
+/// is rejected. IPv6 literals would need bracket form (`[::1]:3000`) and aren't
+/// handled here.
+fn parse_upstream(s: &str) -> std::result::Result<String, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("upstream is empty".to_string());
+    }
+    // No colon ⇒ the whole thing is a port; otherwise split off the port after
+    // the last colon so the host may itself be a name like `app`.
+    let (host, port_str) = s.rsplit_once(':').unwrap_or(("", s));
+    let port: u16 = port_str
+        .parse()
+        .map_err(|_| format!("invalid port '{}' (expected 1–65535)", port_str))?;
+    if port == 0 {
+        return Err("port 0 is not a valid upstream".to_string());
+    }
+    let host = if host.is_empty() { "127.0.0.1" } else { host };
+    Ok(format!("{}:{}", host, port))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -406,5 +435,24 @@ mod tests {
             compose_wax_code("ab12cd", "1-xyz789"),
             "wax_ab12cd_1-xyz789"
         );
+    }
+
+    #[test]
+    fn parses_upstream_forms() {
+        assert_eq!(parse_upstream("8080").unwrap(), "127.0.0.1:8080");
+        assert_eq!(parse_upstream("app:3000").unwrap(), "app:3000");
+        assert_eq!(parse_upstream("127.0.0.1:8080").unwrap(), "127.0.0.1:8080");
+        assert_eq!(parse_upstream(":3000").unwrap(), "127.0.0.1:3000");
+        assert_eq!(parse_upstream("  app:3000\n").unwrap(), "app:3000");
+    }
+
+    #[test]
+    fn rejects_bad_upstream() {
+        assert!(parse_upstream("").is_err());
+        assert!(parse_upstream("app").is_err()); // no port
+        assert!(parse_upstream("app:").is_err()); // empty port
+        assert!(parse_upstream("app:abc").is_err()); // non-numeric port
+        assert!(parse_upstream("app:0").is_err()); // port 0
+        assert!(parse_upstream("app:99999").is_err()); // out of range
     }
 }
