@@ -1,7 +1,7 @@
 # Wispers Access × Coolify integration plan
 
 > Status: research + scoping notes. First connector item shipped — **#3 WebSocket
-> support is done** (on `main`); the rest is not yet built.
+> support is done**; the rest is not yet built.
 
 ## Goal
 
@@ -71,7 +71,7 @@ apps opt in via a domain field).
 2. **Address `host:port`, not just port.** Upstream is hardcoded to `127.0.0.1`
    (`waserver/src/http.rs:57`); `strip_hop_by_hop` also drops the target. In a
    compose stack the app is at a Docker DNS name like `app:3000`. Needed regardless.
-3. **WebSocket support — ✅ DONE (on `main`; not yet merged into this branch).**
+3. **WebSocket support — ✅ DONE.**
    `try_forward` now detects an HTTP/1.1 Upgrade, preserves the `Connection`/`Upgrade`
    handshake headers, and on a `101` splices raw bytes both ways via `hyper::upgrade`
    + `tokio::io::copy_bidirectional` — `serve_connection(...).with_upgrades()` on the
