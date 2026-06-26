@@ -1,10 +1,10 @@
 # Wispers Access × Coolify integration plan
 
-> Status: research + scoping notes. Items **#2 (host:port)** and **#3 (WebSockets)**
-> are done. **#1 (multi-share)** needs no dedicated binary work: it is realised as
-> image-side glue under #4 — a reconcile wrapper plus an off-the-shelf supervisor.
-> The open build is the container image (#4, including a graceful-SIGTERM handler in
-> `serve`) and the runtime CLI (#7).
+> Status: research + scoping notes. Done: **#2 (host:port)**, **#3 (WebSockets)**,
+> and the **graceful-SIGTERM/SIGINT handler** in `serve` (part of #4). **#1
+> (multi-share)** needs no dedicated binary work: it is realised as image-side glue
+> under #4 — a reconcile wrapper plus an off-the-shelf supervisor. The open build is
+> the rest of the container image (#4) and the runtime CLI (#7).
 
 ## Goal
 
@@ -115,10 +115,11 @@ apps opt in via a domain field).
    - log to **stdout** instead of today's daily-rotated files (Coolify's log viewer
      reads stdout); with N processes, prefix each line with its share so the
      interleaved streams stay legible
-   - graceful shutdown on SIGTERM — supervisord delivers TERM to each `serve`
-     (`stopsignal`/`stopwaitsecs`), but `serve` itself must **trap** it and run the
-     clean Wispers-node shutdown; it currently has no SIGTERM handler, so the process
-     is killed mid-flight. This is the only binary change this section requires.
+   - graceful shutdown on SIGTERM — ✅ DONE. `serve` traps SIGTERM **and** SIGINT and
+     runs the same clean Wispers-node shutdown as `waserver stop`, exiting 0 so a
+     supervisor reads it as an intended stop, not a crash. supervisord delivers TERM
+     to each `serve` (`stopsignal`/`stopwaitsecs`) and escalates to KILL as the
+     backstop.
    - a healthcheck — parse `waserver status` (are all shares `serving`?)
    - multi-arch build (**arm64** — home-lab / Pi users are core Coolify audience)
    - run in **foreground** — the supervisor runs `serve` (foreground), never
@@ -200,8 +201,8 @@ apps opt in via a domain field).
 
 1. Connector engineering first: the container image (#4) — reconcile wrapper +
    supervisor + conventions plumbing — which is also where #1 (multi-share) is
-   realised, plus a graceful-SIGTERM handler in `serve`. None Coolify-specific, all
-   needed under any outcome. (#2 host:port and #3 WebSockets are done.)
+   realised. None Coolify-specific, all needed under any outcome. (#2 host:port, #3
+   WebSockets, and the graceful-SIGTERM/SIGINT handler are done.)
 2. Both gating design decisions (#8 admin access, #9 target discovery) are settled,
    so engineering can proceed without further blocking decisions.
 3. Then the runtime CLI subcommands (#7: invite/members/revoke) and host-header
