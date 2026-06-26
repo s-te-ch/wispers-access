@@ -1,0 +1,11 @@
+# Keep the Docker build context small and exclude build artifacts. The
+# connector image only needs the Rust workspace crates (Cargo.toml, Cargo.lock,
+# waserver/, waclient/).
+target
+**/target
+.git
+android
+assets
+demo
+*.md
+connector/compose.yaml

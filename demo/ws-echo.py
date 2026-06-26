@@ -17,6 +17,7 @@ browser needs here.
 
 import base64
 import hashlib
+import os
 import select
 import socket
 import sys
@@ -261,12 +262,15 @@ def main():
     QUIET = "--quiet" in args
     ports = [a for a in args if not a.startswith("-")]
     port = int(ports[0]) if ports else 8080
+    # Bind host defaults to loopback (right for phone/desktop testing). Set
+    # WS_ECHO_HOST=0.0.0.0 to make it reachable from another container.
+    host = os.environ.get("WS_ECHO_HOST", "127.0.0.1")
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    srv.bind(("127.0.0.1", port))
+    srv.bind((host, port))
     srv.listen(64)
     mode = "  [QUIET: no server push — idle test]" if QUIET else ""
-    print(f"ws-echo listening on http://127.0.0.1:{port}  (page at /, websocket at /ws){mode}")
+    print(f"ws-echo listening on http://{host}:{port}  (page at /, websocket at /ws){mode}")
     try:
         while True:
             sock, addr = srv.accept()

@@ -1,0 +1,43 @@
+# Local test rig for the Wispers connector — mirrors Coolify's runtime model
+# without Coolify: a private app (no published ports) plus the connector, both
+# on one Docker network, the connector reaching the app via service-DNS.
+#
+#   export WC_API_KEY=...        # your Wispers Connect API key
+#   docker compose -f connector/compose.yaml up --build
+#
+# Then, in another terminal:
+#   docker compose -f connector/compose.yaml exec connector waserver status
+#   docker compose -f connector/compose.yaml exec connector waserver invite demo alice alice@example.com
+#
+# Redeem that invite from a Wispers client to reach the ws-echo page/socket
+# through the connector — same flow as the phone/desktop tests, but proxied out
+# of a container.
+
+name: wispers-connector-dev
+
+services:
+  app:
+    # The "private" upstream app. Note: no `ports:` — it stays on the internal
+    # network, exactly like a Coolify service with no domain assigned.
+    image: python:3-slim
+    working_dir: /app
+    volumes:
+      - ../demo/ws-echo.py:/app/ws-echo.py:ro
+    environment:
+      WS_ECHO_HOST: "0.0.0.0"     # reachable from the connector container
+    command: ["python3", "ws-echo.py", "8080"]
+
+  connector:
+    build:
+      context: ..                 # repo root, so the Rust workspace is in scope
+      dockerfile: connector/Dockerfile
+    environment:
+      WC_API_KEY: ${WC_API_KEY:?set WC_API_KEY in your shell or a .env file}
+    volumes:
+      - ./shares.example.conf:/config/shares.conf:ro
+      - connector-state:/data     # persists share identity across restarts
+    depends_on:
+      - app
+
+volumes:
+  connector-state:
