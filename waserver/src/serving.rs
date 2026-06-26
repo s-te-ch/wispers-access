@@ -119,6 +119,11 @@ pub async fn serve(share: &str, upstream: String) -> Result<()> {
     // Run the Wispers serving session.
     let mut session_task = tokio::spawn(async move { session.run().await });
 
+    // Resolves on SIGTERM/SIGINT so we tear the hub session down cleanly
+    // instead of being killed mid-flight (e.g. by a container supervisor).
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+
     // Main serving loop. Accept connections from the peer nodes or from IPC.
     loop {
         tokio::select! {
@@ -128,6 +133,17 @@ pub async fn serve(share: &str, upstream: String) -> Result<()> {
             },
             // Session end.
             result = &mut session_task => break handle_session_end(result),
+            // Shutdown signal: stop the session the same way `waserver stop`
+            // does, drain it, then exit cleanly. This stop was intended, so we
+            // report success (exit 0) regardless of how the session terminates.
+            _ = &mut shutdown => {
+                info!("shutdown signal received; shutting down gracefully");
+                if let Err(e) = serving_handle.shutdown().await {
+                    warn!(error = format!("{:#}", e), "error during graceful shutdown");
+                }
+                let _ = (&mut session_task).await;
+                break Ok(());
+            }
         }
     }
 }
@@ -205,4 +221,39 @@ fn handle_session_end(
         }
     }
     Ok(())
+}
+
+/// Resolves when the process receives a shutdown signal (`SIGTERM` or `SIGINT`)
+/// If the handlers can't be installed, this never resolves, so the server
+/// keeps running rather than shutting down spuriously.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        let mut term = match signal(SignalKind::terminate()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "failed to install SIGTERM handler");
+                return std::future::pending::<()>().await;
+            }
+        };
+        let mut int = match signal(SignalKind::interrupt()) {
+            Ok(s) => s,
+            Err(e) => {
+                warn!(error = %e, "failed to install SIGINT handler");
+                return std::future::pending::<()>().await;
+            }
+        };
+        tokio::select! {
+            _ = term.recv() => info!("received SIGTERM"),
+            _ = int.recv() => info!("received SIGINT"),
+        }
+    }
+    #[cfg(windows)]
+    {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            warn!(error = %e, "failed to listen for Ctrl-C");
+            std::future::pending::<()>().await
+        }
+    }
 }
