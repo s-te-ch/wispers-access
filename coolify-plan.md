@@ -1,7 +1,10 @@
 # Wispers Access × Coolify integration plan
 
-> Status: research + scoping notes. Connector items **#2 (host:port)** and **#3
-> (WebSockets)** are done; the rest is not yet built.
+> Status: research + scoping notes. Items **#2 (host:port)** and **#3 (WebSockets)**
+> are done. **#1 (multi-share)** needs no dedicated binary work: it is realised as
+> image-side glue under #4 — a reconcile wrapper plus an off-the-shelf supervisor.
+> The open build is the container image (#4, including a graceful-SIGTERM handler in
+> `serve`) and the runtime CLI (#7).
 
 ## Goal
 
@@ -64,45 +67,71 @@ apps opt in via a domain field).
 
 ### Connector engineering (waserver side)
 
-1. **Serve all shares from one daemon.** Multi-share in a single process. Today
-   it's one share per daemon. Includes a defined volume layout for multi-share
-   state (`share_config.json`, `root_key.bin`, `registration.pb` per share) and
-   share **deletion**.
-2. **Address `host:port`, not just port — ✅ DONE (on `main`; not yet merged into this branch).**
-   The `serve`/`start` CLI now takes a `[host:]port` upstream (bare port ⇒ `127.0.0.1`;
+1. **Multi-share is a container concern, not a binary feature.** "Run N shares at
+   once" does *not* need one-process multiplexing in `waserver`. The container runs
+   **one `waserver serve <share> <upstream>` per share under an off-the-shelf
+   process supervisor** (supervisord / s6-overlay as
+   PID 1). The supervisor owns the three things a naive `serve & serve & wait` gets
+   wrong: SIGTERM **fan-out** to every child, per-share **crash-restart**, and
+   zombie **reaping**. Per-process also buys fault isolation and add/remove-a-share
+   without disturbing its siblings; the price is supervisor *config*, not Rust.
+
+   The binary provides every verb this needs: the per-share volume layout
+   (`share_config.json`, `root_key.bin`, `registration.pb` per share), `serve`
+   (foreground, one share), `status` (enumerates *every* initialised share + its
+   upstream, via `storage::list_shares()`), and `deinit` (deletion). There is no
+   single multiplexing daemon and no in-process reconfiguration.
+
+   The only new artifact is a thin **reconcile wrapper** in the image (built under
+   #4): read the desired shares from env / a mounted config file, `waserver init`
+   any that `status` doesn't list and `deinit` any it lists that are no longer
+   desired, then emit one supervised `serve <share> <upstream>` per share and
+   `exec` the supervisor. Identity (`connectivity_group_id` + root key) is the
+   create-once part `init` guards; the upstream is just the `serve` argument, so a
+   changed mapping takes effect on the next redeploy with no stored-config drift.
+2. **Address `host:port`, not just port — ✅ DONE.**
+   The `serve`/`start` CLI takes a `[host:]port` upstream (bare port ⇒ `127.0.0.1`;
    `app:3000` for a Docker compose service; `:3000` also accepted), validated by a
    `parse_upstream` helper, threaded as the dial address and connected via
-   `TcpStream::connect` (tokio resolves DNS names). `local_port`→`upstream` throughout,
-   including the IPC status field. (The earlier note that `strip_hop_by_hop` "drops the
-   target" was inaccurate — it only removes hop-by-hop headers; Host-header handling is
-   item #5.)
+   `TcpStream::connect` (tokio resolves DNS names). The upstream is carried as a
+   string throughout, including the IPC status field. (Host-header handling is a
+   separate concern — item #5.)
 3. **WebSocket support — ✅ DONE.**
-   `try_forward` now detects an HTTP/1.1 Upgrade, preserves the `Connection`/`Upgrade`
+   `try_forward` detects an HTTP/1.1 Upgrade, preserves the `Connection`/`Upgrade`
    handshake headers, and on a `101` splices raw bytes both ways via `hyper::upgrade`
    + `tokio::io::copy_bidirectional` — `serve_connection(...).with_upgrades()` on the
    QUIC-server side, `conn.with_upgrades()` on the upstream-client side. Protocol-
    agnostic (no frame parsing), so subprotocols / binary / `permessage-deflate` pass
    through untouched. Mirrored on waclient and the Android client (the latter via Ktor
    `OutgoingContent.ProtocolUpgrade`). Verified end-to-end on desktop + a Pixel 8,
-   including a foreground idle socket holding well past the ICE consent window. The
-   dashboards / chat / Gitea-live-updates class works now.
+   including a foreground idle socket holding well past the ICE consent window. This
+   covers the dashboards / chat / Gitea-live-updates class.
 4. **Container-conventions plumbing** (small individually, all required):
-   - non-interactive, env-driven init (`WC_API_KEY`, share name, target), idempotent
-     across restarts (init only if state volume empty)
+   - the **reconcile wrapper + supervisor** from #1: env / mounted config file →
+     `init` new shares & `deinit` removed ones (keyed off `status`, so it's
+     idempotent — identity is created once) → generate the supervisord config →
+     `exec` supervisord as PID 1. We use an off-the-shelf supervisor rather than
+     hand-rolling signal/restart/reap logic in a shell `& … & wait`.
    - log to **stdout** instead of today's daily-rotated files (Coolify's log viewer
-     reads stdout)
-   - graceful shutdown on SIGTERM
-   - a healthcheck
+     reads stdout); with N processes, prefix each line with its share so the
+     interleaved streams stay legible
+   - graceful shutdown on SIGTERM — supervisord delivers TERM to each `serve`
+     (`stopsignal`/`stopwaitsecs`), but `serve` itself must **trap** it and run the
+     clean Wispers-node shutdown; it currently has no SIGTERM handler, so the process
+     is killed mid-flight. This is the only binary change this section requires.
+   - a healthcheck — parse `waserver status` (are all shares `serving`?)
    - multi-arch build (**arm64** — home-lab / Pi users are core Coolify audience)
-   - run in **foreground**, not the daemonize path
+   - run in **foreground** — the supervisor runs `serve` (foreground), never
+     `start` (which daemonises and would detach from PID 1)
 
    **IPC version skew (CLI vs daemon).** Coolify's web terminal (#7) runs `waserver`
    subcommands against the *running* daemon, which after an image-pull + restart may be an
    older binary than the CLI. The local IPC (serde-JSON over a unix socket) must tolerate
    that within reason. Rule: evolve **additively** — serde ignores unknown fields by
    default, so new fields (`#[serde(default)]` / `Option`) are forward- and
-   backward-compatible; never rename/retype/remove a field in place (the `local_port` →
-   `upstream` retype in #2 was a genuine break — fine only because nothing had shipped).
+   backward-compatible; never rename/retype/remove a field in place (retyping a field —
+   e.g. a bare port number into a `host:port` string — is a genuine break, acceptable
+   only before anything has shipped).
    Gate the rare unavoidable break behind a dedicated **IPC protocol version** — a current
    + min-compatible window that fails soft ("daemon too old, restart it"), keyed off the
    protocol, *not* the package version (which churns without wire changes). `stop` stays
@@ -169,9 +198,10 @@ apps opt in via a domain field).
 
 ## Suggested order
 
-1. Connector engineering first: items #1, #4 (multi-share, container plumbing) —
-   none Coolify-specific, all needed under any outcome. (#2 host:port and #3
-   WebSockets already done.)
+1. Connector engineering first: the container image (#4) — reconcile wrapper +
+   supervisor + conventions plumbing — which is also where #1 (multi-share) is
+   realised, plus a graceful-SIGTERM handler in `serve`. None Coolify-specific, all
+   needed under any outcome. (#2 host:port and #3 WebSockets are done.)
 2. Both gating design decisions (#8 admin access, #9 target discovery) are settled,
    so engineering can proceed without further blocking decisions.
 3. Then the runtime CLI subcommands (#7: invite/members/revoke) and host-header
