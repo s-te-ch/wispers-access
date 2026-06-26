@@ -1,10 +1,12 @@
 # Wispers Access × Coolify integration plan
 
 > Status: research + scoping notes. Done: **#2 (host:port)**, **#3 (WebSockets)**,
-> and the **graceful-SIGTERM/SIGINT handler** in `serve` (part of #4). **#1
-> (multi-share)** needs no dedicated binary work: it is realised as image-side glue
-> under #4 — a reconcile wrapper plus an off-the-shelf supervisor. The open build is
-> the rest of the container image (#4) and the runtime CLI (#7).
+> the **graceful-SIGTERM/SIGINT handler** in `serve`, and the **connector image**
+> (`connector/`) — a reconcile wrapper + supervisord running one `serve` per share,
+> validated end-to-end locally (init → hub serve → invite → reached through the
+> connector). That also realises **#1 (multi-share)**. Remaining: an **arm64**
+> multi-arch build (#4), runtime-CLI verification (#7), the Host-header decision
+> (#5), and the Coolify artifact (#10).
 
 ## Goal
 
@@ -67,7 +69,8 @@ apps opt in via a domain field).
 
 ### Connector engineering (waserver side)
 
-1. **Multi-share is a container concern, not a binary feature.** "Run N shares at
+1. **Multi-share is a container concern, not a binary feature — ✅ built in
+   `connector/`, validated end-to-end.** "Run N shares at
    once" does *not* need one-process multiplexing in `waserver`. The container runs
    **one `waserver serve <share> <upstream>` per share under an off-the-shelf
    process supervisor** (supervisord / s6-overlay as
@@ -106,24 +109,35 @@ apps opt in via a domain field).
    `OutgoingContent.ProtocolUpgrade`). Verified end-to-end on desktop + a Pixel 8,
    including a foreground idle socket holding well past the ICE consent window. This
    covers the dashboards / chat / Gitea-live-updates class.
-4. **Container-conventions plumbing** (small individually, all required):
-   - the **reconcile wrapper + supervisor** from #1: env / mounted config file →
-     `init` new shares & `deinit` removed ones (keyed off `status`, so it's
-     idempotent — identity is created once) → generate the supervisord config →
-     `exec` supervisord as PID 1. We use an off-the-shelf supervisor rather than
-     hand-rolling signal/restart/reap logic in a shell `& … & wait`.
-   - log to **stdout** instead of today's daily-rotated files (Coolify's log viewer
-     reads stdout); with N processes, prefix each line with its share so the
-     interleaved streams stay legible
-   - graceful shutdown on SIGTERM — ✅ DONE. `serve` traps SIGTERM **and** SIGINT and
-     runs the same clean Wispers-node shutdown as `waserver stop`, exiting 0 so a
+4. **Container-conventions plumbing.** Built in `connector/` (Dockerfile + the
+   `entrypoint.sh` reconcile wrapper + `supervisord.conf`) and validated end-to-end
+   against a private `ws-echo` app via `connector/compose.yaml`.
+   - ✅ the **reconcile wrapper + supervisor**: mounted config file (`name | display
+     | upstream`) → `waserver init` new shares (keyed off `status`, idempotent —
+     identity created once) → generate one supervisord program per share → `exec`
+     supervisord as PID 1. Off-the-shelf supervisor, no hand-rolled `& … & wait`.
+     Removing a share *stops serving* it but does **not** `deinit` it — destroying a
+     connectivity group + its members on a config typo is too dangerous, so deletion
+     stays a manual `waserver deinit`.
+   - ✅ logs reach the container's **stdout/stderr** (Coolify's log viewer reads
+     them). Still TODO: `serve` also writes a redundant daily file under `/data` (a
+     `--log-stdout`-style switch could drop that sink), and per-share log prefixing
+     (streams interleave with timestamps but no share tag yet).
+   - ✅ graceful shutdown on SIGTERM — `serve` traps SIGTERM **and** SIGINT and runs
+     the same clean Wispers-node shutdown as `waserver stop`, exiting 0 so a
      supervisor reads it as an intended stop, not a crash. supervisord delivers TERM
      to each `serve` (`stopsignal`/`stopwaitsecs`) and escalates to KILL as the
      backstop.
-   - a healthcheck — parse `waserver status` (are all shares `serving`?)
-   - multi-arch build (**arm64** — home-lab / Pi users are core Coolify audience)
-   - run in **foreground** — the supervisor runs `serve` (foreground), never
-     `start` (which daemonises and would detach from PID 1)
+   - ✅ a healthcheck — `healthcheck.sh` parses `waserver status`; healthy once every
+     share reports `serving` (Docker `--start-period` covers the connecting window).
+   - ✅ run in **foreground** — supervisord runs `serve` (foreground), never `start`
+     (which daemonises and would detach from PID 1).
+   - ⬜ **multi-arch (arm64)** build — `docker buildx --platform linux/amd64,linux/arm64`;
+     home-lab / Pi users are core Coolify audience. The one open item here.
+
+   (Build note: in a clean Debian builder, `wispers-connect`'s stack needs `cmake` +
+   `clang`/`libclang` for boring-sys/BoringSSL and `protobuf-compiler` for prost/tonic
+   — see `connector/Dockerfile`.)
 
    **IPC version skew (CLI vs daemon).** Coolify's web terminal (#7) runs `waserver`
    subcommands against the *running* daemon, which after an image-pull + restart may be an
@@ -199,10 +213,10 @@ apps opt in via a domain field).
 
 ## Suggested order
 
-1. Connector engineering first: the container image (#4) — reconcile wrapper +
-   supervisor + conventions plumbing — which is also where #1 (multi-share) is
-   realised. None Coolify-specific, all needed under any outcome. (#2 host:port, #3
-   WebSockets, and the graceful-SIGTERM/SIGINT handler are done.)
+1. Connector engineering — the container image (#4, which also realises #1) is
+   built in `connector/` and validated end-to-end; only the **arm64 multi-arch
+   build** is left there. (#2 host:port, #3 WebSockets, and the SIGTERM/SIGINT
+   handler are done.)
 2. Both gating design decisions (#8 admin access, #9 target discovery) are settled,
    so engineering can proceed without further blocking decisions.
 3. Then the runtime CLI subcommands (#7: invite/members/revoke) and host-header
