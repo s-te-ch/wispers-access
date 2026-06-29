@@ -1,12 +1,16 @@
 # Wispers Access × Coolify integration plan
 
 > Status: research + scoping notes. Done: **#2 (host:port)**, **#3 (WebSockets)**,
-> the **graceful-SIGTERM/SIGINT handler** in `serve`, and the **connector image**
-> (`connector/`) — a reconcile wrapper + supervisord running one `serve` per share,
-> validated end-to-end locally (init → hub serve → invite → reached through the
-> connector). That also realises **#1 (multi-share)**. Remaining: an **arm64**
-> multi-arch build (#4), runtime-CLI verification (#7), the Host-header decision
-> (#5), and the Coolify artifact (#10).
+> the **graceful-SIGTERM/SIGINT handler** in `serve`, the **connector image**
+> (`connector/`) — a reconcile wrapper + supervisord running one `serve` per share —
+> and a full **end-to-end validation against a real Coolify deployment**: an arm64
+> Lima VM running Coolify + a private Odoo (no published ports), reached from an
+> Android Access client *through the connector* — landing page, login POST, session,
+> and authenticated navigation all clean. That realises **#1 (multi-share)**, settles
+> **#5** (Host header — pass-through works, see below), and exercises the **#7** CLI
+> (`invite`/`nodes` used; `revoke` present). The arm64 image ran healthy in the VM, so
+> **#4** is down to just the multi-arch *buildx* packaging. Remaining: that multi-arch
+> build (#4), the Coolify artifact (#10), and documenting the base-URL escape hatch (#5).
 
 ## Goal
 
@@ -30,6 +34,14 @@ browser; Wispers requires the visitor to install a client and redeem an invite.
 That *is* the access control. When we say "as easy as exposing," we mean the
 **host's** experience; the visitor experience is a separate bar and we should be
 explicit about that in how we pitch it.
+
+A second visitor-side caveat, by design rather than a bug: a **backgrounded Android
+client drops its connection** (no foreground service) — seen in the Odoo test when the
+node went `offline` after ~2 min idle. For **interactive access** this is a non-issue:
+foreground means connected, and a backgrounded session has no observer to serve (the
+tree falls with nobody to hear it). It only matters for **push-class apps** — chat,
+live notifications — that need a live socket while backgrounded, which is outside this
+use case. Foreground the client and it reconnects.
 
 ## What Coolify gives us to work with
 
@@ -132,8 +144,11 @@ apps opt in via a domain field).
      share reports `serving` (Docker `--start-period` covers the connecting window).
    - ✅ run in **foreground** — supervisord runs `serve` (foreground), never `start`
      (which daemonises and would detach from PID 1).
-   - ⬜ **multi-arch (arm64)** build — `docker buildx --platform linux/amd64,linux/arm64`;
-     home-lab / Pi users are core Coolify audience. The one open item here.
+   - 🟡 **multi-arch (arm64)** build — arm64 itself is **proven**: the arm64 image
+     (built on colima) ran healthy end-to-end in an arm64 Lima VM, fronting Odoo. Only
+     the multi-arch **buildx** packaging is left
+     (`docker buildx --platform linux/amd64,linux/arm64`) so one artifact also serves
+     amd64. home-lab / Pi users are core Coolify audience.
 
    (Build note: in a clean Debian builder, `wispers-connect`'s stack needs `cmake` +
    `clang`/`libclang` for boring-sys/BoringSSL and `protobuf-compiler` for prost/tonic
@@ -154,10 +169,16 @@ apps opt in via a domain field).
    envelope, every daemon understands it) and confirm death by socket-close rather than
    parsing the reply. (In-container, the orchestrator's SIGTERM is the usual stop path —
    hence the graceful-SIGTERM bullet above.)
-5. **Host-header behavior.** Clients reach shares as `<share>.localhost:<port>`;
-   that Host header currently passes through. Apps validating Host/Origin (CSRF,
-   absolute-URL generation) will misbehave. Decide: documented base-URL convention
-   or optional per-share Host rewrite. Will surface in the first real test.
+5. **Host-header behavior — RESOLVED empirically: pass-through is the v1 default;
+   base-URL is an opt-in escape hatch.** Clients reach shares as
+   `<share>.localhost:<port>` and that Host passes through. The first real test —
+   **Odoo 18 through the connector** — did *not* misbehave: render, login POST, session
+   cookies, and authenticated navigation all worked untouched. So the connector ships
+   **pass-through, no Host rewrite, in v1**. The escape hatch is a **documented base-URL
+   convention** (e.g. Odoo's `web.base.url` + `…freeze`) for the narrower class that
+   bakes *absolute* URLs into artifacts leaving the tunnel — notification/reset emails,
+   webhooks, OAuth redirect URIs — or that hard-validates Origin. A per-share Host
+   rewrite stays a *future* option if some app needs it, not a v1 requirement.
 
 ### Admin surface
 
@@ -214,13 +235,15 @@ apps opt in via a domain field).
 ## Suggested order
 
 1. Connector engineering — the container image (#4, which also realises #1) is
-   built in `connector/` and validated end-to-end; only the **arm64 multi-arch
-   build** is left there. (#2 host:port, #3 WebSockets, and the SIGTERM/SIGINT
-   handler are done.)
+   built in `connector/` and validated end-to-end against a real Coolify + Odoo
+   deployment; arm64 is proven, so only the **multi-arch buildx packaging** is left
+   there. (#2 host:port, #3 WebSockets, and the SIGTERM/SIGINT handler are done.)
 2. Both gating design decisions (#8 admin access, #9 target discovery) are settled,
    so engineering can proceed without further blocking decisions.
-3. Then the runtime CLI subcommands (#7: invite/members/revoke) and host-header
-   handling (#5).
+3. The runtime CLI subcommands (#7: invite/members/revoke) **exist** — `invite` and
+   `nodes` were exercised in the Odoo test, `revoke` is present but not yet run.
+   Host-header handling (#5) is **resolved** (pass-through); only the base-URL
+   convention still needs writing up.
 4. Finally the Coolify artifact (#10): publish the image, write + test the compose
    snippet and guide.
 5. Long-term distribution: docs-page contribution to Coolify's knowledge base
