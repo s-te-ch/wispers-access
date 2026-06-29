@@ -22,3 +22,9 @@ target
 
 # Emacs
 *~
+
+# Secrets — env files holding API keys (e.g. WC_API_KEY for the connector)
+.env
+.env.*
+**/.env
+!**/.env.example
