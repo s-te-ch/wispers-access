@@ -31,8 +31,12 @@ services:
     networks:
       - coolify
     environment:
-      WC_API_KEY: ${WC_API_KEY:?set your Wispers Connect API key}
-      SHARES: ${SHARES:?set shares — name | display | container:port  (';'-separated)}
+      # These come up as empty *required* fields in Coolify's Environment Variables
+      # tab — fill them there (format in the setup notes above). The empty ':?' is
+      # deliberate: Coolify pre-fills the field with whatever text follows ':?', so a
+      # hint string there gets deployed as the literal value (crash-loops the share).
+      WC_API_KEY: ${WC_API_KEY:?}
+      SHARES: ${SHARES:?}
     volumes:
       # Persists share identity (keys + registration) across redeploys. REQUIRED —
       # without it, every redeploy mints a new connectivity group and existing
