@@ -1,0 +1,3 @@
+# Per-user Xcode state (open files, view layout, breakpoints, schemes,
+# etc.). Should not be committed — diffs every time Xcode is opened.
+xcuserdata/
