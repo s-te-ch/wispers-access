@@ -234,6 +234,36 @@ vars, tested end-to-end against Odoo the way Coolify runs it (on the shared `coo
 network, upstream reached by container name). Remaining: **publish the image** so Coolify
 can pull it, and the docs-page / catalog-template contribution (star-gated).
 
+### v2 idea: a Coolify admin TUI (separate program, drives waserver)
+
+A full-screen **ratatui** admin app run from Coolify's **built-in web Terminal** — which,
+being a tab on the resource page, gives an "embedded in Coolify" feel with **no web panel**
+(#8 intact) and **no upstream work**. Coolify's terminal is xterm.js over a real PTY, so
+curses runs fine — the current slim image already ships `ncurses` + `xterm`/`xterm-256color`
+terminfo (verified); just ensure `TERM` is set.
+
+**Boundary — this is Coolify-specific, so it does NOT go into `waserver`.** It is a
+**separate program that *controls* waserver**, not part of it: it drives waserver via its
+CLI/IPC (status / invite / nodes / revoke) and talks to the **Coolify API** (app discovery,
+flipping "Connect To Predefined Network"). It lives under `integrations/coolify/` and ships
+in a **Coolify-flavoured image layered `FROM` the generic waserver image** — the base image
+stays platform-agnostic. The *only* touch to waserver is generic: an optional `--json`
+output mode on the CLI so tools can drive it without scraping text. (Same dependency-
+direction invariant as the rest: integration → core, never core → integration.)
+
+What it does: discover apps + **expose toggles** (Coolify API); **invites / members / revoke
+/ status** (via waserver); the fixed QR rendered inline.
+
+Gotchas (all container-side): set `TERM=xterm-256color`; verify Coolify forwards resize
+(SIGWINCH) to the PTY; keyboard-driven (don't assume mouse); a full-screen TUI makes
+copy-pasting an invite code fiddly (offer a plain-print fallback — the QR scans regardless);
+small/phone terminals are cramped.
+
+Gate: a *live* expose-toggle needs a waserver **runtime share API** (add/remove without a
+redeploy) — the in-process reconfiguration #1 deliberately deferred. Management ops
+(invite/members/status/read-only discovery) are already runtime, so the TUI can ship
+incrementally without waiting on that.
+
 ### Future platforms
 
 Dokploy, Portainer, CasaOS, Unraid, … — each a sibling folder under `integrations/`,
