@@ -24,9 +24,19 @@ trim() {
   printf '%s' "$s";
 }
 
+# Shares can come from the SHARES env var (the Coolify-native path — pasted/edited
+# in the UI) or a mounted file (SHARES_FILE, default /config/shares.conf). SHARES
+# holds one 'name | display | upstream' per line; ';' also separates lines so a
+# single-line value works too. When set, SHARES wins over the file.
+if [[ -n "${SHARES:-}" ]]; then
+  SHARES_FILE="$(mktemp)"
+  printf '%s\n' "${SHARES//;/$'\n'}" > "$SHARES_FILE"
+  log "using shares from \$SHARES env var"
+fi
+
 if [[ ! -f "$SHARES_FILE" ]]; then
-  log "ERROR: shares file not found at $SHARES_FILE"
-  log "       expected one share per line:  name | display name | host:port"
+  log "ERROR: no shares configured — set the SHARES env var or mount a file at $SHARES_FILE"
+  log "       format: one 'name | display name | host:port' per line"
   exit 1
 fi
 

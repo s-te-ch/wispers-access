@@ -1,0 +1,44 @@
+# Wispers Access connector — paste into Coolify as a "Docker Compose Empty" resource.
+#
+# Fronts one or more *private* Coolify apps (no domain, no published ports) and makes
+# them reachable through Wispers Access instead of the public Internet — you hand out
+# invite codes, not a URL. One connector per server hosts many shares, so "expose
+# another app" is one more entry in SHARES, not a new container.
+#
+# Setup in Coolify:
+#   1. New Resource → Docker Compose Empty → paste this file → Deploy.
+#   2. Set two environment variables (Environment Variables tab):
+#        WC_API_KEY  your Wispers Connect API key
+#        SHARES      one or more shares, ';'-separated, each:
+#                       name | display name | <container>:<port>
+#                    e.g.  odoo | Odoo | odoo-abc123:8069 ; wiki | Wiki | wiki-def456:3000
+#                    (<container> is the app's container name — Coolify names it
+#                     <service>-<uuid> — reachable on the shared 'coolify' network.)
+#   3. On each app you want reachable, enable "Connect To Predefined Network".
+#   4. Mint invites from this resource's Terminal:
+#        waserver invite <share> <device-name> <user@email>
+#        waserver nodes <share>          # list guests
+#        waserver revoke <share> <node>  # cut one off
+#
+services:
+  wispers-connector:
+    image: ghcr.io/s-te-ch/wispers/connector:latest
+    restart: unless-stopped
+    networks:
+      - coolify
+    environment:
+      WC_API_KEY: ${WC_API_KEY:?set your Wispers Connect API key}
+      SHARES: ${SHARES:?set shares — name | display | container:port  (';'-separated)}
+    volumes:
+      # Persists share identity (keys + registration) across redeploys. REQUIRED —
+      # without it, every redeploy mints a brand-new connectivity group and existing
+      # invites stop working.
+      - connector-state:/data
+
+volumes:
+  connector-state:
+
+networks:
+  # Join Coolify's shared network so the connector can reach apps by container name.
+  coolify:
+    external: true
