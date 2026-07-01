@@ -1,11 +1,11 @@
 # Wispers Access × Coolify integration plan
 
 > Status: research + scoping notes. Done: **#2 (host:port)**, **#3 (WebSockets)**,
-> the **graceful-SIGTERM/SIGINT handler** in `serve`, the **connector image**
-> (`connector/`) — a reconcile wrapper + supervisord running one `serve` per share —
+> the **graceful-SIGTERM/SIGINT handler** in `serve`, the **waserver container image**
+> (`waserver/docker/`) — a reconcile wrapper + supervisord running one `serve` per share —
 > and a full **end-to-end validation against a real Coolify deployment**: an arm64
 > Lima VM running Coolify + a private Odoo (no published ports), reached from an
-> Android Access client *through the connector* — landing page, login POST, session,
+> Android Access client *through the waserver container* — landing page, login POST, session,
 > and authenticated navigation all clean. That realises **#1 (multi-share)**, settles
 > **#5** (Host header — pass-through works, see below), and exercises the **#7** CLI
 > (`invite`/`nodes` used; `revoke` present). The arm64 image ran healthy in the VM, so
@@ -66,23 +66,23 @@ use case. Foreground the client and it reconnects.
   catalog template (mechanical, gated on stars). A first-class UI toggle would
   require them to *want* it; nothing observed suggests they build that for anyone.
 
-## Architecture decision: one connector per server, not per app
+## Architecture decision: one waserver container per server, not per app
 
 A pure per-app sidecar (one waserver = one share = one daemon) fails claim #2 —
 each new app means deploying a whole new container. Instead:
 
-**One Wispers connector container per Coolify server**, attached to the `coolify`
+**One Wispers waserver container per Coolify server**, attached to the `coolify`
 Docker network, hosting multiple shares, each share mapping to `<container>:<port>`
-via Docker DNS. "Make this app reachable" becomes "add a share to the connector" —
+via Docker DNS. "Make this app reachable" becomes "add a share to the waserver container" —
 structurally the same move as Coolify's own proxy (one Traefik fronts everything;
 apps opt in via a domain field).
 
 ## Work items
 
-### Connector engineering (waserver side)
+### Container engineering (waserver side)
 
 1. **Multi-share is a container concern, not a binary feature — ✅ built in
-   `connector/`, validated end-to-end.** "Run N shares at
+   `waserver/docker/`, validated end-to-end.** "Run N shares at
    once" does *not* need one-process multiplexing in `waserver`. The container runs
    **one `waserver serve <share> <upstream>` per share under an off-the-shelf
    process supervisor** (supervisord / s6-overlay as
@@ -121,9 +121,9 @@ apps opt in via a domain field).
    `OutgoingContent.ProtocolUpgrade`). Verified end-to-end on desktop + a Pixel 8,
    including a foreground idle socket holding well past the ICE consent window. This
    covers the dashboards / chat / Gitea-live-updates class.
-4. **Container-conventions plumbing.** Built in `connector/` (Dockerfile + the
+4. **Container-conventions plumbing.** Built in `waserver/docker/` (Dockerfile + the
    `entrypoint.sh` reconcile wrapper + `supervisord.conf`) and validated end-to-end
-   against a private `ws-echo` app via `connector/compose.yaml`.
+   against a private `ws-echo` app via `waserver/docker/compose.yaml`.
    - ✅ the **reconcile wrapper + supervisor**: mounted config file (`name | display
      | upstream`) → `waserver init` new shares (keyed off `status`, idempotent —
      identity created once) → generate one supervisord program per share → `exec`
@@ -152,7 +152,7 @@ apps opt in via a domain field).
 
    (Build note: in a clean Debian builder, `wispers-connect`'s stack needs `cmake` +
    `clang`/`libclang` for boring-sys/BoringSSL and `protobuf-compiler` for prost/tonic
-   — see `connector/Dockerfile`.)
+   — see `waserver/docker/Dockerfile`.)
 
    **IPC version skew (CLI vs daemon).** Coolify's web terminal (#7) runs `waserver`
    subcommands against the *running* daemon, which after an image-pull + restart may be an
@@ -172,8 +172,8 @@ apps opt in via a domain field).
 5. **Host-header behavior — RESOLVED empirically: pass-through is the v1 default;
    base-URL is an opt-in escape hatch.** Clients reach shares as
    `<share>.localhost:<port>` and that Host passes through. The first real test —
-   **Odoo 18 through the connector** — did *not* misbehave: render, login POST, session
-   cookies, and authenticated navigation all worked untouched. So the connector ships
+   **Odoo 18 through the waserver container** — did *not* misbehave: render, login POST, session
+   cookies, and authenticated navigation all worked untouched. So the waserver container ships
    **pass-through, no Host rewrite, in v1**. The escape hatch is a **documented base-URL
    convention** (e.g. Odoo's `web.base.url` + `…freeze`) for the narrower class that
    bakes *absolute* URLs into artifacts leaving the tunnel — notification/reset emails,
@@ -209,18 +209,18 @@ apps opt in via a domain field).
    anyway. Fine at the **govt-pilot bar**. (The overlap between "runs Coolify" and
    "scared of a terminal" is small.)
 9. **Target discovery — RESOLVED: Coolify API.** Coolify names containers
-   `<service>-<uuid>`, so the connector must populate a picker rather than make the
+   `<service>-<uuid>`, so the waserver container must populate a picker rather than make the
    user type `qdm4k8s-app-1:3000`. Two ways, and they are not close:
    - **Docker socket — rejected.** `docker.sock` is the API to the *whole Docker
      daemon*, not the compose stack: it exposes **every container on the host**
      (other stacks, their DBs, Coolify's own containers). And it is **not
      read-only** — the `:ro` mount flag only freezes the socket *file*, not the API,
-     so the connector could still create containers / `exec` / bind-mount host paths
+     so the waserver container could still create containers / `exec` / bind-mount host paths
      ≈ **root on the host**. The only way to actually scope it is a
      `docker-socket-proxy` sidecar whitelisting `GET /containers/json`, which erases
      the "simpler to ship" advantage.
    - **Coolify API — chosen.** One scoped API token (a Coolify secret); the
-     connector lists only Coolify-managed resources via REST. No host access, small
+     waserver container lists only Coolify-managed resources via REST. No host access, small
      blast radius, cleaner story ("lists your Coolify apps" vs. "can see every
      container on your box"). Cost: an extra secret to provision + coupling to
      Coolify's API surface — acceptable at the **govt-pilot bar**.
@@ -228,14 +228,14 @@ apps opt in via a domain field).
 ### Coolify-facing artifact
 
 10. **The template/compose snippet + install docs** are their own deliverable
-    (everything above is connector engineering). The thing a Coolify user actually
-    touches: a ~15-line compose snippet (app with no domain + connector pointing at
+    (everything above is container engineering). The thing a Coolify user actually
+    touches: a ~15-line compose snippet (app with no domain + waserver container pointing at
     it, `${WC_API_KEY:?}` prompting in the UI), tested via "Docker Compose Empty."
 
 ## Suggested order
 
-1. Connector engineering — the container image (#4, which also realises #1) is
-   built in `connector/` and validated end-to-end against a real Coolify + Odoo
+1. Container engineering — the container image (#4, which also realises #1) is
+   built in `waserver/docker/` and validated end-to-end against a real Coolify + Odoo
    deployment; arm64 is proven, so only the **multi-arch buildx packaging** is left
    there. (#2 host:port, #3 WebSockets, and the SIGTERM/SIGINT handler are done.)
 2. Both gating design decisions (#8 admin access, #9 target discovery) are settled,
@@ -251,7 +251,7 @@ apps opt in via a domain field).
 
 ## Gating decisions — resolved
 
-Both decisions that change what the connector *is* are settled: **#8 admin access**
+Both decisions that change what the waserver container *is* are settled: **#8 admin access**
 (no custom surface — Coolify env/UI for config, built-in terminal + `waserver` CLI
 for invites/members/revoke) and **#9 target discovery** (Coolify API, not the Docker
 socket). Everything else is bounded engineering.

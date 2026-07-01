@@ -1,13 +1,13 @@
 # syntax=docker/dockerfile:1
 #
-# Wispers Access connector image: the `waserver` binary plus a process
-# supervisor. One container hosts many shares — the entrypoint reconciles the
-# desired shares from config and runs one `waserver serve` per share under
+# Wispers Access — the waserver container image: the `waserver` binary plus a
+# process supervisor. One container hosts many shares — the entrypoint reconciles
+# the desired shares from config and runs one `waserver serve` per share under
 # supervisord, which owns signal forwarding, restart, and zombie reaping.
 #
 # Build context is the repo root (so the Rust workspace is available):
-#     docker build -f connector/Dockerfile -t wispers-connector .
-# or just use connector/compose.yaml, which sets the context for you.
+#     docker build -f waserver/docker/Dockerfile -t ghcr.io/s-te-ch/wispers/access/waserver .
+# or just use waserver/docker/compose.yaml, which sets the context for you.
 
 # --- builder --------------------------------------------------------------
 FROM rust:1-bookworm AS builder
@@ -35,9 +35,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/target/release/waserver /usr/local/bin/waserver
-COPY connector/entrypoint.sh    /usr/local/bin/entrypoint.sh
-COPY connector/healthcheck.sh   /usr/local/bin/healthcheck.sh
-COPY connector/supervisord.conf /etc/supervisor/supervisord.conf
+COPY waserver/docker/entrypoint.sh    /usr/local/bin/entrypoint.sh
+COPY waserver/docker/healthcheck.sh   /usr/local/bin/healthcheck.sh
+COPY waserver/docker/supervisord.conf /etc/supervisor/supervisord.conf
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh \
     && mkdir -p /etc/supervisor/conf.d
 

@@ -1,0 +1,46 @@
+# Generic local test rig for the waserver container — a same-stack docker compose:
+# a private app (no published ports) plus the waserver container, both on one
+# network, the container reaching the app by service name. Works on any box with
+# docker compose; no orchestrator needed. (For Coolify and similar platforms, see
+# integrations/<platform>/.)
+#
+#   export WC_API_KEY=...        # your Wispers Connect API key
+#   docker compose -f waserver/docker/compose.yaml up --build
+#
+# Then, in another terminal:
+#   docker compose -f waserver/docker/compose.yaml exec waserver waserver status
+#   docker compose -f waserver/docker/compose.yaml exec waserver waserver invite demo alice alice@example.com
+#
+# Redeem that invite from a Wispers client to reach the ws-echo page/socket through
+# the container — proxied out of the stack, never exposed directly.
+
+name: waserver-docker-dev
+
+services:
+  app:
+    # The "private" upstream app. No `ports:` — it stays on the internal network,
+    # exactly like a service you host but don't expose.
+    image: python:3-slim
+    working_dir: /app
+    volumes:
+      - ../../demo/ws-echo.py:/app/ws-echo.py:ro
+    environment:
+      WS_ECHO_HOST: "0.0.0.0"     # reachable from the waserver container
+    command: ["python3", "ws-echo.py", "8080"]
+
+  waserver:
+    build:
+      context: ../..              # repo root, so the Rust workspace is in scope
+      dockerfile: waserver/docker/Dockerfile
+    environment:
+      WC_API_KEY: ${WC_API_KEY:?set WC_API_KEY in your shell or a .env file}
+      # Shares as an env var (one per line; ';' also separates). A mounted file at
+      # /config/shares.conf works too — see shares.example.conf.
+      SHARES: "demo | WS Echo Demo | app:8080"
+    volumes:
+      - waserver-state:/data      # persists share identity across restarts
+    depends_on:
+      - app
+
+volumes:
+  waserver-state:

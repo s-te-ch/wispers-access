@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Connector entrypoint.
+# waserver container entrypoint.
 #
 # 1. Read the desired shares from a config file (one `name | display | upstream`
 #    per line).

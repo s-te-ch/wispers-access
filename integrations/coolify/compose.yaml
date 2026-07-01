@@ -1,9 +1,10 @@
-# Wispers Access connector — paste into Coolify as a "Docker Compose Empty" resource.
+# Wispers Access on Coolify — paste as a "Docker Compose Empty" resource.
 #
-# Fronts one or more *private* Coolify apps (no domain, no published ports) and makes
-# them reachable through Wispers Access instead of the public Internet — you hand out
-# invite codes, not a URL. One connector per server hosts many shares, so "expose
-# another app" is one more entry in SHARES, not a new container.
+# A thin recipe over the generic waserver container (see waserver/docker/). It
+# fronts one or more *private* Coolify apps (no domain, no published ports) and
+# makes them reachable through Wispers Access instead of the public Internet — you
+# hand out invite codes, not a URL. One waserver container per server hosts many
+# shares, so "expose another app" is one more entry in SHARES, not a new container.
 #
 # Setup in Coolify:
 #   1. New Resource → Docker Compose Empty → paste this file → Deploy.
@@ -20,9 +21,12 @@
 #        waserver nodes <share>          # list guests
 #        waserver revoke <share> <node>  # cut one off
 #
+# The only Coolify-specific token here is the network name 'coolify'; swap it for
+# any shared external network and this is a generic cross-stack setup.
+#
 services:
-  wispers-connector:
-    image: ghcr.io/s-te-ch/wispers/connector:latest
+  waserver:
+    image: ghcr.io/s-te-ch/wispers/access/waserver:latest
     restart: unless-stopped
     networks:
       - coolify
@@ -31,14 +35,14 @@ services:
       SHARES: ${SHARES:?set shares — name | display | container:port  (';'-separated)}
     volumes:
       # Persists share identity (keys + registration) across redeploys. REQUIRED —
-      # without it, every redeploy mints a brand-new connectivity group and existing
+      # without it, every redeploy mints a new connectivity group and existing
       # invites stop working.
-      - connector-state:/data
+      - waserver-state:/data
 
 volumes:
-  connector-state:
+  waserver-state:
 
 networks:
-  # Join Coolify's shared network so the connector can reach apps by container name.
+  # Join Coolify's shared network so the container can reach apps by container name.
   coolify:
     external: true
