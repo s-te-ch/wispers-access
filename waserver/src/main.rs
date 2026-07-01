@@ -329,12 +329,7 @@ async fn invite(
             let code = compose_wax_code(&invite.registration_token, &invite.activation_code);
             let qr = qrcode::QrCode::new(code.as_bytes()).context("cannot build QR code")?;
             println!("Invite code (valid for 24 hours):\n\n  {}\n", code);
-            println!(
-                "{}",
-                qr.render::<qrcode::render::unicode::Dense1x2>()
-                    .quiet_zone(true)
-                    .build()
-            );
+            println!("{}", render_qr_ansi(&qr));
             if let Some(path) = png {
                 let img = qr
                     .render::<image::Luma<u8>>()
@@ -356,6 +351,45 @@ async fn invite(
         }
     }
     Ok(())
+}
+
+/// Render a QR code to a terminal string that scans regardless of terminal theme.
+///
+/// `qrcode`'s `unicode::Dense1x2` renderer draws modules in the terminal's
+/// *foreground* colour on its *background*, so on a dark terminal the QR comes out
+/// inverted (light modules on dark) and scanners — which expect dark-on-light —
+/// reject it. Here every module gets an explicit truecolour black/white, so it is
+/// always dark-on-light. `▀` (upper half block) packs two module rows per line: the
+/// glyph's foreground is the top module, its background the bottom one. (`--png`
+/// stays the colour-independent fallback for terminals that strip ANSI.)
+fn render_qr_ansi(qr: &qrcode::QrCode) -> String {
+    const QUIET: usize = 4; // standard quiet zone, in modules
+    const BLACK: &str = "0;0;0";
+    const WHITE: &str = "255;255;255";
+
+    let w = qr.width();
+    let modules = qr.to_colors();
+    let size = w + 2 * QUIET;
+    // Dark module at (col x, row y)? The quiet-zone border is light.
+    let dark = |x: usize, y: usize| -> bool {
+        if x < QUIET || y < QUIET || x >= QUIET + w || y >= QUIET + w {
+            return false;
+        }
+        matches!(modules[(y - QUIET) * w + (x - QUIET)], qrcode::Color::Dark)
+    };
+
+    let mut out = String::new();
+    let mut y = 0;
+    while y < size {
+        for x in 0..size {
+            let fg = if dark(x, y) { BLACK } else { WHITE };
+            let bg = if y + 1 < size && dark(x, y + 1) { BLACK } else { WHITE };
+            out.push_str(&format!("\x1b[38;2;{fg}m\x1b[48;2;{bg}m\u{2580}"));
+        }
+        out.push_str("\x1b[0m\n"); // reset colours at end of each line
+        y += 2;
+    }
+    out
 }
 
 /// Composes the user-facing invite code from its raw parts. The activation
