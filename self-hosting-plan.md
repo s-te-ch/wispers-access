@@ -167,6 +167,40 @@ notification/reset emails, webhooks, OAuth redirect URIs — or that hard-valida
 Origin. A per-share Host rewrite stays a *future* option if some app needs it, not a v1
 requirement.
 
+### 6. Self-hosted Wispers Connect backend — ✅ waserver + waclient (android/iOS 🟡)
+
+A share can live on a **self-hosted** Wispers Connect hub instead of the managed
+backend, so a deployment depends on *no* hosted Wispers infrastructure (see
+[wispers-hub](https://github.com/s-te-ch/wispers-hub); standalone mode serves the gRPC
+hub and the `/api/v1` integrator REST on **one origin**, routed by path). This is
+platform-independent — it's a `waserver`/client capability, not a Coolify one.
+
+- **One `--backend <url>` flag** (env `WC_BACKEND`), https-only, blank ⇒ managed. Absent,
+  waserver uses the managed split defaults (`connect.wispers.dev/api/v1` REST +
+  `hub.connect.wispers.dev` gRPC); given, it derives REST = `<url>/api/v1` and points the
+  node's hub at `<url>`. An escape hatch for a *split* custom backend (`--api-url` /
+  `--hub-url`) is deferred until someone needs it.
+- **Pinned at `init`, per share.** `ShareConfig.backend` (a `#[serde(default)]` `Option`,
+  no schema bump) stores it on `/data`; `serve` and `invite` read it back, so a share's
+  identity stays tied to the backend that minted it.
+- **Carried in the invite code.** Clients only ever use the hub, so the code carries just
+  the hub URL: `wax_<token>_<activation>` gains an optional fourth field,
+  `_<base32(url)>` (base32 so a URL's `:/.` can't clash with the `_` delimiter; the token
+  is hex and the activation `<digits>-<base36>`, so neither collides). Managed shares emit
+  the original two-part code unchanged — **no version tag** (Access is unreleased).
+- **Stored + applied client-side.** `waclient` decodes the field (rejecting anything not
+  base32 of an `https://` URL — fail closed), `override_hub_addr` **before** register /
+  activate, persists it (schema v2 `backend` column), and re-applies it on every reconnect
+  in `serve`. On join it prints the hub host so the guest sees where they're joining.
+- **No crate bump / no protocol gate.** The standalone hub double-registers its gRPC
+  service under the legacy `connect.hub.Hub` name (alias kept until hub 1.0), so the
+  current `wispers-connect` 0.9.2 clients talk to it unchanged. STUN/TURN needs no work —
+  the client fetches it from whichever hub it's pointed at.
+- 🟡 **android / iOS** — the wax-format change is server + `waclient` this round. The
+  Android `InviteCode.parse` (Kotlin) and iOS parser must learn the fourth field and the
+  FFI node must gain the same `override_hub_addr`-before-register + persistence. Tracked,
+  not yet built; existing two-part (managed) invites keep working on them meanwhile.
+
 ## Per-platform integrations
 
 ### The pattern

@@ -9,10 +9,19 @@ use std::collections::HashMap;
 
 type ConnectivityGroupId = String;
 
-const BASE_URL: &str = "https://connect.wispers.dev/api/v1";
+pub const MANAGED_API_BASE: &str = "https://connect.wispers.dev/api/v1";
+
+/// The Integrator REST API base to use, based on the --backend flag.
+pub fn api_base(backend: Option<&str>) -> String {
+    match backend {
+        Some(b) => format!("{}/api/v1", b.trim_end_matches('/')),
+        None => MANAGED_API_BASE.to_string(),
+    }
+}
 
 #[derive(Clone)]
 pub struct Client {
+    api_base: String,
     api_key: String,
     client: reqwest::Client,
 }
@@ -38,15 +47,16 @@ pub struct NodeMetadata {
 }
 
 impl Client {
-    pub fn new(api_key: &str) -> Self {
+    pub fn new(api_key: &str, api_base: &str) -> Self {
         Self {
+            api_base: api_base.to_owned(),
             api_key: api_key.to_owned(),
             client: reqwest::Client::new(),
         }
     }
 
     pub async fn add_connectivity_group(&self, name: &str) -> Result<ConnectivityGroupId> {
-        let url = format!("{BASE_URL}/connectivity-groups");
+        let url = format!("{}/connectivity-groups", self.api_base);
         let mut body = HashMap::new();
         body.insert("name", name);
         let res = self
@@ -67,7 +77,7 @@ impl Client {
     }
 
     pub async fn remove_connectivity_group(&self, id: &str) -> Result<()> {
-        let url = format!("{BASE_URL}/connectivity-groups/{id}");
+        let url = format!("{}/connectivity-groups/{id}", self.api_base);
         let res = self
             .client
             .delete(&url)
@@ -89,7 +99,10 @@ impl Client {
         node_name: Option<&str>,
         metadata: Option<&NodeMetadata>,
     ) -> Result<String> {
-        let url = format!("{BASE_URL}/connectivity-groups/{cg_id}/registration-tokens");
+        let url = format!(
+            "{}/connectivity-groups/{cg_id}/registration-tokens",
+            self.api_base
+        );
         let mut body = HashMap::new();
         if let Some(node_name) = node_name {
             body.insert("nodeName", node_name.to_owned());

@@ -24,6 +24,11 @@ enum Command {
         /// Wispers Connect API key (can also be set via WC_API_KEY env var).
         #[arg(long, env = "WC_API_KEY", hide_env_values = true)]
         api_key: String,
+        /// Base URL of a custom Wispers Connect backend (e.g.
+        /// `https://myhub.example.com`). Omit to use the managed backend. Must
+        /// be https. Pinned into the share and carried in its invite codes.
+        #[arg(long, env = "WC_BACKEND")]
+        backend: Option<String>,
         /// Name of the application share.
         share: String,
         /// Display name of the application share.
@@ -129,9 +134,13 @@ async fn async_main(command: Command) -> Result<()> {
     match command {
         Command::Init {
             api_key,
+            backend,
             share,
             display_name,
-        } => initialization::up(&api_key, &share, &display_name).await,
+        } => {
+            let backend = normalize_backend(backend.as_deref())?;
+            initialization::up(&api_key, &share, &display_name, backend.as_deref()).await
+        }
         Command::Deinit { share } => initialization::down(&share).await,
         Command::Serve { share, upstream } => {
             let _log = logging::init_foreground(&share)?;
@@ -317,6 +326,11 @@ async fn invite(
     let Ok(mut client) = ipc::Client::connect(share).await else {
         anyhow::bail!("cannot connect to server for share {}", share);
     };
+    // The share's pinned backend (if any) gets baked into the invite so the
+    // guest client knows which hub to join.
+    let backend = storage::ShareStateStore::new(share)?
+        .load_share_config()?
+        .and_then(|c| c.backend);
     let req = ipc::Request::GetInvite {
         node_name: node_name.to_owned(),
         user_id: user_id.to_owned(),
@@ -326,7 +340,11 @@ async fn invite(
             data: ipc::ResponseData::Invite(invite),
             ..
         }) => {
-            let code = compose_wax_code(&invite.registration_token, &invite.activation_code);
+            let code = compose_wax_code(
+                &invite.registration_token,
+                &invite.activation_code,
+                backend.as_deref(),
+            );
             let qr = qrcode::QrCode::new(code.as_bytes()).context("cannot build QR code")?;
             println!("Invite code (valid for 24 hours):\n\n  {}\n", code);
             println!("{}", render_qr_ansi(&qr));
@@ -383,7 +401,11 @@ fn render_qr_ansi(qr: &qrcode::QrCode) -> String {
     while y < size {
         for x in 0..size {
             let fg = if dark(x, y) { BLACK } else { WHITE };
-            let bg = if y + 1 < size && dark(x, y + 1) { BLACK } else { WHITE };
+            let bg = if y + 1 < size && dark(x, y + 1) {
+                BLACK
+            } else {
+                WHITE
+            };
             out.push_str(&format!("\x1b[38;2;{fg}m\x1b[48;2;{bg}m\u{2580}"));
         }
         out.push_str("\x1b[0m\n"); // reset colours at end of each line
@@ -395,8 +417,45 @@ fn render_qr_ansi(qr: &qrcode::QrCode) -> String {
 /// Composes the user-facing invite code from its raw parts. The activation
 /// code keeps its native `<node>-<secret>` form so the endorsing node stays
 /// encoded; the `wax_` prefix makes codes recognizable and greppable.
-fn compose_wax_code(registration_token: &str, activation_code: &str) -> String {
-    format!("wax_{}_{}", registration_token, activation_code)
+///
+/// If there's a custom backend, appends it as an additional, base32-encoded
+/// field.
+fn compose_wax_code(
+    registration_token: &str,
+    activation_code: &str,
+    backend: Option<&str>,
+) -> String {
+    let base = format!("wax_{}_{}", registration_token, activation_code);
+    match backend {
+        Some(backend) => format!("{}_{}", base, encode_backend(backend)),
+        None => base,
+    }
+}
+
+/// base32 of a backend URL, lowercase, unpadded.
+fn encode_backend(backend: &str) -> String {
+    data_encoding::BASE32_NOPAD
+        .encode(backend.as_bytes())
+        .to_lowercase()
+}
+
+/// Validate and normalize `--backend`
+fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
+    let Some(raw) = backend else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim().trim_end_matches('/');
+    // Allow both unset and empty (useful if set via env var).
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !trimmed.starts_with("https://") {
+        anyhow::bail!("backend URL must start with https:// (got '{}')", raw);
+    }
+    if trimmed.len() <= "https://".len() {
+        anyhow::bail!("backend URL has no host");
+    }
+    Ok(Some(trimmed.to_owned()))
 }
 
 async fn revoke(share: &str, node_number: &i32) -> Result<()> {
@@ -466,9 +525,38 @@ mod tests {
     #[test]
     fn wax_code_keeps_activation_code_verbatim() {
         assert_eq!(
-            compose_wax_code("ab12cd", "1-xyz789"),
+            compose_wax_code("ab12cd", "1-xyz789", None),
             "wax_ab12cd_1-xyz789"
         );
+    }
+
+    #[test]
+    fn wax_code_appends_encoded_backend() {
+        let code = compose_wax_code("ab12cd", "1-xyz789", Some("https://myhub.example.com"));
+        let expected_backend = encode_backend("https://myhub.example.com");
+        assert_eq!(code, format!("wax_ab12cd_1-xyz789_{}", expected_backend));
+        // The backend field must not reintroduce the '_' delimiter.
+        assert!(!expected_backend.contains('_'));
+        // Round-trips back to the original URL.
+        let decoded = data_encoding::BASE32_NOPAD
+            .decode(expected_backend.to_uppercase().as_bytes())
+            .unwrap();
+        assert_eq!(decoded, b"https://myhub.example.com");
+    }
+
+    #[test]
+    fn normalize_backend_requires_https_and_trims() {
+        assert_eq!(normalize_backend(None).unwrap(), None);
+        assert_eq!(
+            normalize_backend(Some("https://h.example.com/")).unwrap(),
+            Some("https://h.example.com".to_owned())
+        );
+        assert!(normalize_backend(Some("http://h.example.com")).is_err());
+        assert!(normalize_backend(Some("h.example.com")).is_err());
+        assert!(normalize_backend(Some("https://")).is_err());
+        // Blank/empty (e.g. an unset dashboard env) is managed, not an error.
+        assert_eq!(normalize_backend(Some("")).unwrap(), None);
+        assert_eq!(normalize_backend(Some("   ")).unwrap(), None);
     }
 
     #[test]

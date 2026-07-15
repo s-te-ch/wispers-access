@@ -6,7 +6,12 @@ use crate::wcbe;
 use anyhow::{Context, Result};
 
 /// Initialise a new app share.
-pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
+pub async fn up(
+    api_key: &str,
+    share: &str,
+    display_name: &str,
+    backend: Option<&str>,
+) -> Result<()> {
     // Check for valid name & non-existence.
     if !is_valid_share_name(share) {
         anyhow::bail!("Invalid share name '{}'", share);
@@ -17,15 +22,18 @@ pub async fn up(api_key: &str, share: &str, display_name: &str) -> Result<()> {
     }
 
     // Create a Wispers connectivity group for the app share.
-    let wcbe_client = wcbe::Client::new(api_key);
+    let wcbe_client = wcbe::Client::new(api_key, &wcbe::api_base(backend));
     let cg_id = wcbe_client.add_connectivity_group(display_name).await?;
 
     // Write the ShareConfig.
-    let cfg = storage::ShareConfig::new(api_key, &cg_id);
+    let cfg = storage::ShareConfig::new(api_key, &cg_id, backend);
     store.save_share_config(&cfg)?;
 
     // Create the serving Wispers node.
     let node_storage = wispers_connect::NodeStorage::new(store);
+    if let Some(backend) = backend {
+        node_storage.override_hub_addr(backend);
+    }
     let mut node = node_storage.restore_or_init_node().await?;
 
     // Register the node with the Wispers backend.
@@ -69,7 +77,7 @@ pub async fn down(share: &str) -> Result<()> {
     }
 
     // Remove the Wispers connectivity group. This deregisters all nodes.
-    let wcbe_client = wcbe::Client::new(&cfg.api_key);
+    let wcbe_client = wcbe::Client::new(&cfg.api_key, &wcbe::api_base(cfg.backend.as_deref()));
     wcbe_client
         .remove_connectivity_group(&cfg.connectivity_group_id)
         .await?;

@@ -25,14 +25,20 @@ pub struct ShareConfig {
 
     /// ID of the Wispers connectivity group that corresponds to this share.
     pub connectivity_group_id: String,
+
+    /// Base URL of the Wispers Connect backend this share lives on. Must be
+    /// HTTPS. Defaults to the managed backend.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backend: Option<String>,
 }
 
 impl ShareConfig {
-    pub fn new(api_key: &str, connectivity_group_id: &str) -> Self {
+    pub fn new(api_key: &str, connectivity_group_id: &str, backend: Option<&str>) -> Self {
         Self {
             version: default_version(),
             api_key: api_key.to_owned(),
             connectivity_group_id: connectivity_group_id.to_owned(),
+            backend: backend.map(str::to_owned),
         }
     }
 }

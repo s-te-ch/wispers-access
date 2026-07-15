@@ -23,11 +23,11 @@ struct Inner {
 }
 
 impl ServingHandle {
-    pub fn new(upstream: Arc<str>, api_key: &str, cg_id: &str) -> Self {
+    pub fn new(upstream: Arc<str>, api_key: &str, cg_id: &str, api_base: &str) -> Self {
         Self {
             inner: Arc::new(Inner {
                 wc_handle: RwLock::new(None),
-                wcbe_client: wcbe::Client::new(api_key),
+                wcbe_client: wcbe::Client::new(api_key, api_base),
                 connectivity_group_id: cg_id.to_owned(),
                 upstream,
             }),
@@ -92,6 +92,9 @@ pub async fn serve(share: &str, upstream: String) -> Result<()> {
         anyhow::bail!("Share {} is not initialised", share);
     };
     let node_storage = wc::NodeStorage::new(store);
+    if let Some(backend) = cfg.backend.as_deref() {
+        node_storage.override_hub_addr(backend);
+    }
     let node = Arc::new(node_storage.restore_or_init_node().await?);
     if !node.is_registered() {
         anyhow::bail!("Wispers Connect node is not registered");
@@ -104,7 +107,12 @@ pub async fn serve(share: &str, upstream: String) -> Result<()> {
             anyhow::bail!("server node not registered");
         }
     };
-    let serving_handle = ServingHandle::new(upstream.clone(), &cfg.api_key, &cg_id);
+    let serving_handle = ServingHandle::new(
+        upstream.clone(),
+        &cfg.api_key,
+        &cg_id,
+        &wcbe::api_base(cfg.backend.as_deref()),
+    );
     let ipc_server = ipc::Server::bind(share).await?;
     tokio::spawn(ipc_server.run(serving_handle.clone()));
 

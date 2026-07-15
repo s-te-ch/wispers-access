@@ -8,13 +8,17 @@
 #
 # Setup in Coolify:
 #   1. New Resource → Docker Compose Empty → paste this file → Deploy.
-#   2. Set two environment variables (Environment Variables tab):
+#   2. Set the environment variables (Environment Variables tab):
 #        WC_API_KEY  your Wispers Connect API key
 #        SHARES      one or more shares, ';'-separated, each:
 #                       name | display name | <container>:<port>
 #                    e.g.  odoo | Odoo | odoo-abc123:8069 ; wiki | Wiki | wiki-def456:3000
 #                    (<container> is the app's container name — Coolify names it
 #                     <service>-<uuid> — reachable on the shared 'coolify' network.)
+#        WC_BACKEND  (optional) base URL of a self-hosted Wispers Connect hub,
+#                    e.g. https://myhub.example.com (https only). Leave blank to
+#                    use the managed backend. Pinned per-share at first deploy and
+#                    carried in invite codes, so guests join the same hub.
 #   3. On each app you want reachable, enable "Connect To Predefined Network".
 #   4. Mint invites from this resource's Terminal:
 #        waserver invite <share> <device-name> <user@email>
@@ -37,6 +41,8 @@ services:
       # hint string there gets deployed as the literal value (crash-loops the share).
       WC_API_KEY: ${WC_API_KEY:?}
       SHARES: ${SHARES:?}
+      # Optional; blank = managed backend.
+      WC_BACKEND: ${WC_BACKEND:-}
     volumes:
       # Persists share identity (keys + registration) across redeploys. REQUIRED —
       # without it, every redeploy mints a new connectivity group and existing

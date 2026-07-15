@@ -74,6 +74,17 @@ Everything under `$HOME` (= `/data`): per-share identity (keys + registration), 
 sockets, logs. Mount a volume at `/data`. **Without a persistent `/data`, every boot
 creates a brand-new connectivity group** — so in any real deployment, mount a volume.
 
+
+## Self-hosted backend (optional)
+
+By default the container uses the managed Wispers Connect backend. You can
+point it to your own, self-hosted backend using the flag `--backend` or by
+setting `WC_BACKEND`. It's read once at `waserver init`, stored per-share,
+and baked into the invite codes so a guest's client joins the same hub
+automatically. This is per-share, so different shares can use different
+backends. See the [wispers-hub](https://github.com/s-te-ch/wispers-hub)
+repo for standing up your own hub.
+
 ## Notes / TODO
 
 - **Multi-arch:** `docker buildx build --platform linux/amd64,linux/arm64`. arm64 is

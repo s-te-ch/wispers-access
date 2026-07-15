@@ -122,6 +122,25 @@ impl Row {
         Ok(row)
     }
 
+    /// Persist the share's custom backend base URL, if any.
+    pub fn write_backend(&self, backend: Option<&str>) -> Result<()> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        conn.execute(
+            "UPDATE shares SET backend = ?1 WHERE id = ?2",
+            rusqlite::params![backend, self.id],
+        )?;
+        Ok(())
+    }
+
+    pub fn read_backend(&self) -> Result<Option<String>> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let backend =
+            conn.query_row("SELECT backend FROM shares WHERE id = ?1", [self.id], |r| {
+                r.get::<_, Option<String>>(0)
+            })?;
+        Ok(backend)
+    }
+
     pub fn mark_complete(&self) -> Result<()> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
         conn.execute("UPDATE shares SET complete = TRUE WHERE id = ?1", [self.id])?;
@@ -255,6 +274,9 @@ fn migrations() -> Migrations<'static> {
                  complete INTEGER
              ) STRICT;",
         ),
+        // v2 — self-hosted backends: the hub base URL an invite named, so the
+        // node reconnects to it instead of the managed hub. NULL = managed.
+        M::up("ALTER TABLE shares ADD COLUMN backend TEXT;"),
     ])
 }
 
@@ -269,4 +291,59 @@ fn now_millis() -> i64 {
         .duration_since(UNIX_EPOCH)
         .expect("system clock is before the Unix epoch")
         .as_millis() as i64
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rusqlite_migration::M;
+
+    #[test]
+    fn migration_set_is_valid() {
+        migrations().validate().unwrap();
+    }
+
+    /// A DB created before the `backend` column existed must upgrade in place:
+    /// the column is added, existing rows default to NULL (= managed backend),
+    /// and it's writable afterwards.
+    #[test]
+    fn v2_upgrades_existing_v1_db_in_place() {
+        // Build a DB at the pre-backend schema: just migration #1.
+        let v1_only = Migrations::new(vec![M::up(
+            "CREATE TABLE shares (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 connectivity_group_id TEXT,
+                 display_name TEXT,
+                 hostname TEXT UNIQUE,
+                 created_at INTEGER NOT NULL,
+                 root_key BLOB,
+                 registration BLOB,
+                 complete INTEGER
+             ) STRICT;",
+        )]);
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        v1_only.to_latest(&mut conn).unwrap();
+        conn.execute("INSERT INTO shares (created_at, complete) VALUES (1, TRUE)", [])
+            .unwrap();
+
+        // Applying the current set adds only the pending migration.
+        migrations().to_latest(&mut conn).unwrap();
+
+        // The pre-existing row now has a NULL backend...
+        let backend: Option<String> = conn
+            .query_row("SELECT backend FROM shares WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(backend, None);
+
+        // ...and the new column round-trips.
+        conn.execute(
+            "UPDATE shares SET backend = 'https://h.example.com' WHERE id = 1",
+            [],
+        )
+        .unwrap();
+        let backend: Option<String> = conn
+            .query_row("SELECT backend FROM shares WHERE id = 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(backend.as_deref(), Some("https://h.example.com"));
+    }
 }
