@@ -17,6 +17,9 @@ internal class ShareEntity(
     // defaultValue must mirror the migration's `DEFAULT 0`, or Room's schema
     // validation rejects the migration.
     @ColumnInfo(defaultValue = "0") val iconRank: Int = 0,
+    // Custom Wispers Connect hub URL for this share, or null for the managed
+    // backend.
+    val backend: String? = null,
 )
 
 internal class ShareInfoRow(

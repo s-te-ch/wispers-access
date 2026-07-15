@@ -28,20 +28,22 @@ class ShareRepository @Inject internal constructor(
         dao.getShareInfo(id.value)?.toShare()
     }
 
-    suspend fun createShare(nickname: String = ""): ShareId = withContext(Dispatchers.IO) {
-        val id = ShareId(UUID.randomUUID().toString())
-        dao.insert(
-            ShareEntity(
-                id = id.value,
-                nickname = nickname,
-                createdAt = Instant.now().toEpochMilli(),
-                lastConnectedAt = null,
-                rootKey = null,
-                registration = null,
+    suspend fun createShare(nickname: String = "", backend: String? = null): ShareId =
+        withContext(Dispatchers.IO) {
+            val id = ShareId(UUID.randomUUID().toString())
+            dao.insert(
+                ShareEntity(
+                    id = id.value,
+                    nickname = nickname,
+                    createdAt = Instant.now().toEpochMilli(),
+                    lastConnectedAt = null,
+                    rootKey = null,
+                    registration = null,
+                    backend = backend,
+                )
             )
-        )
-        id
-    }
+            id
+        }
 
     suspend fun setNickname(id: ShareId, nickname: String) = withContext(Dispatchers.IO) {
         dao.setNickname(id.value, nickname)
@@ -65,8 +67,15 @@ class ShareRepository @Inject internal constructor(
         dao.delete(id.value)
     }
 
-    fun storageFor(id: ShareId): Storage =
-        WispersConnect.createStorage(ShareNodeStorageCallbacks(dao, id.value))
+    /**
+     * A [Storage] handle for the share, already pointed at the share's
+     * self-hosted hub if it has one.
+     */
+    suspend fun storageFor(id: ShareId): Storage = withContext(Dispatchers.IO) {
+        val storage = WispersConnect.createStorage(ShareNodeStorageCallbacks(dao, id.value))
+        dao.getBackend(id.value)?.let { storage.overrideHubAddr(it) }
+        storage
+    }
 }
 
 /**

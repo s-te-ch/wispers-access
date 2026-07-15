@@ -92,45 +92,43 @@ class AddShareViewModel @Inject constructor(
 
     fun onJoinClick() {
         if (_state.value.phase !is Phase.Idle) return
-        val invite = InviteCode.parse(_state.value.code)
-        if (invite == null) {
-            _state.update { it.copy(error = "Invite codes look like wax_…") }
+        val invite = InviteCode.parse(_state.value.code).getOrElse { e ->
+            _state.update { it.copy(error = e.message ?: "Invite codes look like wax_…") }
             return
         }
-        viewModelScope.launch { runJoin(invite.registrationToken, invite.activationCode) }
+        viewModelScope.launch { runJoin(invite) }
     }
 
     /** Handles a scanned QR payload: joins on a valid invite code, errors otherwise. */
     fun onScanResult(contents: String) {
         if (_state.value.phase !is Phase.Idle) return
-        val invite = InviteCode.parse(contents)
-        if (invite == null) {
-            _state.update { it.copy(error = "That QR code is not a Wispers invite.") }
+        val invite = InviteCode.parse(contents).getOrElse { e ->
+            _state.update { it.copy(error = e.message ?: "That QR code is not a Wispers invite.") }
             return
         }
         _state.update { it.copy(code = contents.trim(), error = null) }
-        viewModelScope.launch { runJoin(invite.registrationToken, invite.activationCode) }
+        viewModelScope.launch { runJoin(invite) }
     }
 
-    private suspend fun runJoin(token: String, activation: String) {
+    private suspend fun runJoin(invite: InviteCode) {
         var createdId: ShareId? = null
         try {
             startStep(JoinStep.VALIDATING)
             completeStep(JoinStep.VALIDATING)
 
             startStep(JoinStep.INITIALIZING)
-            val id = repo.createShare()
+            val id = repo.createShare(backend = invite.backend)
             createdId = id
             val storage = repo.storageFor(id)
             val (node, _) = storage.restoreOrInitNode()
             completeStep(JoinStep.INITIALIZING)
 
             startStep(JoinStep.REGISTERING)
-            node.register(token)
+            node.register(invite.registrationToken)
             completeStep(JoinStep.REGISTERING)
 
             startStep(JoinStep.ACTIVATING)
-            node.activate(activation)
+            node.activate(invite.activationCode)
             repo.markConnected(id)
             completeStep(JoinStep.ACTIVATING)
 

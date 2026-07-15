@@ -47,6 +47,9 @@ internal interface ShareDao {
     @Query("UPDATE shares SET rootKey = NULL WHERE id = :id")
     fun clearRootKey(id: String)
 
+    @Query("SELECT backend FROM shares WHERE id = :id")
+    fun getBackend(id: String): String?
+
     @Query("SELECT registration FROM shares WHERE id = :id")
     fun getRegistration(id: String): ByteArray?
 

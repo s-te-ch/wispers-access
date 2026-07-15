@@ -167,7 +167,7 @@ notification/reset emails, webhooks, OAuth redirect URIs — or that hard-valida
 Origin. A per-share Host rewrite stays a *future* option if some app needs it, not a v1
 requirement.
 
-### 6. Self-hosted Wispers Connect backend — ✅ waserver + waclient (android/iOS 🟡)
+### 6. Self-hosted Wispers Connect backend — ✅ waserver + waclient + android (iOS 🟡)
 
 A share can live on a **self-hosted** Wispers Connect hub instead of the managed
 backend, so a deployment depends on *no* hosted Wispers infrastructure (see
@@ -196,10 +196,16 @@ platform-independent — it's a `waserver`/client capability, not a Coolify one.
   service under the legacy `connect.hub.Hub` name (alias kept until hub 1.0), so the
   current `wispers-connect` 0.9.2 clients talk to it unchanged. STUN/TURN needs no work —
   the client fetches it from whichever hub it's pointed at.
-- 🟡 **android / iOS** — the wax-format change is server + `waclient` this round. The
-  Android `InviteCode.parse` (Kotlin) and iOS parser must learn the fourth field and the
-  FFI node must gain the same `override_hub_addr`-before-register + persistence. Tracked,
-  not yet built; existing two-part (managed) invites keep working on them meanwhile.
+- ✅ **android** — `InviteCode.parse` decodes the optional base32 backend field (https-only,
+  fail-closed, returns a `Result` so a bad backend explains itself), and the join +
+  reconnect paths funnel through `ShareRepository.storageFor`, which now calls the binding's
+  `overrideHubAddr` **before** `restoreOrInitNode`. Persisted in a Room `backend` column
+  (migration 2→3, non-destructive); `dev.wispers:connect` 0.9.0 already exposes
+  `overrideHubAddr`, so no dependency bump. Migration isn't instrumented-tested (the module
+  has no `MigrationTestHelper` infra), but follows the proven nullable-`ADD COLUMN` pattern.
+- 🟡 **iOS** — the same three moves remain: parse the fourth field, `overrideHubAddr`
+  before register/restore, and persist + reapply on reconnect. Existing two-part (managed)
+  invites keep working meanwhile.
 
 ## Per-platform integrations
 

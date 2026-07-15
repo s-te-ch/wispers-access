@@ -8,7 +8,7 @@ import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import net.zetetic.database.sqlcipher.SupportOpenHelperFactory
 
-@Database(entities = [ShareEntity::class], version = 2, exportSchema = true)
+@Database(entities = [ShareEntity::class], version = 3, exportSchema = true)
 internal abstract class ShareDatabase : RoomDatabase() {
 
     abstract fun shareDao(): ShareDao
@@ -23,6 +23,13 @@ internal abstract class ShareDatabase : RoomDatabase() {
             }
         }
 
+        // v3: self-hosted backend URL the invite named (null = managed). Not destructive.
+        private val MIGRATION_2_3 = object : Migration(2, 3) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE shares ADD COLUMN backend TEXT")
+            }
+        }
+
         fun create(context: Context, passphrase: ByteArray): ShareDatabase {
             System.loadLibrary("sqlcipher")
             return Room.databaseBuilder(
@@ -31,7 +38,7 @@ internal abstract class ShareDatabase : RoomDatabase() {
                 "shares.db",
             )
                 .openHelperFactory(SupportOpenHelperFactory(passphrase))
-                .addMigrations(MIGRATION_1_2)
+                .addMigrations(MIGRATION_1_2, MIGRATION_2_3)
                 .build()
         }
     }
