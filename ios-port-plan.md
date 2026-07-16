@@ -83,8 +83,8 @@ the Android codec (RFC 4648 no-pad, matches Rust `data_encoding::BASE32_NOPAD`).
   NIO `Channel`, and the only off-socket one, `EmbeddedChannel`, is thread-pinned →
   `preconditionFailure` if driven across `await`. llhttp — the same parser NIO vendors — is
   a loop-free C callback parser that streams cleanly, at ~1/80th the dependency weight.)
-  Builds + tests green (parser unit tests + a real-`NWListener` proxy integration test);
-  live browse against a running `waserver serve` is the remaining device/server validation.
+  Builds + tests green (parser unit tests + a real-`NWListener` proxy integration test), and
+  **live browse against a running `waserver serve` verified working** (2026-07-16).
 - **P3** — polish (icons, hub-online status, pull-to-refresh, teardown/logout UI,
   QR-scan join). Foreground-only for v1 (iOS background limits are stricter than Android;
   matches current Android reality).
