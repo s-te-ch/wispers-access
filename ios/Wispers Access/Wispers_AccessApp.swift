@@ -9,9 +9,13 @@ import SwiftUI
 
 @main
 struct Wispers_AccessApp: App {
+    @State private var manager = ShareManager()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            RootView()
+                .environment(manager)
+                .environment(manager.store)
         }
     }
 }

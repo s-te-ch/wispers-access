@@ -167,7 +167,7 @@ notification/reset emails, webhooks, OAuth redirect URIs — or that hard-valida
 Origin. A per-share Host rewrite stays a *future* option if some app needs it, not a v1
 requirement.
 
-### 6. Self-hosted Wispers Connect backend — ✅ waserver + waclient + android (iOS 🟡)
+### 6. Self-hosted Wispers Connect backend — ✅ waserver + waclient + android + iOS
 
 A share can live on a **self-hosted** Wispers Connect hub instead of the managed
 backend, so a deployment depends on *no* hosted Wispers infrastructure (see
@@ -203,9 +203,14 @@ platform-independent — it's a `waserver`/client capability, not a Coolify one.
   (migration 2→3, non-destructive); `dev.wispers:connect` 0.9.0 already exposes
   `overrideHubAddr`, so no dependency bump. Migration isn't instrumented-tested (the module
   has no `MigrationTestHelper` infra), but follows the proven nullable-`ADD COLUMN` pattern.
-- 🟡 **iOS** — the same three moves remain: parse the fourth field, `overrideHubAddr`
-  before register/restore, and persist + reapply on reconnect. Existing two-part (managed)
-  invites keep working meanwhile.
+- ✅ **iOS** — `InviteCode.parse` decodes the optional base32 backend field (https-only,
+  fail-closed, throwing a descriptive `InviteCodeError`), and the join path funnels through
+  `ShareManager.storageFor`, which calls the binding's `overrideHubAddr` **before**
+  `restoreOrInit`. Persisted per share as a `backend` field in a Codable JSON store (the
+  node's secrets live in the Keychain, keyed per share); `WispersConnect` 0.11.0 exposes
+  `overrideHubAddr`. `Base32` + invite parsing are unit-tested. Reconnect-reapply is
+  automatic once serving lands — the serving path restores through the same `storageFor`
+  chokepoint.
 
 ## Per-platform integrations
 

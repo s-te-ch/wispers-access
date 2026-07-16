@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA11AA11AA11AA11AA110003 /* WispersConnect in Frameworks */ = {isa = PBXBuildFile; productRef = AA11AA11AA11AA11AA110002 /* WispersConnect */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXContainerItemProxy section */
 		64AAA7352FF5BFA50081A7F3 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -52,6 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA11AA11AA11AA11AA110003 /* WispersConnect in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -112,6 +117,7 @@
 			);
 			name = "Wispers Access";
 			packageProductDependencies = (
+				AA11AA11AA11AA11AA110002 /* WispersConnect */,
 			);
 			productName = "Wispers Access";
 			productReference = 64AAA7272FF5BFA50081A7F3 /* Wispers Access.app */;
@@ -195,6 +201,9 @@
 			);
 			mainGroup = 64AAA71E2FF5BFA50081A7F3;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AA11AA11AA11AA11AA110001 /* XCRemoteSwiftPackageReference "wispers-client" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 64AAA7282FF5BFA50081A7F3 /* Products */;
 			projectDirPath = "";
@@ -578,6 +587,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AA11AA11AA11AA11AA110001 /* XCRemoteSwiftPackageReference "wispers-client" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/s-te-ch/wispers-client";
+			requirement = {
+				kind = upToNextMinorVersion;
+				minimumVersion = 0.11.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA11AA11AA11AA11AA110002 /* WispersConnect */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA11AA11AA11AA11AA110001 /* XCRemoteSwiftPackageReference "wispers-client" */;
+			productName = WispersConnect;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 64AAA71F2FF5BFA50081A7F3 /* Project object */;
 }

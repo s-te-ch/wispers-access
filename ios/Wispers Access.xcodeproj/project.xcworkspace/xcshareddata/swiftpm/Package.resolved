@@ -1,0 +1,15 @@
+{
+  "originHash" : "fe0378ad202e12f2d507f2bd2cf83296492a0687f33034b6f7dca548e9a2169d",
+  "pins" : [
+    {
+      "identity" : "wispers-client",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/s-te-ch/wispers-client",
+      "state" : {
+        "revision" : "491c76903505f1c9d6375bb7a190beff594c2ee5",
+        "version" : "0.11.0"
+      }
+    }
+  ],
+  "version" : 3
+}
