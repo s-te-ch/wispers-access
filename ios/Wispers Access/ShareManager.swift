@@ -11,6 +11,17 @@ import WispersConnect
 final class ShareManager {
     let store: ShareStore
 
+    /// App-wide cache of live nodes + QUIC connections for browsing. Lazy so its
+    /// closures can capture `self` weakly; `@ObservationIgnored` since it isn't
+    /// view-observable state.
+    @ObservationIgnored private(set) lazy var sessions = SessionManager(
+        storageProvider: { [weak self] id in
+            guard let self else { throw CancellationError() }
+            return try await self.storageFor(id)
+        },
+        onConnected: { [weak self] id in await self?.store.markConnected(id) }
+    )
+
     init(store: ShareStore? = nil) {
         // Constructed here rather than in a default argument: `ShareStore.init`
         // is main-actor-isolated, and default arguments evaluate nonisolated.

@@ -8,6 +8,7 @@
 
 /* Begin PBXBuildFile section */
 		AA11AA11AA11AA11AA110003 /* WispersConnect in Frameworks */ = {isa = PBXBuildFile; productRef = AA11AA11AA11AA11AA110002 /* WispersConnect */; };
+		CC33CC33CC33CC33CC330003 /* LLHTTP in Frameworks */ = {isa = PBXBuildFile; productRef = CC33CC33CC33CC33CC330002 /* LLHTTP */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +58,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				AA11AA11AA11AA11AA110003 /* WispersConnect in Frameworks */,
+				CC33CC33CC33CC33CC330003 /* LLHTTP in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -118,6 +120,7 @@
 			name = "Wispers Access";
 			packageProductDependencies = (
 				AA11AA11AA11AA11AA110002 /* WispersConnect */,
+				CC33CC33CC33CC33CC330002 /* LLHTTP */,
 			);
 			productName = "Wispers Access";
 			productReference = 64AAA7272FF5BFA50081A7F3 /* Wispers Access.app */;
@@ -203,6 +206,7 @@
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
 				AA11AA11AA11AA11AA110001 /* XCRemoteSwiftPackageReference "wispers-client" */,
+				CC33CC33CC33CC33CC330001 /* XCLocalSwiftPackageReference "LLHTTP" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 64AAA7282FF5BFA50081A7F3 /* Products */;
@@ -588,6 +592,13 @@
 		};
 /* End XCConfigurationList section */
 
+/* Begin XCLocalSwiftPackageReference section */
+		CC33CC33CC33CC33CC330001 /* XCLocalSwiftPackageReference "LLHTTP" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = LLHTTP;
+		};
+/* End XCLocalSwiftPackageReference section */
+
 /* Begin XCRemoteSwiftPackageReference section */
 		AA11AA11AA11AA11AA110001 /* XCRemoteSwiftPackageReference "wispers-client" */ = {
 			isa = XCRemoteSwiftPackageReference;
@@ -604,6 +615,10 @@
 			isa = XCSwiftPackageProductDependency;
 			package = AA11AA11AA11AA11AA110001 /* XCRemoteSwiftPackageReference "wispers-client" */;
 			productName = WispersConnect;
+		};
+		CC33CC33CC33CC33CC330002 /* LLHTTP */ = {
+			isa = XCSwiftPackageProductDependency;
+			productName = LLHTTP;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

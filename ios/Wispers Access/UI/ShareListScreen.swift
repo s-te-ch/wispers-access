@@ -9,7 +9,11 @@ struct ShareListScreen: View {
     var body: some View {
         List {
             ForEach(store.shares) { share in
-                ShareRow(share: share)
+                NavigationLink {
+                    BrowseScreen(share: share)
+                } label: {
+                    ShareRow(share: share)
+                }
             }
             .onDelete(perform: delete)
         }

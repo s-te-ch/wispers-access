@@ -68,9 +68,26 @@ the Android codec (RFC 4648 no-pad, matches Rust `data_encoding::BASE32_NOPAD`).
   `restoreOrInit` → register → activate, with rollback on failure); SwiftUI share-list +
   add-share (Observation `@Observable` + `@Environment`, iOS-native). Builds + tests green
   on the iPhone 17 simulator. The stray nested `.xcodeproj` was removed.
-- **P2** — the serving/tunnel + WKWebView, so a share is actually usable.
-- **P3** — polish (icons, hub-online status, teardown UI). Foreground-only for v1
-  (iOS background limits are stricter than Android; matches current Android reality).
+- **P2 — ✅ built (pending live end-to-end).** The browsing tunnel + WKWebView: a
+  `SessionManager` actor caches the per-share `Node` + `QuicConnection` (`connectQuic(1)`,
+  one-retry + evict); a `LoopbackProxy` (`NWListener` on **127.0.0.1**, ephemeral port —
+  no `*.localhost` trick) speaks raw HTTP/1.1 over a fresh QUIC stream per request
+  (`Connection: close` upstream, `finish()` after the response, Set-Cookie `Domain=`
+  stripped), **including the WebSocket/`101` raw bidirectional relay**; `BrowseScreen`
+  points a WKWebView at the proxy. Faithful port of the Android
+  `SessionManager`/`ProxyServer`/`UpstreamClient`. ATS `NSAllowsLocalNetworking` added for
+  the loopback load. **HTTP/1.1 parsing (headers, chunked, content-length, EOF-framing,
+  HEAD) is done by vendored llhttp** (`ios/LLHTTP` local SPM package: C target `CLLHTTP` +
+  Swift `HTTP1Parser`), not hand-rolled — llhttp de-frames the body and we serialize +
+  transport. (SwiftNIO was evaluated first and rejected: its HTTP codecs only run inside a
+  NIO `Channel`, and the only off-socket one, `EmbeddedChannel`, is thread-pinned →
+  `preconditionFailure` if driven across `await`. llhttp — the same parser NIO vendors — is
+  a loop-free C callback parser that streams cleanly, at ~1/80th the dependency weight.)
+  Builds + tests green (parser unit tests + a real-`NWListener` proxy integration test);
+  live browse against a running `waserver serve` is the remaining device/server validation.
+- **P3** — polish (icons, hub-online status, pull-to-refresh, teardown/logout UI,
+  QR-scan join). Foreground-only for v1 (iOS background limits are stricter than Android;
+  matches current Android reality).
 
 ## Build / verify
 
