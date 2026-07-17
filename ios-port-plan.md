@@ -165,8 +165,21 @@ separate "Open shares" tab overview, which felt like two lists + a modal "drawn 
   `RootView` drains the inbox (cold: `onAppear`, warm: `onChange`) and `router.open`s the
   share if it still exists. Verified on the Simulator end-to-end (warm path logs
   performActionFor → handle → route → push).
-- **Favicon harvesting** for avatars (optional) — WKWebView JS on page-finish → per-share
-  icon store; today avatars are always the green letter tile.
+- ✅ **Favicon harvesting** (built 2026-07-17) — faithful port of the Android harvester.
+  `IconHarvester` (a `WKScriptMessageHandler` added to each `BrowseSession`'s web view) runs
+  same-origin JS on every page-finish that picks the best icon by rank — manifest-maskable (4)
+  > manifest (3) > apple-touch-icon (2) > favicon (1) — fetches it with credentials (through
+  the loopback proxy), and posts back `{rank, dataUrl}`; native decodes it, rejects anything
+  `UIImage(data:)` can't render (so a raw `.ico` can't claim a rung), and stores it in
+  `ShareIconStore` **only if it out-ranks** the cached icon. `ShareIconStore` (@Observable, its
+  own `share-icons.json` keyed by share id — kept out of the metadata JSON and Keychain since
+  it's non-secret/cosmetic) feeds `ShareAvatar` in the roster + detail; harvesting live-updates
+  the avatar via Observation. Removed with the share. Needs a real browse (running host) to see
+  an icon land — letter-tile fallback verified.
+
+**P3 complete.** All planned items (browse UX redesign, teardown/logout + hub deregistration,
+add-flow redesign, QR scanner, quick actions, favicon harvesting) are built, plus the crash /
+status-CHECKING / lifecycle fixes found along the way. iOS is at feature parity with Android.
 
 > **Infra note (found 2026-07-17):** the target has **no `INFOPLIST_FILE`**, so `ios/Info.plist`
 > (the `NSAllowsLocalNetworking` ATS file) is **inert** — the built `Info.plist` has no ATS

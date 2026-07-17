@@ -18,6 +18,7 @@ struct Wispers_AccessApp: App {
             RootView()
                 .environment(manager)
                 .environment(manager.store)
+                .environment(manager.icons)
                 .environment(router)
                 .environment(QuickActionInbox.shared)
         }

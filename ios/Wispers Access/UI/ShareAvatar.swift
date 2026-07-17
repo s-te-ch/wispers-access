@@ -2,9 +2,8 @@ import SwiftUI
 import UIKit
 
 /// The share's icon as a rounded tile (corner radius = size/3): the cached site
-/// favicon if one exists, otherwise a generated green letter tile. Mirrors the
-/// Android `ShareAvatar`. (Favicon harvesting isn't wired up yet, so today this
-/// is always the letter tile.)
+/// icon harvested while browsing (`ShareIconStore`) if one exists, otherwise a
+/// generated green letter tile. Mirrors the Android `ShareAvatar`.
 struct ShareAvatar: View {
     let nickname: String
     var iconPNG: Data? = nil

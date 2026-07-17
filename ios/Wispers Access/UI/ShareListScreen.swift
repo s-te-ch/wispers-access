@@ -7,6 +7,7 @@ import SwiftUI
 struct ShareListScreen: View {
     @Environment(ShareStore.self) private var store
     @Environment(ShareManager.self) private var manager
+    @Environment(ShareIconStore.self) private var icons
     @Environment(BrowseRouter.self) private var router
     @State private var showingAdd = false
 
@@ -79,7 +80,8 @@ struct ShareListScreen: View {
                 ShareCard(
                     share: share,
                     availability: manager.status.availability(for: share.id),
-                    isLive: manager.browser.isWarm(share.id)
+                    isLive: manager.browser.isWarm(share.id),
+                    iconData: icons.iconData(for: share.id)
                 )
             }
             .buttonStyle(.plain)
@@ -133,10 +135,11 @@ private struct ShareCard: View {
     let share: ShareMetadata
     let availability: Availability
     let isLive: Bool
+    let iconData: Data?
 
     var body: some View {
         HStack(spacing: 16) {
-            ShareAvatar(nickname: name, size: 48)
+            ShareAvatar(nickname: name, iconPNG: iconData, size: 48)
                 .overlay(alignment: .topTrailing) {
                     if isLive { liveBadge }
                 }

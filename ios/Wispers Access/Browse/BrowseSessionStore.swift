@@ -21,6 +21,13 @@ final class BrowseSessionStore {
     private let warmTTL: Duration = .seconds(300)
     @ObservationIgnored private var evictionTasks: [ShareID: Task<Void, Never>] = [:]
 
+    /// Reports a site icon harvested by a session's web view (shareID, bytes, rank).
+    @ObservationIgnored private let onIcon: (ShareID, Data, Int) -> Void
+
+    init(onIcon: @escaping (ShareID, Data, Int) -> Void = { _, _, _ in }) {
+        self.onIcon = onIcon
+    }
+
     func session(for shareID: ShareID) -> BrowseSession? {
         sessions.first { $0.shareID == shareID }
     }
@@ -39,7 +46,7 @@ final class BrowseSessionStore {
         if let existing = self.session(for: share.id) {
             session = existing
         } else {
-            session = BrowseSession(share: share, sessionManager: sessionManager)
+            session = BrowseSession(share: share, sessionManager: sessionManager, onIcon: onIcon)
             sessions.append(session)
             session.start()
         }

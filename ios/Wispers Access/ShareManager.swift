@@ -14,8 +14,16 @@ final class ShareManager {
     /// Per-share serving-node availability, polled while a screen is visible.
     let status = ShareStatusStore()
 
-    /// The shares currently open for browsing, switchable in-app.
-    let browser = BrowseSessionStore()
+    /// Site icons harvested while browsing, for the roster/detail avatars.
+    let icons = ShareIconStore()
+
+    /// The shares currently open for browsing, switchable in-app. Lazy so its
+    /// icon callback can capture `self` (to feed `icons`).
+    @ObservationIgnored private(set) lazy var browser = BrowseSessionStore(
+        onIcon: { [weak self] id, png, rank in
+            self?.icons.update(png, rank: rank, for: id)
+        }
+    )
 
     /// App-wide cache of live nodes + QUIC connections for browsing. Lazy so its
     /// closures can capture `self` weakly; `@ObservationIgnored` since it isn't
@@ -102,6 +110,7 @@ final class ShareManager {
         // we're about to log out, and leaving it up would leak the proxy (and show
         // a broken page if its browser is on screen).
         browser.close(id)
+        icons.remove(id)
         store.remove(id)
         Task {
             await sessions.logoutAndDiscard(id)

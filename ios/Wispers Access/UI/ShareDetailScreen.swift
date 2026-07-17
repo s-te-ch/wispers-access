@@ -8,6 +8,7 @@ struct ShareDetailScreen: View {
     let shareID: ShareID
     @Environment(ShareStore.self) private var store
     @Environment(ShareManager.self) private var manager
+    @Environment(ShareIconStore.self) private var icons
     @Environment(\.dismiss) private var dismiss
     @State private var confirmingRemoval = false
 
@@ -34,7 +35,7 @@ struct ShareDetailScreen: View {
     private func content(_ share: ShareMetadata) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             StatusRow(availability: manager.status.availability(for: shareID))
-            ShareAvatar(nickname: name(share), size: 64)
+            ShareAvatar(nickname: name(share), iconPNG: icons.iconData(for: shareID), size: 64)
             Text(name(share))
                 .font(.system(.largeTitle, design: .serif).weight(.bold))
                 .foregroundStyle(AccessColor.onSurface)
