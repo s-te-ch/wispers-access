@@ -9,6 +9,7 @@ import SwiftUI
 
 @main
 struct Wispers_AccessApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @State private var manager = ShareManager()
     @State private var router = BrowseRouter()
 
@@ -18,6 +19,7 @@ struct Wispers_AccessApp: App {
                 .environment(manager)
                 .environment(manager.store)
                 .environment(router)
+                .environment(QuickActionInbox.shared)
         }
     }
 }

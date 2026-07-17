@@ -150,8 +150,21 @@ separate "Open shares" tab overview, which felt like two lists + a modal "drawn 
   Camera string added as `INFOPLIST_KEY_NSCameraUsageDescription` build setting (Debug +
   Release), since the target uses `GENERATE_INFOPLIST_FILE=YES` with no `INFOPLIST_FILE`.
   Only exercises on a real device.
-- **Quick actions** — app-icon long-press → recent shares (`UIApplicationShortcutItem`),
-  agreed for v1. (`BrowseRouter.open` is ready for it.)
+- ✅ **Quick actions** (built + verified working 2026-07-17) — app-icon long-press → recent
+  shares. `QuickActions.swift`: builds up-to-4 dynamic `UIApplicationShortcutItem`s from the
+  roster (most-recently-connected first), refreshed on scene `.background`. A minimal
+  `@UIApplicationDelegateAdaptor(AppDelegate.self)` captures the chosen shortcut into a
+  `QuickActionInbox` singleton (also in the environment):
+  - **cold** via `application(_:configurationForConnecting:options:)` reading
+    `options.shortcutItem`;
+  - **warm** via a **custom `SceneDelegate`** and its `windowScene(_:performActionFor:)` —
+    because SwiftUI's own scene delegate **swallows** `application(_:performActionFor:)`
+    (confirmed: it never fired). `configurationForConnecting` sets `config.delegateClass =
+    SceneDelegate.self`; the SceneDelegate deliberately **omits `scene(_:willConnectTo:)`** so
+    SwiftUI keeps window setup (verified the roster still renders).
+  `RootView` drains the inbox (cold: `onAppear`, warm: `onChange`) and `router.open`s the
+  share if it still exists. Verified on the Simulator end-to-end (warm path logs
+  performActionFor → handle → route → push).
 - **Favicon harvesting** for avatars (optional) — WKWebView JS on page-finish → per-share
   icon store; today avatars are always the green letter tile.
 
