@@ -44,7 +44,7 @@ enum Command {
         /// Name of the application share.
         share: String,
         /// Upstream to proxy: `host:port`, or a bare `port` (host defaults to
-        /// 127.0.0.1). E.g. `3000`, `127.0.0.1:8080`, or `app:3000` (a Docker
+        /// localhost). E.g. `3000`, `127.0.0.1:8080`, or `app:3000` (a Docker
         /// compose service name).
         #[arg(value_parser = parse_upstream)]
         upstream: String,
@@ -54,7 +54,7 @@ enum Command {
         /// Name of the application share.
         share: String,
         /// Upstream to proxy: `host:port`, or a bare `port` (host defaults to
-        /// 127.0.0.1). E.g. `3000`, `127.0.0.1:8080`, or `app:3000` (a Docker
+        /// localhost). E.g. `3000`, `127.0.0.1:8080`, or `app:3000` (a Docker
         /// compose service name).
         #[arg(value_parser = parse_upstream)]
         upstream: String,
@@ -496,10 +496,12 @@ async fn nodes(share: &str) -> Result<()> {
 }
 
 /// Parse an upstream dial target in `[host:]port` form into a normalized
-/// `host:port` string. A bare port (no colon) uses host `127.0.0.1`; an empty
-/// host (e.g. `:3000`) defaults the same way. A non-numeric or out-of-range port
-/// is rejected. IPv6 literals would need bracket form (`[::1]:3000`) and aren't
-/// handled here.
+/// `host:port` string. A bare port (no colon) uses host `localhost`; an empty
+/// host (e.g. `:3000`) defaults the same way. `localhost` rather than
+/// `127.0.0.1` so the dial tries both address families — modern Node dev
+/// servers (e.g. Vite) often listen on `::1` only. A non-numeric or
+/// out-of-range port is rejected. IPv6 literals would need bracket form
+/// (`[::1]:3000`) and aren't handled here.
 fn parse_upstream(s: &str) -> std::result::Result<String, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -514,7 +516,7 @@ fn parse_upstream(s: &str) -> std::result::Result<String, String> {
     if port == 0 {
         return Err("port 0 is not a valid upstream".to_string());
     }
-    let host = if host.is_empty() { "127.0.0.1" } else { host };
+    let host = if host.is_empty() { "localhost" } else { host };
     Ok(format!("{}:{}", host, port))
 }
 
@@ -561,10 +563,10 @@ mod tests {
 
     #[test]
     fn parses_upstream_forms() {
-        assert_eq!(parse_upstream("8080").unwrap(), "127.0.0.1:8080");
+        assert_eq!(parse_upstream("8080").unwrap(), "localhost:8080");
         assert_eq!(parse_upstream("app:3000").unwrap(), "app:3000");
         assert_eq!(parse_upstream("127.0.0.1:8080").unwrap(), "127.0.0.1:8080");
-        assert_eq!(parse_upstream(":3000").unwrap(), "127.0.0.1:3000");
+        assert_eq!(parse_upstream(":3000").unwrap(), "localhost:3000");
         assert_eq!(parse_upstream("  app:3000\n").unwrap(), "app:3000");
     }
 
