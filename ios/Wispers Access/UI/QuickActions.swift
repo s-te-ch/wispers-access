@@ -17,9 +17,11 @@ enum QuickAction {
     }
 
     /// The dynamic shortcut list from the roster: most-recently-connected first,
-    /// capped to the four the launcher shows.
+    /// capped to the four the launcher shows. Terminal shares don't get one —
+    /// there's nothing to open.
     static func shortcutItems(for shares: [ShareMetadata]) -> [UIApplicationShortcutItem] {
         shares
+            .filter { $0.terminalState == nil }
             .sorted { ($0.lastConnectedAt ?? $0.createdAt) > ($1.lastConnectedAt ?? $1.createdAt) }
             .prefix(4)
             .map { share in

@@ -26,7 +26,7 @@ struct ShareDetailScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .task {
             while !Task.isCancelled {
-                await manager.status.refresh([shareID], using: manager.sessions)
+                await manager.status.refresh([shareID], using: manager.sessions, store: store)
                 try? await Task.sleep(for: .seconds(30))
             }
         }
@@ -34,7 +34,9 @@ struct ShareDetailScreen: View {
 
     private func content(_ share: ShareMetadata) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            StatusRow(availability: manager.status.availability(for: shareID))
+            StatusRow(
+                availability: share.terminalState?.availability
+                    ?? manager.status.availability(for: shareID))
             ShareAvatar(nickname: name(share), iconPNG: icons.iconData(for: shareID), size: 64)
             Text(name(share))
                 .font(.system(.largeTitle, design: .serif).weight(.bold))
@@ -43,14 +45,24 @@ struct ShareDetailScreen: View {
                 InfoCard(label: "LAST CONNECTED", value: date(share.lastConnectedAt))
                 InfoCard(label: "JOINED", value: date(share.createdAt))
             }
-            VStack(spacing: 8) {
-                NavigationLink(value: ShareRoute.browse(shareID)) {
-                    Text("Open share ↗").accessFilledButton()
-                }
+            if let terminal = share.terminalState {
+                TerminalShareExplanation(state: terminal)
                 Button {
                     confirmingRemoval = true
                 } label: {
-                    Text("Remove share").accessOutlinedButton(tint: AccessColor.destructive)
+                    Text("Remove from this device")
+                        .accessOutlinedButton(tint: AccessColor.destructive)
+                }
+            } else {
+                VStack(spacing: 8) {
+                    NavigationLink(value: ShareRoute.browse(shareID)) {
+                        Text("Open share ↗").accessFilledButton()
+                    }
+                    Button {
+                        confirmingRemoval = true
+                    } label: {
+                        Text("Remove share").accessOutlinedButton(tint: AccessColor.destructive)
+                    }
                 }
             }
             Spacer()
@@ -100,7 +112,9 @@ private struct StatusRow: View {
         switch availability {
         case .online: return "ONLINE"
         case .offline: return "OFFLINE"
+        case .unknown: return "UNKNOWN"
         case .checking: return "CHECKING…"
+        case .removed, .revoked: return "NO LONGER AVAILABLE"
         }
     }
 }

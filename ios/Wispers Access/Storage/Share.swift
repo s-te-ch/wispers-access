@@ -20,6 +20,16 @@ nonisolated struct ShareID: Hashable, Codable, Sendable {
     }
 }
 
+/// A share that can never come back: the hub rejected this node's credentials
+/// (share deleted server-side) or reported it revoked from the roster.
+/// Persisted so the state survives restarts and renders while offline.
+nonisolated enum TerminalShareState: String, Codable, Sendable {
+    /// The share was removed on the server side (group deleted at the hub).
+    case removed
+    /// This device's access was revoked from the share's roster.
+    case revoked
+}
+
 /// Non-secret, user-visible metadata for a joined share. The node's secrets
 /// (root key + registration blob) live in the Keychain via `KeychainShareStore`;
 /// this is everything else, persisted as plain JSON by `ShareStore`.
@@ -31,4 +41,6 @@ nonisolated struct ShareMetadata: Codable, Identifiable, Equatable, Sendable {
     var backend: String?
     let createdAt: Date
     var lastConnectedAt: Date?
+    /// Set once the hub definitively rejects this node; nil while live.
+    var terminalState: TerminalShareState?
 }

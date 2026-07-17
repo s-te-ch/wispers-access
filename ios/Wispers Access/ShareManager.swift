@@ -86,7 +86,7 @@ final class ShareManager {
             // Activation has now persisted, so prime the share's status from a
             // fresh (activated) node — otherwise the roster keeps the "CHECKING"
             // that a status poll fired mid-join (before activation landed) left.
-            await status.refresh([id], using: sessions)
+            await status.refresh([id], using: sessions, store: store)
             return id
         } catch {
             // Roll back the partial join. `logoutAndDiscard` deregisters from the

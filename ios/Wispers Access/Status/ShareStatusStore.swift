@@ -1,40 +1,69 @@
 import Foundation
 import Observation
 
-/// Whether a share's serving node is reachable, for the status dot.
+/// Availability of a share for the status dot and labels. `.checking`, `.online`,
+/// `.offline` and `.unknown` are transient observations; `.removed` / `.revoked`
+/// are terminal — the hub has definitively rejected this device.
 enum Availability {
-    case checking  // not yet known, or hub unreachable
+    case checking  // not yet checked
     case online
     case offline
+    case unknown  // check failed — typically the hub is unreachable
+    case removed
+    case revoked
 }
 
-/// Per-share serving-node availability, refreshed while a screen is visible.
-/// The iOS analog of Android's `ShareStatusTracker` — a single source the list
-/// and detail screens both read so they can't disagree.
+extension TerminalShareState {
+    /// The persisted terminal state as an availability, for uniform rendering.
+    var availability: Availability {
+        switch self {
+        case .removed: return .removed
+        case .revoked: return .revoked
+        }
+    }
+}
+
+/// Per-share availability, refreshed while a screen is visible. The iOS analog
+/// of Android's `ShareStatusTracker` — a single source the list and detail
+/// screens both read so they can't disagree.
 @Observable
 @MainActor
 final class ShareStatusStore {
-    /// Absent key = not checked yet; `nil` value = checked but unknown (hub
-    /// unreachable); `true`/`false` = online/offline.
-    private(set) var statuses: [ShareID: Bool?] = [:]
+    /// Absent key = not checked yet.
+    private(set) var statuses: [ShareID: Availability] = [:]
 
     func availability(for id: ShareID) -> Availability {
-        switch statuses[id] {
-        case .some(.some(true)): return .online
-        case .some(.some(false)): return .offline
-        default: return .checking
+        statuses[id] ?? .checking
+    }
+
+    /// Refreshes every id concurrently, each under its own deadline so one
+    /// blackholing hub (an unreachable self-hosted backend hangs the connect
+    /// for minutes) can't wedge the others. A terminal result is persisted to
+    /// `store`, and terminal shares are skipped — that state is forever.
+    func refresh(_ ids: [ShareID], using sessions: SessionManager, store: ShareStore) async {
+        let live = ids.filter { store.metadata(for: $0)?.terminalState == nil }
+        await withTaskGroup(of: (ShareID, Availability).self) { group in
+            for id in live {
+                group.addTask {
+                    let availability =
+                        (try? await withDeadline(seconds: Self.checkTimeout) {
+                            await sessions.checkAvailability(id)
+                        }) ?? .unknown
+                    return (id, availability)
+                }
+            }
+            for await (id, availability) in group {
+                statuses[id] = availability
+                switch availability {
+                case .removed: store.markTerminal(id, .removed)
+                case .revoked: store.markTerminal(id, .revoked)
+                default: break
+                }
+            }
         }
     }
 
-    /// Refreshes every id concurrently via `groupInfo()` (node 1's `isOnline`).
-    func refresh(_ ids: [ShareID], using sessions: SessionManager) async {
-        await withTaskGroup(of: (ShareID, Bool?).self) { group in
-            for id in ids {
-                group.addTask { (id, await sessions.isServingNodeOnline(id)) }
-            }
-            for await (id, online) in group {
-                statuses[id] = online
-            }
-        }
-    }
+    /// Generous per-share deadline: a healthy hub answers in well under a
+    /// second; only a blackholing connect runs into this.
+    private static let checkTimeout: Double = 10
 }

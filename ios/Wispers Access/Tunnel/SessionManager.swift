@@ -42,15 +42,35 @@ actor SessionManager {
         }
     }
 
-    /// Hub-reported availability of the share's serving node (node 1), or nil
-    /// when the hub can't be reached (typically this device is offline).
-    func isServingNodeOnline(_ shareID: ShareID) async -> Bool? {
+    /// Hub-reported availability of the share for this device.
+    ///
+    /// Terminal outcomes are categorical, not transient: `.removed` means the
+    /// hub rejected our credentials outright (the share was deleted server-side
+    /// — every call fails unauthenticated/notFound from then on), and
+    /// `.revoked` means the roster says this device was revoked (read from our
+    /// own entry in the group info, since `groupInfo` itself still works in the
+    /// revoked state). Anything else that fails maps to `.unknown` — typically
+    /// the hub is unreachable.
+    func checkAvailability(_ shareID: ShareID) async -> Availability {
         do {
             let node = try await resolveNode(shareID)
-            let info = try await node.groupInfo()
-            return info.nodes.first { $0.nodeNumber == Self.servingNodeNumber }?.isOnline
+            let nodes = try await node.groupInfo().nodes
+            if nodes.first(where: { $0.isSelf })?.state == .revoked { return .revoked }
+            guard let serving = nodes.first(where: { $0.nodeNumber == Self.servingNodeNumber })
+            else {
+                // Serving node not registered at the hub: it can't be reached,
+                // but absence isn't proof of removal — plain offline.
+                return .offline
+            }
+            return serving.isOnline ? .online : .offline
+        } catch let error as WispersError {
+            switch error {
+            case .unauthenticated, .notFound: return .removed
+            case .revoked: return .revoked
+            default: return .unknown
+            }
         } catch {
-            return nil
+            return .unknown
         }
     }
 

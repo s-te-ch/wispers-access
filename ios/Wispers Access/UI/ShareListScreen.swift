@@ -38,7 +38,8 @@ struct ShareListScreen: View {
         .sheet(isPresented: $showingAdd, onDismiss: consumePendingOpen) { AddShareScreen() }
         .task(id: store.shares.map(\.id)) {
             while !Task.isCancelled {
-                await manager.status.refresh(store.shares.map(\.id), using: manager.sessions)
+                await manager.status.refresh(
+                    store.shares.map(\.id), using: manager.sessions, store: store)
                 try? await Task.sleep(for: .seconds(30))
             }
         }
@@ -74,15 +75,22 @@ struct ShareListScreen: View {
 
     /// One roster row: the card taps through to the browser; the trailing ⓘ taps
     /// through to the detail screen. Two side-by-side hit targets inside one card.
+    /// A terminal share's card routes to the detail screen too — there's nothing
+    /// to browse anymore, only the explanation and Remove.
     private func shareRow(_ share: ShareMetadata) -> some View {
         HStack(spacing: 8) {
-            NavigationLink(value: ShareRoute.browse(share.id)) {
+            NavigationLink(
+                value: share.terminalState == nil
+                    ? ShareRoute.browse(share.id) : ShareRoute.detail(share.id)
+            ) {
                 ShareCard(
                     share: share,
-                    availability: manager.status.availability(for: share.id),
+                    availability: share.terminalState?.availability
+                        ?? manager.status.availability(for: share.id),
                     isLive: manager.browser.isWarm(share.id),
                     iconData: icons.iconData(for: share.id)
                 )
+                .opacity(share.terminalState == nil ? 1 : 0.6)
             }
             .buttonStyle(.plain)
 
@@ -180,7 +188,9 @@ private struct ShareCard: View {
         switch availability {
         case .online: status = "ONLINE"
         case .offline: status = "OFFLINE"
+        case .unknown: status = "UNKNOWN"
         case .checking: status = "CHECKING…"
+        case .removed, .revoked: return "NO LONGER SHARED"
         }
         guard let last = share.lastConnectedAt, let ago = Self.shortAgo(last) else { return status }
         return "\(status) · LAST \(ago) AGO"

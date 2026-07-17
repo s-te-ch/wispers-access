@@ -40,6 +40,12 @@ final class ShareStore {
         mutate(id) { $0.lastConnectedAt = date }
     }
 
+    /// Records that the hub definitively rejected this share's node. One-way:
+    /// a terminal share never returns to live polling.
+    func markTerminal(_ id: ShareID, _ state: TerminalShareState) {
+        mutate(id) { $0.terminalState = state }
+    }
+
     func remove(_ id: ShareID) {
         shares.removeAll { $0.id == id }
         persist()
