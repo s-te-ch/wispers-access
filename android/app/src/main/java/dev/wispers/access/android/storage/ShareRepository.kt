@@ -54,6 +54,15 @@ class ShareRepository @Inject internal constructor(
             dao.setLastConnectedAt(id.value, at.toEpochMilli())
         }
 
+    /**
+     * Records that the hub definitively rejected this share's node. One-way:
+     * a terminal share never returns to live polling.
+     */
+    suspend fun markTerminal(id: ShareId, state: ShareTerminalState) =
+        withContext(Dispatchers.IO) {
+            dao.setTerminalState(id.value, state.name)
+        }
+
     /** Ladder rung of the currently-cached icon (0 if none). */
     suspend fun currentIconRank(id: ShareId): Int = withContext(Dispatchers.IO) {
         dao.getIconRank(id.value) ?: 0
@@ -90,4 +99,5 @@ private fun ShareInfoRow.toShare(): Share = Share(
     createdAt = Instant.ofEpochMilli(createdAt),
     lastConnectedAt = lastConnectedAt?.let(Instant::ofEpochMilli),
     iconPng = iconPng,
+    terminalState = terminalState?.let(ShareTerminalState::valueOf),
 )

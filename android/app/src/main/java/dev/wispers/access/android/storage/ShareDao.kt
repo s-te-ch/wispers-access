@@ -9,15 +9,21 @@ import kotlinx.coroutines.flow.Flow
 internal interface ShareDao {
 
     @Query(
-        "SELECT id, nickname, createdAt, lastConnectedAt, iconPng FROM shares " +
+        "SELECT id, nickname, createdAt, lastConnectedAt, iconPng, terminalState FROM shares " +
             "ORDER BY lastConnectedAt DESC, createdAt DESC"
     )
     fun observeShareInfos(): Flow<List<ShareInfoRow>>
 
-    @Query("SELECT id, nickname, createdAt, lastConnectedAt, iconPng FROM shares WHERE id = :id")
+    @Query(
+        "SELECT id, nickname, createdAt, lastConnectedAt, iconPng, terminalState FROM shares " +
+            "WHERE id = :id"
+    )
     fun getShareInfo(id: String): ShareInfoRow?
 
-    @Query("SELECT id, nickname, createdAt, lastConnectedAt, iconPng FROM shares WHERE id = :id")
+    @Query(
+        "SELECT id, nickname, createdAt, lastConnectedAt, iconPng, terminalState FROM shares " +
+            "WHERE id = :id"
+    )
     fun observeShareInfo(id: String): Flow<ShareInfoRow?>
 
     @Query("SELECT iconRank FROM shares WHERE id = :id")
@@ -34,6 +40,9 @@ internal interface ShareDao {
 
     @Query("UPDATE shares SET lastConnectedAt = :at WHERE id = :id")
     fun setLastConnectedAt(id: String, at: Long)
+
+    @Query("UPDATE shares SET terminalState = :state WHERE id = :id")
+    fun setTerminalState(id: String, state: String)
 
     @Query("DELETE FROM shares WHERE id = :id")
     fun delete(id: String)

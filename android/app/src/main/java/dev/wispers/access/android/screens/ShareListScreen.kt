@@ -35,6 +35,7 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -43,7 +44,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.wispers.access.android.R
+import dev.wispers.access.android.proxy.ShareAvailability
 import dev.wispers.access.android.proxy.ShareStatusTracker
+import dev.wispers.access.android.proxy.toAvailability
 import dev.wispers.access.android.storage.Share
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
@@ -68,8 +71,8 @@ class ShareListViewModel @Inject constructor(
             initialValue = emptyList(),
         )
 
-    /** Per-share serving-node availability; absent key = not checked yet, null = unknown. */
-    val online: StateFlow<Map<ShareId, Boolean?>> = statusTracker.statuses
+    /** Per-share availability; absent key = not checked yet. */
+    val availability: StateFlow<Map<ShareId, ShareAvailability>> = statusTracker.statuses
 }
 
 @Composable
@@ -79,7 +82,7 @@ fun ShareListScreen(
     viewModel: ShareListViewModel = hiltViewModel(),
 ) {
     val shares by viewModel.shares.collectAsState()
-    val online by viewModel.online.collectAsState()
+    val availability by viewModel.availability.collectAsState()
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -108,7 +111,7 @@ fun ShareListScreen(
             if (shares.isEmpty()) {
                 EmptyShareList()
             } else {
-                ShareList(shares = shares, online = online, onShareClick = onShareClick)
+                ShareList(shares = shares, availability = availability, onShareClick = onShareClick)
             }
         }
     }
@@ -151,7 +154,7 @@ private fun SectionHeader(count: Int) {
 @Composable
 private fun ShareList(
     shares: List<Share>,
-    online: Map<ShareId, Boolean?>,
+    availability: Map<ShareId, ShareAvailability>,
     onShareClick: (ShareId) -> Unit,
 ) {
     LazyColumn(
@@ -162,7 +165,8 @@ private fun ShareList(
         items(shares, key = { it.id.value }) { share ->
             ShareCard(
                 share = share,
-                online = online[share.id],
+                // The persisted terminal state wins over (and outlives) live checks.
+                availability = share.terminalState?.toAvailability() ?: availability[share.id],
                 onClick = { onShareClick(share.id) },
             )
         }
@@ -170,7 +174,9 @@ private fun ShareList(
 }
 
 @Composable
-private fun ShareCard(share: Share, online: Boolean?, onClick: () -> Unit) {
+private fun ShareCard(share: Share, availability: ShareAvailability?, onClick: () -> Unit) {
+    val terminal =
+        availability == ShareAvailability.REMOVED || availability == ShareAvailability.REVOKED
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
@@ -182,7 +188,8 @@ private fun ShareCard(share: Share, online: Boolean?, onClick: () -> Unit) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(horizontal = 20.dp, vertical = 16.dp),
+                .padding(horizontal = 20.dp, vertical = 16.dp)
+                .alpha(if (terminal) 0.6f else 1f),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             ShareAvatar(nickname = share.nickname, iconPng = share.iconPng)
@@ -192,9 +199,9 @@ private fun ShareCard(share: Share, online: Boolean?, onClick: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
-                    StatusDot(online = online)
+                    StatusDot(availability = availability)
                     Text(
-                        text = statusLine(online, share.lastConnectedAt),
+                        text = statusLine(availability, share.lastConnectedAt),
                         style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 1.sp),
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
@@ -216,8 +223,8 @@ private fun ShareCard(share: Share, online: Boolean?, onClick: () -> Unit) {
 }
 
 @Composable
-private fun StatusDot(online: Boolean?) {
-    if (online == null) {
+private fun StatusDot(availability: ShareAvailability?) {
+    if (availability == null) {
         CircularProgressIndicator(
             modifier = Modifier.size(8.dp),
             strokeWidth = 1.dp,
@@ -228,10 +235,11 @@ private fun StatusDot(online: Boolean?) {
             modifier = Modifier
                 .size(8.dp)
                 .background(
-                    color = if (online) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.outline
+                    color = when (availability) {
+                        ShareAvailability.ONLINE -> MaterialTheme.colorScheme.primary
+                        ShareAvailability.REMOVED, ShareAvailability.REVOKED ->
+                            MaterialTheme.colorScheme.error
+                        else -> MaterialTheme.colorScheme.outline
                     },
                     shape = CircleShape,
                 ),
@@ -253,10 +261,12 @@ private fun EmptyShareList() {
     }
 }
 
-private fun statusLine(online: Boolean?, lastConnected: Instant?): String {
-    val status = when (online) {
-        true -> "ONLINE"
-        false -> "OFFLINE"
+private fun statusLine(availability: ShareAvailability?, lastConnected: Instant?): String {
+    val status = when (availability) {
+        ShareAvailability.ONLINE -> "ONLINE"
+        ShareAvailability.OFFLINE -> "OFFLINE"
+        ShareAvailability.UNKNOWN -> "UNKNOWN"
+        ShareAvailability.REMOVED, ShareAvailability.REVOKED -> return "NO LONGER SHARED"
         null -> "CHECKING"
     }
     return "$status · LAST ${formatLastConnectedShort(lastConnected)}"

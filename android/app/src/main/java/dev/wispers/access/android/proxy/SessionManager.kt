@@ -6,6 +6,8 @@ import dev.wispers.access.android.storage.restoreOrInitNode
 import dev.wispers.connect.handles.Node
 import dev.wispers.connect.handles.QuicConnection
 import dev.wispers.connect.handles.QuicStream
+import dev.wispers.connect.types.NodeState
+import dev.wispers.connect.types.WispersException
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.coroutineContext
@@ -134,15 +136,43 @@ class SessionManager @Inject constructor(
     }
 
     /**
-     * Hub-reported availability of the share's serving node, or null when the
-     * hub can't be reached (status unknown — typically this device is offline).
+     * Hub-reported availability of the share for this device.
+     *
+     * Terminal outcomes are categorical, not transient: [ShareAvailability.REMOVED]
+     * means the hub rejected our credentials outright (the share was deleted
+     * server-side — every call fails Unauthenticated/NotFound from then on), and
+     * [ShareAvailability.REVOKED] means the roster says this device was revoked
+     * (detected from our own entry in the group info, since `groupInfo` itself
+     * still works in the Revoked state). Anything else that fails maps to
+     * [ShareAvailability.UNKNOWN] — typically the hub is unreachable.
      */
-    suspend fun isServingNodeOnline(shareId: ShareId): Boolean? = try {
-        getNode(shareId).groupInfo()
-            .nodes.firstOrNull { it.nodeNumber == SERVING_NODE_NUMBER }
-            ?.isOnline
-    } catch (_: Exception) {
-        null
+    suspend fun checkAvailability(shareId: ShareId): ShareAvailability {
+        return try {
+            val node = getNode(shareId)
+            // A fresh restore of a revoked node already carries the state.
+            if (node.state == NodeState.Revoked) return ShareAvailability.REVOKED
+            val nodes = node.groupInfo().nodes
+            when {
+                nodes.firstOrNull { it.isSelf }?.state == NodeState.Revoked ->
+                    ShareAvailability.REVOKED
+                nodes.firstOrNull { it.nodeNumber == SERVING_NODE_NUMBER }?.isOnline == true ->
+                    ShareAvailability.ONLINE
+                nodes.any { it.nodeNumber == SERVING_NODE_NUMBER } ->
+                    ShareAvailability.OFFLINE
+                // Serving node not registered at the hub: it can't be reached,
+                // but absence isn't proof of removal — report it as plain offline.
+                else -> ShareAvailability.OFFLINE
+            }
+        } catch (_: WispersException.Unauthenticated) {
+            ShareAvailability.REMOVED
+        } catch (_: WispersException.NotFound) {
+            ShareAvailability.REMOVED
+        } catch (_: WispersException.Revoked) {
+            ShareAvailability.REVOKED
+        } catch (e: Exception) {
+            coroutineContext.ensureActive()
+            ShareAvailability.UNKNOWN
+        }
     }
 
     private suspend fun tryOpen(shareId: ShareId): StreamLease {

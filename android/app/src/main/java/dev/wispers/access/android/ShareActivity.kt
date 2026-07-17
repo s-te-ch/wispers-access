@@ -23,12 +23,14 @@ import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -44,8 +46,10 @@ import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import dagger.hilt.android.AndroidEntryPoint
 import dev.wispers.access.android.proxy.ProxyServer
+import dev.wispers.access.android.screens.TerminalShareExplanation
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
+import dev.wispers.access.android.storage.ShareTerminalState
 import dev.wispers.access.android.ui.theme.WispersAccessTheme
 import javax.inject.Inject
 import kotlinx.coroutines.launch
@@ -90,12 +94,20 @@ class ShareActivity : ComponentActivity() {
 
         setContent {
             WispersAccessTheme {
-                ShareWebViewScreen(
-                    url = "http://${shareId.value}.localhost:${proxyServer.port}/",
-                    savedState = savedInstanceState,
-                    onWebViewReady = { webView = it },
-                    onIconJson = { json -> handleHarvestedIcon(shareId, json) },
-                )
+                // A pinned shortcut can outlive the share; a terminal share gets
+                // the explanation instead of a WebView that can only error.
+                val share by repo.observeShare(shareId).collectAsState(initial = null)
+                val terminal = share?.terminalState
+                if (terminal != null) {
+                    TerminalShareNotice(state = terminal)
+                } else {
+                    ShareWebViewScreen(
+                        url = "http://${shareId.value}.localhost:${proxyServer.port}/",
+                        savedState = savedInstanceState,
+                        onWebViewReady = { webView = it },
+                        onIconJson = { json -> handleHarvestedIcon(shareId, json) },
+                    )
+                }
             }
         }
 
@@ -161,6 +173,34 @@ class ShareActivity : ComponentActivity() {
                 data = "wispers-access://share/${shareId.value}".toUri()
                 addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
             }
+    }
+}
+
+/** Full-screen terminal-share explanation with a way back into the app. */
+@Composable
+private fun TerminalShareNotice(state: ShareTerminalState) {
+    val context = androidx.compose.ui.platform.LocalContext.current
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .windowInsetsPadding(WindowInsets.safeDrawing),
+        contentAlignment = Alignment.Center,
+    ) {
+        Column(
+            modifier = Modifier.padding(24.dp),
+            verticalArrangement = Arrangement.spacedBy(16.dp),
+        ) {
+            TerminalShareExplanation(state = state)
+            androidx.compose.material3.OutlinedButton(
+                onClick = {
+                    context.startActivity(Intent(context, MainActivity::class.java))
+                    (context as? ComponentActivity)?.finish()
+                },
+            ) {
+                Text("Open Wispers Access")
+            }
+        }
     }
 }
 

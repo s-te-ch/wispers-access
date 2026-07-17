@@ -20,6 +20,9 @@ internal class ShareEntity(
     // Custom Wispers Connect hub URL for this share, or null for the managed
     // backend.
     val backend: String? = null,
+    // Terminal state name (ShareTerminalState) once the hub has definitively
+    // rejected this node, or null while the share is live.
+    val terminalState: String? = null,
 )
 
 internal class ShareInfoRow(
@@ -28,4 +31,5 @@ internal class ShareInfoRow(
     val createdAt: Long,
     val lastConnectedAt: Long?,
     val iconPng: ByteArray?,
+    val terminalState: String?,
 )

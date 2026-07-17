@@ -49,7 +49,9 @@ import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.wispers.access.android.addToHomescreen
 import dev.wispers.access.android.disableShortcut
 import dev.wispers.access.android.proxy.SessionManager
+import dev.wispers.access.android.proxy.ShareAvailability
 import dev.wispers.access.android.proxy.ShareStatusTracker
+import dev.wispers.access.android.proxy.toAvailability
 import dev.wispers.access.android.storage.Share
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
@@ -60,7 +62,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -82,10 +84,14 @@ class ShareDetailViewModel @Inject constructor(
         initialValue = null,
     )
 
-    /** Serving-node availability; null = not known (yet). Shared with the list screen. */
-    val online: StateFlow<Boolean?> = statusTracker.statuses
-        .map { it[shareId] }
-        .stateIn(
+    /**
+     * Availability; null = not known (yet). Shared with the list screen. A
+     * persisted terminal state on the share wins over live checks.
+     */
+    val availability: StateFlow<ShareAvailability?> =
+        combine(share, statusTracker.statuses) { share, statuses ->
+            share?.terminalState?.toAvailability() ?: statuses[shareId]
+        }.stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
             initialValue = null,
@@ -116,7 +122,7 @@ fun ShareDetailScreen(
     viewModel: ShareDetailViewModel = hiltViewModel(),
 ) {
     val share by viewModel.share.collectAsState()
-    val online by viewModel.online.collectAsState()
+    val availability by viewModel.availability.collectAsState()
     val removed by viewModel.removed.collectAsState()
     var confirmRemove by remember { mutableStateOf(false) }
     val context = LocalContext.current
@@ -147,7 +153,7 @@ fun ShareDetailScreen(
         if (current != null) {
             ShareDetailContent(
                 share = current,
-                online = online,
+                availability = availability,
                 contentPadding = innerPadding,
                 onOpen = { onOpenShare(current.id) },
                 onAddToHomescreen = {
@@ -195,7 +201,7 @@ fun ShareDetailScreen(
 @Composable
 private fun ShareDetailContent(
     share: Share,
-    online: Boolean?,
+    availability: ShareAvailability?,
     contentPadding: PaddingValues,
     onOpen: () -> Unit,
     onAddToHomescreen: () -> Unit,
@@ -208,49 +214,60 @@ private fun ShareDetailContent(
             .padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        StatusRow(online = online)
+        StatusRow(availability = availability)
         ShareAvatar(nickname = share.nickname, iconPng = share.iconPng, size = 64.dp)
         Text(
             text = share.nickname.ifBlank { "Untitled share" },
             style = MaterialTheme.typography.headlineLarge,
         )
         InfoCardsRow(share = share)
-        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Button(
-                onClick = onOpen,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Open share ↗")
-            }
-            OutlinedButton(
-                onClick = onAddToHomescreen,
-                modifier = Modifier.fillMaxWidth(),
-            ) {
-                Text("Add to homescreen")
-            }
-            Text(
-                "When the dialog appears, drag the icon onto your home screen. " +
-                    "(On some phones the “Add automatically” button does nothing.)",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        val terminal = share.terminalState
+        if (terminal != null) {
+            TerminalShareExplanation(state = terminal)
             OutlinedButton(
                 onClick = onRemove,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text("Remove share", color = MaterialTheme.colorScheme.error)
+                Text("Remove from this device", color = MaterialTheme.colorScheme.error)
+            }
+        } else {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onOpen,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Open share ↗")
+                }
+                OutlinedButton(
+                    onClick = onAddToHomescreen,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Add to homescreen")
+                }
+                Text(
+                    "When the dialog appears, drag the icon onto your home screen. " +
+                        "(On some phones the “Add automatically” button does nothing.)",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(
+                    onClick = onRemove,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("Remove share", color = MaterialTheme.colorScheme.error)
+                }
             }
         }
     }
 }
 
 @Composable
-private fun StatusRow(online: Boolean?) {
+private fun StatusRow(availability: ShareAvailability?) {
     Row(
         verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        if (online == null) {
+        if (availability == null) {
             CircularProgressIndicator(
                 modifier = Modifier.size(10.dp),
                 strokeWidth = 1.5.dp,
@@ -261,15 +278,22 @@ private fun StatusRow(online: Boolean?) {
                 modifier = Modifier
                     .size(10.dp)
                     .background(
-                        color = if (online) Color(0xFF34A853) else MaterialTheme.colorScheme.outline,
+                        color = when (availability) {
+                            ShareAvailability.ONLINE -> Color(0xFF34A853)
+                            ShareAvailability.REMOVED, ShareAvailability.REVOKED ->
+                                MaterialTheme.colorScheme.error
+                            else -> MaterialTheme.colorScheme.outline
+                        },
                         shape = CircleShape,
                     ),
             )
         }
         Text(
-            text = when (online) {
-                true -> "ONLINE"
-                false -> "OFFLINE"
+            text = when (availability) {
+                ShareAvailability.ONLINE -> "ONLINE"
+                ShareAvailability.OFFLINE -> "OFFLINE"
+                ShareAvailability.UNKNOWN -> "UNKNOWN"
+                ShareAvailability.REMOVED, ShareAvailability.REVOKED -> "NO LONGER AVAILABLE"
                 null -> "CHECKING…"
             },
             style = MaterialTheme.typography.labelMedium,

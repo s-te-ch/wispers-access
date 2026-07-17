@@ -1,0 +1,80 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 4,
+    "identityHash": "b4c042ee046606c19b36d7156f049ef0",
+    "entities": [
+      {
+        "tableName": "shares",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `nickname` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `lastConnectedAt` INTEGER, `rootKey` BLOB, `registration` BLOB, `iconPng` BLOB, `iconRank` INTEGER NOT NULL DEFAULT 0, `backend` TEXT, `terminalState` TEXT, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "nickname",
+            "columnName": "nickname",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "createdAt",
+            "columnName": "createdAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastConnectedAt",
+            "columnName": "lastConnectedAt",
+            "affinity": "INTEGER"
+          },
+          {
+            "fieldPath": "rootKey",
+            "columnName": "rootKey",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "registration",
+            "columnName": "registration",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "iconPng",
+            "columnName": "iconPng",
+            "affinity": "BLOB"
+          },
+          {
+            "fieldPath": "iconRank",
+            "columnName": "iconRank",
+            "affinity": "INTEGER",
+            "notNull": true,
+            "defaultValue": "0"
+          },
+          {
+            "fieldPath": "backend",
+            "columnName": "backend",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "terminalState",
+            "columnName": "terminalState",
+            "affinity": "TEXT"
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'b4c042ee046606c19b36d7156f049ef0')"
+    ]
+  }
+}
