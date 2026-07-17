@@ -38,6 +38,13 @@ enum Command {
     Serve {
         port: u16,
     },
+    /// Show all joined shares and their state.
+    List,
+    /// Remove a share from this device, deregistering from its hub when possible.
+    Remove {
+        /// The share's hostname, as shown by `waclient list`.
+        share: String,
+    },
 }
 
 fn main() -> Result<()> {
@@ -63,6 +70,8 @@ async fn async_main(command: Command) -> Result<()> {
     match command {
         Command::Join { invite_code } => join(&invite_code).await,
         Command::Serve { port } => serve(port).await,
+        Command::List => list().await,
+        Command::Remove { share } => remove(&share).await,
     }
 }
 
@@ -112,6 +121,55 @@ async fn join(invite_code: &str) -> Result<()> {
     Ok(())
 }
 
+async fn list() -> Result<()> {
+    use std::io::Write;
+    use tabwriter::TabWriter;
+
+    let db = storage::DB::new()?;
+    let rows = db.get_all_rows()?;
+    if rows.is_empty() {
+        println!("No shares joined. Use 'waclient join <invite_code>'.");
+        return Ok(());
+    }
+    let mut tw = TabWriter::new(std::io::stdout().lock()).padding(2);
+    writeln!(&mut tw, "Hostname\tName\tStatus")?;
+    for row in rows {
+        let (_, display_name, hostname) = row.read_names()?;
+        let state = match row.read_terminal_state()?.as_deref().and_then(TerminalState::parse) {
+            Some(state) => state.describe(),
+            None => "ok",
+        };
+        writeln!(&mut tw, "{}\t{}\t{}", hostname, display_name, state)?;
+    }
+    tw.flush()?;
+    Ok(())
+}
+
+async fn remove(share: &str) -> Result<()> {
+    let db = storage::DB::new()?;
+    let row = db
+        .find_row(share)?
+        .with_context(|| format!("no share '{}' (see 'waclient list')", share))?;
+
+    // Deregistering is best-effort: for a removed share the hub already rejects
+    // us, and for a revoked one logout cleanly retires the zombie registration.
+    let backend = row.read_backend()?;
+    let ns = wc::NodeStorage::new(row.clone());
+    if let Some(backend) = backend.as_deref() {
+        ns.override_hub_addr(backend);
+    }
+    match ns.restore_or_init_node().await {
+        Ok(mut node) => match node.logout().await {
+            Ok(()) => println!("Deregistered from the hub."),
+            Err(e) => println!("Could not deregister from the hub ({e}); removing locally anyway."),
+        },
+        Err(e) => println!("Could not restore the node ({e}); removing locally anyway."),
+    }
+    row.delete_row()?;
+    println!("Share '{}' removed from this device.", share);
+    Ok(())
+}
+
 /// Parses a `wax_<token>_<activation_code>[_<backend>]` invite code into its
 /// (registration_token, activation_code, backend) parts. The optional backend
 /// part is a base32-encoded URL.
@@ -157,25 +215,55 @@ fn host_slug(name: &str) -> Option<String> {
 }
 
 async fn serve(port: u16) -> Result<()> {
-    // Start a stream factory for all known shares.
+    // Start a stream factory for all known shares. One dead or unreachable
+    // share must not take the others down: it's reported and skipped, and a
+    // terminal rejection is persisted so the share is never dialed again.
     let db = storage::DB::new()?;
     let rows = db.get_all_rows()?;
     let mut nodes = Vec::new();
     let mut hostname_map: HashMap<String, String> = HashMap::new();
+    let mut dead: HashMap<String, TerminalState> = HashMap::new();
     println!("Available shares:");
     for row in rows {
-        let (cg_id, _, hostname) = row.read_names()?;
-        let backend = row.read_backend()?;
-        println!("  http://{}.localhost:{}", hostname, port);
+        let (cg_id, display_name, hostname) = row.read_names()?;
         hostname_map.insert(hostname.clone(), cg_id.clone());
-        let ns = wc::NodeStorage::new(row);
+        if let Some(state) = row.read_terminal_state()?.as_deref().and_then(TerminalState::parse)
+        {
+            report_dead_share(&display_name, &hostname, state);
+            dead.insert(cg_id, state);
+            continue;
+        }
+        let backend = row.read_backend()?;
+        let ns = wc::NodeStorage::new(row.clone());
         if let Some(backend) = backend.as_deref() {
             ns.override_hub_addr(backend);
         }
-        let node = ns.restore_or_init_node().await?;
-        nodes.push((cg_id, node));
+        match ns.restore_or_init_node().await {
+            Ok(node) if matches!(node.state(), wc::NodeState::Revoked) => {
+                let state = TerminalState::Revoked;
+                let _ = row.write_terminal_state(state.as_str());
+                report_dead_share(&display_name, &hostname, state);
+                dead.insert(cg_id, state);
+            }
+            Ok(node) => {
+                println!("  http://{}.localhost:{}", hostname, port);
+                nodes.push((cg_id, ShareNode { node, row }));
+            }
+            Err(e) => {
+                if let Some(state) = terminal_from_node_err(&e) {
+                    let _ = row.write_terminal_state(state.as_str());
+                    report_dead_share(&display_name, &hostname, state);
+                    dead.insert(cg_id, state);
+                } else {
+                    eprintln!(
+                        "  {} — temporarily unavailable ({e}), not serving it this run",
+                        hostname
+                    );
+                }
+            }
+        }
     }
-    let stream_factory = Arc::new(StreamFactory::new(nodes, hostname_map));
+    let stream_factory = Arc::new(StreamFactory::new(nodes, hostname_map, dead));
 
     // Bind to local port.
     let bind_addr = format!("localhost:{}", port);
@@ -235,7 +323,18 @@ async fn forward(
     // ... and open a stream to it.
     let fwd_stream = match stream_factory.open_stream(&share).await {
         Ok(s) => s,
-        Err(e) => {
+        Err(OpenError::Terminal(state)) => {
+            // Terminal is deliberate, not an outage: 410 tells the reader that
+            // retrying won't help, unlike the 502 below.
+            return Ok(error_response(
+                StatusCode::GONE,
+                &format!(
+                    "This share is no longer available on this device — {}.",
+                    state.describe()
+                ),
+            ));
+        }
+        Err(OpenError::Other(e)) => {
             eprintln!("[{}] open_stream failed: {:#}", share, e);
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
@@ -421,44 +520,132 @@ fn error_response(status: hyper::StatusCode, msg: &str) -> hyper::Response<Boxed
         .expect("static error response is always valid")
 }
 
+/// Why a share is permanently unusable. `Removed` = the hub rejected our
+/// credentials outright (share deleted server-side); `Revoked` = this device
+/// was revoked from the share's roster.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TerminalState {
+    Removed,
+    Revoked,
+}
+
+impl TerminalState {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Removed => "removed",
+            Self::Revoked => "revoked",
+        }
+    }
+
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "removed" => Some(Self::Removed),
+            "revoked" => Some(Self::Revoked),
+            _ => None,
+        }
+    }
+
+    fn describe(self) -> &'static str {
+        match self {
+            Self::Removed => "the share was removed on the server side",
+            Self::Revoked => "this device's access was revoked",
+        }
+    }
+}
+
+fn terminal_from_node_err(e: &wc::NodeStateError) -> Option<TerminalState> {
+    if e.is_unauthenticated() || e.is_not_found() {
+        return Some(TerminalState::Removed);
+    }
+    if e.is_revoked() {
+        return Some(TerminalState::Revoked);
+    }
+    None
+}
+
+fn terminal_from_p2p_err(e: &wc::P2pError) -> Option<TerminalState> {
+    match e {
+        wc::P2pError::Revoked => Some(TerminalState::Revoked),
+        wc::P2pError::Hub(h) if h.is_unauthenticated() || h.is_not_found() => {
+            Some(TerminalState::Removed)
+        }
+        _ => None,
+    }
+}
+
+fn report_dead_share(display_name: &str, hostname: &str, state: TerminalState) {
+    eprintln!(
+        "  {} ('{}') is no longer available — {}.",
+        hostname, display_name, state.describe()
+    );
+    eprintln!("    Run 'waclient remove {}' to clean it up.", hostname);
+}
+
+enum OpenError {
+    Terminal(TerminalState),
+    Other(anyhow::Error),
+}
+
+struct ShareNode {
+    node: wc::Node,
+    row: storage::Row,
+}
+
 struct StreamFactory {
-    nodes: HashMap<String /* connectivity_group_id */, wc::Node>,
+    nodes: HashMap<String /* connectivity_group_id */, ShareNode>,
     hostname_map: HashMap<String /* hostname */, String /* connectivity_group_id */>,
+    // Shares the hub has terminally rejected (at startup or mid-session): they
+    // answer 410 instead of being dialed.
+    dead: Mutex<HashMap<String /* connectivity_group_id */, TerminalState>>,
     pool: Mutex<HashMap<String, PoolEntry>>,
 }
 
 impl StreamFactory {
-    fn new(nodes: Vec<(String, wc::Node)>, hostname_map: HashMap<String, String>) -> Self {
+    fn new(
+        nodes: Vec<(String, ShareNode)>,
+        hostname_map: HashMap<String, String>,
+        dead: HashMap<String, TerminalState>,
+    ) -> Self {
         Self {
             nodes: nodes.into_iter().collect(),
             hostname_map,
+            dead: Mutex::new(dead),
             pool: Mutex::new(HashMap::new()),
         }
     }
 
-    async fn open_stream(&self, host: &str) -> Result<wc::QuicStream> {
+    async fn open_stream(&self, host: &str) -> Result<wc::QuicStream, OpenError> {
         let mut cg_id = host;
         if let Some(mapped) = self.hostname_map.get(host) {
             cg_id = mapped;
         }
-        let Some(node) = self.nodes.get(cg_id) else {
-            anyhow::bail!("Unknown host {}", host);
+        if let Some(state) = self.dead.lock().await.get(cg_id) {
+            return Err(OpenError::Terminal(*state));
+        }
+        let Some(share) = self.nodes.get(cg_id) else {
+            return Err(OpenError::Other(anyhow::anyhow!("Unknown host {}", host)));
         };
         // Open a stream with a single retry. This covers the case when the
-        // connection has died and needed reestablishing.
-        match self.try_open_stream(cg_id, node).await {
+        // connection has died and needed reestablishing. A terminal rejection
+        // is not retried — it can only repeat.
+        match self.try_open_stream(cg_id, share).await {
             Ok(s) => Ok(s),
-            Err(e) => {
+            Err(OpenError::Other(e)) => {
                 eprintln!(
                     "[{}] open_stream attempt 1 failed, retrying once: {:#}",
                     cg_id, e
                 );
-                self.try_open_stream(cg_id, node).await
+                self.try_open_stream(cg_id, share).await
             }
+            Err(terminal) => Err(terminal),
         }
     }
 
-    async fn try_open_stream(&self, cg_id: &str, node: &wc::Node) -> Result<wc::QuicStream> {
+    async fn try_open_stream(
+        &self,
+        cg_id: &str,
+        share: &ShareNode,
+    ) -> Result<wc::QuicStream, OpenError> {
         // Get the cell under lock.
         let cell = {
             let mut pool = self.pool.lock().await;
@@ -468,13 +655,26 @@ impl StreamFactory {
             pool_entry.cell.clone()
         };
         // Get or establish the connection.
-        let conn = cell
+        let conn = match cell
             .get_or_try_init(|| async {
                 eprintln!("[{}] establishing QUIC connection", cg_id);
-                node.connect_quic(1).await.map(Arc::new)
+                share.node.connect_quic(1).await.map(Arc::new)
             })
-            .await?
-            .clone();
+            .await
+        {
+            Ok(conn) => conn.clone(),
+            Err(e) => {
+                // A mid-session revocation/removal is forever: persist it and
+                // remember it so later requests 410 without dialing.
+                if let Some(state) = terminal_from_p2p_err(&e) {
+                    eprintln!("[{}] share is no longer available — {}", cg_id, state.describe());
+                    let _ = share.row.write_terminal_state(state.as_str());
+                    self.dead.lock().await.insert(cg_id.to_owned(), state);
+                    return Err(OpenError::Terminal(state));
+                }
+                return Err(OpenError::Other(e.into()));
+            }
+        };
         // Open a stream. If this fails, the underlying connection has broken
         // and we should remove it from the pool. There could be several threads
         // trying this, so make sure the cell hasn't changed.
@@ -491,7 +691,7 @@ impl StreamFactory {
                 {
                     pool.remove(cg_id);
                 }
-                Err(e.into())
+                Err(OpenError::Other(e.into()))
             }
         }
     }

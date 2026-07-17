@@ -34,6 +34,24 @@ impl DB {
         })
     }
 
+    /// Looks a share up by its hostname (or connectivity group id).
+    pub fn find_row(self: &Arc<Self>, key: &str) -> Result<Option<Row>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().expect("unpoisoned db lock");
+        let id = conn
+            .query_row(
+                "SELECT id FROM shares
+                 WHERE complete = TRUE AND (hostname = ?1 OR connectivity_group_id = ?1)",
+                [key],
+                |r| r.get::<_, i64>(0),
+            )
+            .optional()?;
+        Ok(id.map(|id| Row {
+            db: self.clone(),
+            id,
+        }))
+    }
+
     pub fn get_all_rows(self: &Arc<Self>) -> Result<Vec<Row>> {
         let conn = self.conn.lock().expect("unpoisoned db lock");
         let mut stmt = conn.prepare("SELECT id FROM shares WHERE complete = TRUE")?;
@@ -144,6 +162,35 @@ impl Row {
     pub fn mark_complete(&self) -> Result<()> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
         conn.execute("UPDATE shares SET complete = TRUE WHERE id = ?1", [self.id])?;
+        Ok(())
+    }
+
+    /// Records that the hub definitively rejected this share's node. One-way:
+    /// a terminal share is never dialed again, only removed.
+    pub fn write_terminal_state(&self, state: &str) -> Result<()> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        conn.execute(
+            "UPDATE shares SET terminal_state = ?1 WHERE id = ?2",
+            rusqlite::params![state, self.id],
+        )?;
+        Ok(())
+    }
+
+    pub fn read_terminal_state(&self) -> Result<Option<String>> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let state = conn.query_row(
+            "SELECT terminal_state FROM shares WHERE id = ?1",
+            [self.id],
+            |r| r.get::<_, Option<String>>(0),
+        )?;
+        Ok(state)
+    }
+
+    /// Deletes the row outright (unlike [wc::NodeStateStore::delete], which
+    /// only clears the node state). For `waclient remove`.
+    pub fn delete_row(&self) -> Result<()> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        conn.execute("DELETE FROM shares WHERE id = ?1", [self.id])?;
         Ok(())
     }
 }
@@ -277,6 +324,9 @@ fn migrations() -> Migrations<'static> {
         // v2 — self-hosted backends: the hub base URL an invite named, so the
         // node reconnects to it instead of the managed hub. NULL = managed.
         M::up("ALTER TABLE shares ADD COLUMN backend TEXT;"),
+        // v3 — terminal share state ('removed' / 'revoked') once the hub has
+        // definitively rejected this node. NULL = live.
+        M::up("ALTER TABLE shares ADD COLUMN terminal_state TEXT;"),
     ])
 }
 

@@ -3102,6 +3102,7 @@ dependencies = [
  "rusqlite_migration",
  "rustls",
  "slug",
+ "tabwriter",
  "tokio",
  "wispers-connect",
 ]

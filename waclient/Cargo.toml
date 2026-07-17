@@ -16,6 +16,7 @@ slug = "0.1.6"
 rusqlite = { version = "0.39", features = ["bundled"] }
 rusqlite_migration = "2.5.0"
 rustls = "0.23"
+tabwriter = "1.4"
 tokio = { version = "1", features = ["io-util", "macros"] }
 wispers-connect = "0.11.0"
 
