@@ -42,7 +42,8 @@ final class ShareManager {
     /// there (otherwise a failed activation would strand a `.registered` node
     /// server-side, and repeated retries would pile them up).
     @discardableResult
-    func join(inviteCode: String) async throws -> ShareID {
+    func join(inviteCode: String, onStep: (JoinStep) -> Void = { _ in }) async throws -> ShareID {
+        onStep(.validating)
         let invite = try InviteCode.parse(inviteCode)
         let id = ShareID.random()
         store.add(
@@ -55,9 +56,12 @@ final class ShareManager {
             )
         )
         do {
+            onStep(.initializing)
             let storage = try storageFor(id)
             let (node, _) = try await storage.restoreOrInit()
+            onStep(.registering)
             try await node.register(token: invite.registrationToken)
+            onStep(.activating)
             try await node.activate(activationCode: invite.activationCode)
             store.markConnected(id)
             // Adopt the connectivity group's display name as the label — best
@@ -120,5 +124,23 @@ final class ShareManager {
     private func wipe(_ id: ShareID) {
         try? KeychainShareStore(shareID: id.value).deleteAll()
         store.remove(id)
+    }
+}
+
+/// The steps a join walks through, in order, for the add-share progress UI.
+/// Each `join` reports the step it's *entering*; steps before it are done.
+enum JoinStep: Int, CaseIterable {
+    case validating
+    case initializing
+    case registering
+    case activating
+
+    var label: String {
+        switch self {
+        case .validating: "Validating invitation code…"
+        case .initializing: "Generating node identity…"
+        case .registering: "Registering…"
+        case .activating: "Activating…"
+        }
     }
 }

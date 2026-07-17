@@ -137,15 +137,29 @@ separate "Open shares" tab overview, which felt like two lists + a modal "drawn 
   [[ios-multi-session-switching]].
 
 **Remaining P3 after the redesign**
-- **Add-flow redesign** — Enter code / Scan QR segmented tabs, step-by-step join progress
-  (Validating / Generating identity / Registering / Activating / Joined "name"), done state
-  (Open / Back to list) — see the Android `AddShareScreen` + screenshots.
-- **QR scanner** — VisionKit `DataScannerViewController`; needs
-  `INFOPLIST_KEY_NSCameraUsageDescription`; only exercises on a real device.
+- ✅ **Add-flow redesign** (built 2026-07-17) — `AddShareScreen` rewritten: Enter code / Scan
+  QR segmented tabs, backend note (self-hosted invite announces itself), `PasteButton`,
+  step-by-step progress (Validating / Generating identity / Registering / Activating) driven
+  by a `JoinStep` callback that `ShareManager.join` now reports (single source of truth — no
+  duplicated join logic like Android's view model), and a Joined summary (Open / Back to
+  list). "Open" routes through the new `BrowseRouter` (env nav path; `openAfterDismiss`
+  consumed in the roster's sheet `onDismiss` so we don't push while the sheet is up).
+- ✅ **QR scanner** (built 2026-07-17) — `QRScannerView` wraps VisionKit
+  `DataScannerViewController` (`import Vision` for `.qr`), gated on `canScan`
+  (`isSupported && isAvailable`) with a `ContentUnavailableView` fallback on the Simulator.
+  Camera string added as `INFOPLIST_KEY_NSCameraUsageDescription` build setting (Debug +
+  Release), since the target uses `GENERATE_INFOPLIST_FILE=YES` with no `INFOPLIST_FILE`.
+  Only exercises on a real device.
 - **Quick actions** — app-icon long-press → recent shares (`UIApplicationShortcutItem`),
-  agreed for v1.
+  agreed for v1. (`BrowseRouter.open` is ready for it.)
 - **Favicon harvesting** for avatars (optional) — WKWebView JS on page-finish → per-share
   icon store; today avatars are always the green letter tile.
+
+> **Infra note (found 2026-07-17):** the target has **no `INFOPLIST_FILE`**, so `ios/Info.plist`
+> (the `NSAllowsLocalNetworking` ATS file) is **inert** — the built `Info.plist` has no ATS
+> entry, yet loopback browsing works anyway on iOS 26. Add per-key Info.plist values via
+> `INFOPLIST_KEY_*` build settings (as done for the camera). If a future iOS enforces ATS on
+> loopback, wire `INFOPLIST_FILE = Info.plist` or add `INFOPLIST_KEY_NSAppTransportSecurity`.
 
 **Status (all uncommitted since the last commit, which was the llhttp pivot + .gitignore):**
 nickname-from-`groupInfo().name`, teardown/logout (best-effort `node.logout()` + confirm),

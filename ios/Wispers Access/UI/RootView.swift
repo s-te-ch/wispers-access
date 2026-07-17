@@ -5,8 +5,11 @@ import SwiftUI
 /// detail screen. There's no modal browser and no separate open-shares list;
 /// backing out to the roster is how you switch between shares.
 struct RootView: View {
+    @Environment(BrowseRouter.self) private var router
+
     var body: some View {
-        NavigationStack {
+        @Bindable var router = router
+        NavigationStack(path: $router.path) {
             ShareListScreen()
                 .navigationDestination(for: ShareRoute.self) { route in
                     switch route {

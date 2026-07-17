@@ -7,6 +7,7 @@ import SwiftUI
 struct ShareListScreen: View {
     @Environment(ShareStore.self) private var store
     @Environment(ShareManager.self) private var manager
+    @Environment(BrowseRouter.self) private var router
     @State private var showingAdd = false
 
     var body: some View {
@@ -33,7 +34,7 @@ struct ShareListScreen: View {
             addButton
         }
         .toolbar(.hidden, for: .navigationBar)
-        .sheet(isPresented: $showingAdd) { AddShareScreen() }
+        .sheet(isPresented: $showingAdd, onDismiss: consumePendingOpen) { AddShareScreen() }
         .task(id: store.shares.map(\.id)) {
             while !Task.isCancelled {
                 await manager.status.refresh(store.shares.map(\.id), using: manager.sessions)
@@ -116,6 +117,15 @@ struct ShareListScreen: View {
                 .shadow(color: .black.opacity(0.15), radius: 5, y: 3)
         }
         .padding(24)
+    }
+
+    /// After the add sheet closes, open the freshly joined share if it asked to —
+    /// deferred to here so we don't push onto the stack while the sheet is up.
+    private func consumePendingOpen() {
+        if let id = router.openAfterDismiss {
+            router.openAfterDismiss = nil
+            router.open(id)
+        }
     }
 }
 

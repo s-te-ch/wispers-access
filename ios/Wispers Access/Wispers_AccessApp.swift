@@ -10,12 +10,14 @@ import SwiftUI
 @main
 struct Wispers_AccessApp: App {
     @State private var manager = ShareManager()
+    @State private var router = BrowseRouter()
 
     var body: some Scene {
         WindowGroup {
             RootView()
                 .environment(manager)
                 .environment(manager.store)
+                .environment(router)
         }
     }
 }
