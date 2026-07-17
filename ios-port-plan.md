@@ -181,6 +181,13 @@ separate "Open shares" tab overview, which felt like two lists + a modal "drawn 
 add-flow redesign, QR scanner, quick actions, favicon harvesting) are built, plus the crash /
 status-CHECKING / lifecycle fixes found along the way. iOS is at feature parity with Android.
 
+**Deferred (separate cross-platform work item): share revocation detection.** When the host
+revokes a device, Access doesn't notice — a revoked share sits on "CHECKING" instead of
+showing it's gone. Neither iOS nor Android handles it (only the connect lib / `wconnect` /
+Files app do). Fix via `node.refreshMembership()` → `NodeState.revoked` → a `.revoked`
+availability + roster/detail surfacing. Full findings + sketch in the `revocation-detection-gap`
+memory.
+
 > **Infra note (found 2026-07-17):** the target has **no `INFOPLIST_FILE`**, so `ios/Info.plist`
 > (the `NSAllowsLocalNetworking` ATS file) is **inert** — the built `Info.plist` has no ATS
 > entry, yet loopback browsing works anyway on iOS 26. Add per-key Info.plist values via
