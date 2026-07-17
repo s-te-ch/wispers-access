@@ -63,6 +63,15 @@ final class ShareManager {
             if let info = try? await node.groupInfo(), let name = info.name, !name.isEmpty {
                 store.setNickname(name, for: id)
             }
+            // `storage` owns the callbacks holder and frees it on deinit, but the
+            // node calls back into it during register/activate (saveRootKey,
+            // saveRegistration). Keep it alive until they've all returned so
+            // release-build ARC can't drop it after `restoreOrInit`.
+            withExtendedLifetime(storage) {}
+            // Activation has now persisted, so prime the share's status from a
+            // fresh (activated) node — otherwise the roster keeps the "CHECKING"
+            // that a status poll fired mid-join (before activation landed) left.
+            await status.refresh([id], using: sessions)
             return id
         } catch {
             wipe(id)

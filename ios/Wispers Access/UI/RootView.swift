@@ -1,24 +1,25 @@
 import SwiftUI
 
-/// The app's root: the share list (which pushes detail), with the full-screen
-/// browser presented over it. The browser stays alive across dismissals — its
-/// open sessions persist in `manager.browser`.
+/// The app's root: a navigation stack rooted at the share roster. The roster is
+/// both home and switcher — tapping a share pushes its browser, the ⓘ pushes the
+/// detail screen. There's no modal browser and no separate open-shares list;
+/// backing out to the roster is how you switch between shares.
 struct RootView: View {
-    @Environment(ShareManager.self) private var manager
-
     var body: some View {
         NavigationStack {
             ShareListScreen()
-        }
-        .fullScreenCover(isPresented: presented) {
-            BrowserView()
+                .navigationDestination(for: ShareRoute.self) { route in
+                    switch route {
+                    case .browse(let id): BrowserView(shareID: id)
+                    case .detail(let id): ShareDetailScreen(shareID: id)
+                    }
+                }
         }
     }
+}
 
-    private var presented: Binding<Bool> {
-        Binding(
-            get: { manager.browser.isPresented },
-            set: { manager.browser.isPresented = $0 }
-        )
-    }
+/// A destination reachable from the roster.
+enum ShareRoute: Hashable {
+    case browse(ShareID)
+    case detail(ShareID)
 }

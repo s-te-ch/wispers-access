@@ -43,9 +43,7 @@ struct ShareDetailScreen: View {
                 InfoCard(label: "JOINED", value: date(share.createdAt))
             }
             VStack(spacing: 8) {
-                Button {
-                    manager.browser.open(share, using: manager.sessions)
-                } label: {
+                NavigationLink(value: ShareRoute.browse(shareID)) {
                     Text("Open share ↗").accessFilledButton()
                 }
                 Button {

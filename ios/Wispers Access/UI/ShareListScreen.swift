@@ -1,9 +1,9 @@
 import SwiftUI
 
-/// The roster of joined shares — Android-parity layout: the wordmark, a
-/// "YOUR SHARES" section, cards (avatar · status · name), and a floating add
-/// button. Tapping a card opens the detail screen; the browser is one step
-/// deeper (detail → Open).
+/// The roster of joined shares, and the home + switcher in one surface: the
+/// wordmark, a "YOUR SHARES" section, cards (avatar · status · name), and a
+/// floating add button. Tapping a card opens/resumes its browser (a warm session
+/// shows a live marker); the trailing ⓘ opens the detail screen (info + Remove).
 struct ShareListScreen: View {
     @Environment(ShareStore.self) private var store
     @Environment(ShareManager.self) private var manager
@@ -65,17 +65,37 @@ struct ShareListScreen: View {
     private var shareCards: some View {
         VStack(spacing: 12) {
             ForEach(store.shares) { share in
-                NavigationLink {
-                    ShareDetailScreen(shareID: share.id)
-                } label: {
-                    ShareCard(
-                        share: share,
-                        availability: manager.status.availability(for: share.id)
-                    )
-                }
-                .buttonStyle(.plain)
+                shareRow(share)
             }
         }
+    }
+
+    /// One roster row: the card taps through to the browser; the trailing ⓘ taps
+    /// through to the detail screen. Two side-by-side hit targets inside one card.
+    private func shareRow(_ share: ShareMetadata) -> some View {
+        HStack(spacing: 8) {
+            NavigationLink(value: ShareRoute.browse(share.id)) {
+                ShareCard(
+                    share: share,
+                    availability: manager.status.availability(for: share.id),
+                    isLive: manager.browser.isWarm(share.id)
+                )
+            }
+            .buttonStyle(.plain)
+
+            NavigationLink(value: ShareRoute.detail(share.id)) {
+                Image(systemName: "info.circle")
+                    .font(.title3)
+                    .foregroundStyle(AccessColor.onSurfaceVariant)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Share details")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 16)
+        .background(AccessColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var empty: some View {
@@ -102,10 +122,14 @@ struct ShareListScreen: View {
 private struct ShareCard: View {
     let share: ShareMetadata
     let availability: Availability
+    let isLive: Bool
 
     var body: some View {
         HStack(spacing: 16) {
             ShareAvatar(nickname: name, size: 48)
+                .overlay(alignment: .topTrailing) {
+                    if isLive { liveBadge }
+                }
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     StatusDot(availability: availability)
@@ -120,13 +144,18 @@ private struct ShareCard: View {
                     .multilineTextAlignment(.leading)
             }
             Spacer(minLength: 8)
-            Image(systemName: "chevron.right")
-                .font(.footnote.weight(.semibold))
-                .foregroundStyle(AccessColor.onSurfaceVariant)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 16)
-        .background(AccessColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(Rectangle())
+    }
+
+    /// Subtle presence badge on the avatar: this share has a warm session open.
+    private var liveBadge: some View {
+        Circle()
+            .fill(AccessColor.primaryDark)
+            .frame(width: 13, height: 13)
+            .overlay(Circle().stroke(AccessColor.surface, lineWidth: 2.5))
+            .offset(x: 3, y: -3)
+            .accessibilityLabel("Open")
     }
 
     private var name: String {

@@ -78,15 +78,16 @@ actor SessionManager {
         if let conn = connections.removeValue(forKey: shareID) {
             try? await conn.closeGracefully()
         }
-        var node = nodes.removeValue(forKey: shareID)
-        if node == nil,
-            let storage = try? await storageProvider(shareID),
-            let restored = try? await storage.restoreOrInit() {
-            node = restored.0
-        }
-        if let node {
-            try? await node.logout()
-        }
+        // Discard any cached node — its `NodeStorage` (and the callbacks holder
+        // it owns) was freed after `restoreOrInit`, so logging out through it
+        // would call `deleteRootKey` on freed memory. Restore a fresh node from a
+        // live storage instead, and keep that storage alive across `logout()`.
+        nodes.removeValue(forKey: shareID)
+        guard let storage = try? await storageProvider(shareID),
+            let (node, _) = try? await storage.restoreOrInit()
+        else { return }
+        try? await node.logout()
+        withExtendedLifetime(storage) {}
     }
 
     private func tryOpen(_ shareID: ShareID) async throws -> StreamLease {
@@ -105,8 +106,20 @@ actor SessionManager {
         // storageProvider applies `overrideHubAddr` before returning, so the
         // node restores against the share's own (possibly self-hosted) hub.
         let storage = try await storageProvider(shareID)
-        let (node, _) = try await storage.restoreOrInit()
-        nodes[shareID] = node
+        let (node, state) = try await storage.restoreOrInit()
+        // Only cache a fully-usable (activated) node. `join` adds its share to the
+        // roster before it finishes registering/activating, which restarts the
+        // status poll and can restore this share mid-join — yielding a Pending node
+        // whose persisted activation hasn't landed yet. Caching that would wedge the
+        // share at "CHECKING" for the whole session (a restart "fixes" it only
+        // because it clears this cache). Leaving a non-activated node uncached lets
+        // the next resolve re-restore once activation has persisted.
+        if state == .activated {
+            nodes[shareID] = node
+        }
+        // The storage handle is intentionally NOT retained: a restored node
+        // operates (QUIC, groupInfo) without it — only register/activate/logout
+        // call back into the storage, and those paths own a live storage locally.
         return node
     }
 
