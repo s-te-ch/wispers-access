@@ -37,7 +37,10 @@ final class ShareManager {
     /// Joins a share from a `wax_` invite code: parse → persist metadata (incl.
     /// any self-hosted backend) → restore/init the node → register → activate →
     /// adopt the connectivity group's name as the label. On any failure the
-    /// half-created share is rolled back so a retry is clean.
+    /// half-created share is rolled back so a retry is clean — including
+    /// deregistering from the hub if registration got far enough to leave a node
+    /// there (otherwise a failed activation would strand a `.registered` node
+    /// server-side, and repeated retries would pile them up).
     @discardableResult
     func join(inviteCode: String) async throws -> ShareID {
         let invite = try InviteCode.parse(inviteCode)
@@ -74,6 +77,12 @@ final class ShareManager {
             await status.refresh([id], using: sessions)
             return id
         } catch {
+            // Roll back the partial join. `logoutAndDiscard` deregisters from the
+            // hub iff a registration actually persisted (so it undoes a completed
+            // `register` even when `activate` then failed) and no-ops for failures
+            // that never reached the hub; `wipe` then clears local secrets + the
+            // roster entry.
+            await sessions.logoutAndDiscard(id)
             wipe(id)
             throw error
         }
