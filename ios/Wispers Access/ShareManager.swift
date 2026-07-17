@@ -88,11 +88,16 @@ final class ShareManager {
         }
     }
 
-    /// Removes a share: drops it from the roster immediately (so the UI updates
-    /// at once), then best-effort logs the node out of the hub — deregistering
-    /// this device — and wipes its Keychain secrets. Local removal is instant;
-    /// hub deregistration tolerates being offline.
+    /// Removes a share: tears down any open browse session and drops it from the
+    /// roster immediately (so the UI updates at once), then best-effort logs the
+    /// node out of the hub — deregistering this device — and wipes its Keychain
+    /// secrets. Local removal is instant; hub deregistration tolerates being
+    /// offline.
     func delete(_ id: ShareID) {
+        // Stop the warm browse session first: its loopback proxy holds the node
+        // we're about to log out, and leaving it up would leak the proxy (and show
+        // a broken page if its browser is on screen).
+        browser.close(id)
         store.remove(id)
         Task {
             await sessions.logoutAndDiscard(id)
