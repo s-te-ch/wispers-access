@@ -42,6 +42,18 @@ actor SessionManager {
         }
     }
 
+    /// Hub-reported availability of the share's serving node (node 1), or nil
+    /// when the hub can't be reached (typically this device is offline).
+    func isServingNodeOnline(_ shareID: ShareID) async -> Bool? {
+        do {
+            let node = try await resolveNode(shareID)
+            let info = try await node.groupInfo()
+            return info.nodes.first { $0.nodeNumber == Self.servingNodeNumber }?.isOnline
+        } catch {
+            return nil
+        }
+    }
+
     /// Evicts and closes `lease`'s connection (unless already replaced).
     func invalidate(_ shareID: ShareID, _ lease: StreamLease) async {
         await evict(shareID, lease.connection)
@@ -57,12 +69,24 @@ actor SessionManager {
         return Array(stale.keys)
     }
 
-    /// Tears down a share's cached node + connection (e.g. when it's removed).
-    func discard(_ shareID: ShareID) async {
+    /// Logs the share's node out of the hub — deregistering this device from the
+    /// roster — then drops its cached node + connection. Best-effort: an
+    /// unreachable hub doesn't block teardown (the roster entry lingers until
+    /// pruned). Restores a node from storage if one isn't cached, since `logout`
+    /// needs a live handle.
+    func logoutAndDiscard(_ shareID: ShareID) async {
         if let conn = connections.removeValue(forKey: shareID) {
             try? await conn.closeGracefully()
         }
-        nodes.removeValue(forKey: shareID)
+        var node = nodes.removeValue(forKey: shareID)
+        if node == nil,
+            let storage = try? await storageProvider(shareID),
+            let restored = try? await storage.restoreOrInit() {
+            node = restored.0
+        }
+        if let node {
+            try? await node.logout()
+        }
     }
 
     private func tryOpen(_ shareID: ShareID) async throws -> StreamLease {

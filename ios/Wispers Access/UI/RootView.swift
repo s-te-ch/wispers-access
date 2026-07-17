@@ -1,38 +1,24 @@
 import SwiftUI
 
-/// The app's root: the roster of joined shares, or an empty state prompting the
-/// first join. The toolbar and empty state both open the add-share sheet.
+/// The app's root: the share list (which pushes detail), with the full-screen
+/// browser presented over it. The browser stays alive across dismissals — its
+/// open sessions persist in `manager.browser`.
 struct RootView: View {
-    @Environment(ShareStore.self) private var store
-    @State private var showingAdd = false
+    @Environment(ShareManager.self) private var manager
 
     var body: some View {
         NavigationStack {
-            Group {
-                if store.shares.isEmpty {
-                    ContentUnavailableView {
-                        Label("No shares yet", systemImage: "square.grid.2x2")
-                    } description: {
-                        Text("Join a share with an invite code from whoever is hosting it.")
-                    } actions: {
-                        Button("Add share") { showingAdd = true }
-                            .buttonStyle(.borderedProminent)
-                    }
-                } else {
-                    ShareListScreen()
-                }
-            }
-            .navigationTitle("Wispers Access")
-            .toolbar {
-                ToolbarItem(placement: .primaryAction) {
-                    Button { showingAdd = true } label: {
-                        Label("Add share", systemImage: "plus")
-                    }
-                }
-            }
-            .sheet(isPresented: $showingAdd) {
-                AddShareScreen()
-            }
+            ShareListScreen()
         }
+        .fullScreenCover(isPresented: presented) {
+            BrowserView()
+        }
+    }
+
+    private var presented: Binding<Bool> {
+        Binding(
+            get: { manager.browser.isPresented },
+            set: { manager.browser.isPresented = $0 }
+        )
     }
 }

@@ -11,6 +11,12 @@ import WispersConnect
 final class ShareManager {
     let store: ShareStore
 
+    /// Per-share serving-node availability, polled while a screen is visible.
+    let status = ShareStatusStore()
+
+    /// The shares currently open for browsing, switchable in-app.
+    let browser = BrowseSessionStore()
+
     /// App-wide cache of live nodes + QUIC connections for browsing. Lazy so its
     /// closures can capture `self` weakly; `@ObservationIgnored` since it isn't
     /// view-observable state.
@@ -29,8 +35,9 @@ final class ShareManager {
     }
 
     /// Joins a share from a `wax_` invite code: parse → persist metadata (incl.
-    /// any self-hosted backend) → restore/init the node → register → activate.
-    /// On any failure the half-created share is rolled back so a retry is clean.
+    /// any self-hosted backend) → restore/init the node → register → activate →
+    /// adopt the connectivity group's name as the label. On any failure the
+    /// half-created share is rolled back so a retry is clean.
     @discardableResult
     func join(inviteCode: String) async throws -> ShareID {
         let invite = try InviteCode.parse(inviteCode)
@@ -50,6 +57,12 @@ final class ShareManager {
             try await node.register(token: invite.registrationToken)
             try await node.activate(activationCode: invite.activationCode)
             store.markConnected(id)
+            // Adopt the connectivity group's display name as the label — best
+            // effort: the share is already joined and usable, so a failed
+            // groupInfo() (or a blank name) must not fail the join.
+            if let info = try? await node.groupInfo(), let name = info.name, !name.isEmpty {
+                store.setNickname(name, for: id)
+            }
             return id
         } catch {
             wipe(id)
@@ -57,10 +70,16 @@ final class ShareManager {
         }
     }
 
-    /// Tears a share down locally: wipes its Keychain secrets and metadata. (Hub
-    /// logout — `node.logout()` — is deferred to the teardown UI in a later phase.)
+    /// Removes a share: drops it from the roster immediately (so the UI updates
+    /// at once), then best-effort logs the node out of the hub — deregistering
+    /// this device — and wipes its Keychain secrets. Local removal is instant;
+    /// hub deregistration tolerates being offline.
     func delete(_ id: ShareID) {
-        wipe(id)
+        store.remove(id)
+        Task {
+            await sessions.logoutAndDiscard(id)
+            try? KeychainShareStore(shareID: id.value).deleteAll()
+        }
     }
 
     /// A `NodeStorage` for the share, already pointed at the share's self-hosted

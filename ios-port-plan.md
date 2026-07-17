@@ -85,9 +85,72 @@ the Android codec (RFC 4648 no-pad, matches Rust `data_encoding::BASE32_NOPAD`).
   a loop-free C callback parser that streams cleanly, at ~1/80th the dependency weight.)
   Builds + tests green (parser unit tests + a real-`NWListener` proxy integration test), and
   **live browse against a running `waserver serve` verified working** (2026-07-16).
-- **P3** — polish (icons, hub-online status, pull-to-refresh, teardown/logout UI,
-  QR-scan join). Foreground-only for v1 (iOS background limits are stricter than Android;
-  matches current Android reality).
+- **P3 — in progress.** Done: teardown/logout (best-effort `node.logout()` + confirm),
+  hub-online status (`groupInfo()` poll → status dot), nickname from `groupInfo().name`,
+  and a **UI-parity pass** matching the Android design (wordmark from the real SVG, YOUR
+  SHARES cards with avatar + status, `ShareDetailScreen`, nav `List→Detail→Open→Browse`),
+  plus **multi-session browsing** — the iOS answer to Android's per-share task switcher:
+  since iPhone has no per-document OS switcher, open shares live concurrently in-app
+  (`BrowseSessionStore` keeps each share's proxy + `WKWebView` alive) and switch via a
+  full-screen browser with a Safari-style tab overview (see [[ios-multi-session-switching]]).
+  Remaining: add-flow redesign (Enter/Scan tabs + step progress) + QR scanner, quick
+  actions (app-icon long-press), optional favicon harvesting for avatars. Foreground-only
+  for v1 (iOS background limits are stricter than Android; matches current Android reality).
+
+## Browse UX redesign — agreed 2026-07-16, TODO (supersedes the cover + tab-overview)
+
+Decision: **the roster is the home *and* the switcher — one surface.** iOS-native, not
+Android-parity (Android's tap→detail + OS task switcher don't apply; we can't use the OS
+switcher, so we unify in-app). This replaces the current (uncommitted) full-screen-cover
+browser + separate "Open shares" tab overview, which felt like two lists + a modal "drawn
+over" mode.
+
+**Model**
+- Share list = `NavigationStack` **root = the landing, always** (no empty-browser state —
+  the browser is never the base). Open the app → you're on your shares.
+- Row = avatar · name · subtle status (online dot; a subtle "live" marker when a session
+  is warm) · a trailing **ⓘ info button** (the iOS detail-disclosure accessory; the
+  convention, more discoverable than swipe/long-press).
+  - **Tap row → open/resume** → **push** a full-screen browser (resume the retained
+    web view if the session is warm).
+  - **ⓘ → detail** screen (status, joined / last-connected, backend, **Remove**).
+- **Back → roster.** Backing out is also how you switch (the roster shows what's live; tap
+  another). No tab overview, no second list.
+- **Remove**: in detail (via ⓘ) with confirm; optionally also swipe-to-delete on the row.
+- Sessions stay **warm with a TTL** (~5 min): a backgrounded session's proxy + `WKWebView`
+  stay alive so re-open is instant; evict after the timeout to free resources. Satisfies
+  "several shares open at once" (you view one at a time, like any full-screen app).
+
+**Implementation deltas from the current uncommitted code**
+- `BrowserView`: `fullScreenCover` → **pushed screen** (`navigationDestination`). Show only
+  the pushed share's session (no ZStack-of-all). Delete `TabOverview` + the tab button;
+  the roster is the switcher. Back is the nav bar; keep reload.
+- `RootView`: drop the `fullScreenCover`; the list row tap pushes the browser.
+- `ShareListScreen`: row tap = open (push); add a trailing **ⓘ** → `ShareDetailScreen`; add
+  the subtle live marker. Remove the row→detail NavigationLink.
+- `ShareDetailScreen`: keep, but reached via ⓘ (not row tap); keep Remove. Its "Open" can
+  stay or go (row tap already opens).
+- `BrowseSessionStore`: add per-session **TTL eviction** (timer reset while it's the pushed
+  session; on expiry `session.stop()` + remove). Drop `isPresented`/cover-visibility; the
+  pushed shareID is "active". See [[ios-multi-session-switching]].
+
+**Remaining P3 after the redesign**
+- **Add-flow redesign** — Enter code / Scan QR segmented tabs, step-by-step join progress
+  (Validating / Generating identity / Registering / Activating / Joined "name"), done state
+  (Open / Back to list) — see the Android `AddShareScreen` + screenshots.
+- **QR scanner** — VisionKit `DataScannerViewController`; needs
+  `INFOPLIST_KEY_NSCameraUsageDescription`; only exercises on a real device.
+- **Quick actions** — app-icon long-press → recent shares (`UIApplicationShortcutItem`),
+  agreed for v1.
+- **Favicon harvesting** for avatars (optional) — WKWebView JS on page-finish → per-share
+  icon store; today avatars are always the green letter tile.
+
+**Status (uncommitted since the last commit, which was the llhttp pivot + .gitignore):**
+nickname-from-`groupInfo().name`, teardown/logout (best-effort `node.logout()` + confirm),
+the UI-parity pass (theme, avatar, status poll + dot, `ShareDetailScreen`, list redesign,
+real logo SVG), and multi-session browse. The browse redesign above **reworks** the
+multi-session browse (cover→push, drop tab overview, tap=open, ⓘ=detail, TTL) — so review
+before committing, or commit the rest and land the redesign as its own change.
 
 ## Build / verify
 
