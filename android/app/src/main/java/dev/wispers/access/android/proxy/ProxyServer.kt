@@ -11,10 +11,13 @@ import io.ktor.server.cio.CIO
 import io.ktor.server.engine.EmbeddedServer
 import io.ktor.server.engine.embeddedServer
 import io.ktor.server.request.header
+import io.ktor.server.request.httpMethod
 import io.ktor.server.response.respond
 import io.ktor.server.response.respondText
 import javax.inject.Inject
 import javax.inject.Singleton
+import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.ensureActive
 
 /**
  * Local HTTP/1 proxy server. Equivalent of waclient's `serve()` loop.
@@ -52,27 +55,58 @@ class ProxyServer @Inject constructor(
         val shareId = parseShareFromHost(host)
             ?: return call.respond(HttpStatusCode.NotFound, "unknown host")
 
+        // A suspect connection (cached across a long background stint) may be
+        // silently dead, so its exchange runs against a short probe deadline. If
+        // the probe fails before any response arrived, the failed attempt has
+        // evicted the connection — replay once, dialing a fresh one. Only
+        // bodyless requests replay: the request body channel reads once, and a
+        // request with side effects must not run twice on a false alarm.
+        if (forwardAttempt(call, shareId, mayReplay = canReplay(call))) return
+        Log.i(TAG, "probe failed, replaying on a fresh connection")
+        forwardAttempt(call, shareId, mayReplay = false)
+    }
+
+    /** Forwards once. Returns true when the call was handled, false to replay. */
+    private suspend fun forwardAttempt(
+        call: ApplicationCall,
+        shareId: ShareId,
+        mayReplay: Boolean,
+    ): Boolean {
         val lease = try {
             sessionManager.openStream(shareId)
         } catch (e: Exception) {
             Log.w(TAG, "openStream failed: ${e.message}")
-            return respondErrorPage(call, e.message)
+            respondErrorPage(call, e.message)
+            return true
         }
 
+        val suspect = sessionManager.isSuspect(lease)
+        var responded = false
         try {
-            UpstreamClient(lease.stream, rewriter, shareId).forward(call)
+            UpstreamClient(lease.stream, rewriter, shareId).forward(call, suspect) {
+                responded = true
+                sessionManager.confirmHealthy(lease)
+            }
+            return true
         } catch (e: Exception) {
             Log.w(TAG, "proxy error: ${e.message}")
             // A failure mid-request usually means the connection died under us
             // (stream opens still succeed on a dead connection) — evict it so the
-            // next request reconnects instead of hitting the same corpse.
+            // next attempt reconnects instead of hitting the same corpse.
             sessionManager.invalidate(shareId, lease)
+            // A cancelled call must propagate, not replay or respond.
+            coroutineContext.ensureActive()
+            if (mayReplay && suspect && !responded) return false
             // If we haven't responded yet, surface the error page; if we have, this is a no-op.
             runCatching { respondErrorPage(call, e.message) }
+            return true
         } finally {
             runCatching { lease.stream.close() }
         }
     }
+
+    private fun canReplay(call: ApplicationCall): Boolean =
+        call.request.httpMethod.value.uppercase() in REPLAYABLE_METHODS
 
     private suspend fun respondErrorPage(call: ApplicationCall, message: String?) {
         val safe = (message ?: "unknown error")
@@ -121,5 +155,6 @@ class ProxyServer @Inject constructor(
     private companion object {
         const val FIXED_PORT = 10774
         const val TAG = "ProxyServer"
+        val REPLAYABLE_METHODS = setOf("GET", "HEAD")
     }
 }

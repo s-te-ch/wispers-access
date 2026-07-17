@@ -25,6 +25,11 @@ import kotlinx.coroutines.withTimeout
  * still succeed (it's local bookkeeping), so callers must report mid-request failures
  * via [invalidate] — otherwise the dead connection stays cached and every later request
  * fails the same way.
+ *
+ * Connections cached across a long background stint are marked *suspect*
+ * ([markConnectionsSuspect]): they look healthy locally but may have died silently while
+ * Android froze the process. ProxyServer runs exchanges on a suspect connection with a
+ * short probe deadline and reports the first proof of life via [confirmHealthy].
  */
 @Singleton
 class SessionManager @Inject constructor(
@@ -35,6 +40,11 @@ class SessionManager @Inject constructor(
 
     private val connMutex = Mutex()
     private val connections = mutableMapOf<ShareId, QuicConnection>()
+
+    // Guarded by synchronized(suspectConns), not connMutex, so the proxy's hot
+    // path can query it without suspending. Entries are removed whenever their
+    // connection leaves [connections].
+    private val suspectConns = mutableSetOf<QuicConnection>()
 
     /** A stream plus the connection it came from, so [invalidate] can evict exactly that connection. */
     class StreamLease internal constructor(
@@ -57,6 +67,27 @@ class SessionManager @Inject constructor(
     }
 
     /**
+     * Marks every currently cached connection suspect. Called when the app
+     * returns to the foreground after long enough in the background that
+     * keepalives may have stopped (frozen process) and the path under an idle
+     * connection may have expired — the connection object itself learns
+     * nothing of this, so the next exchange must probe instead of trust.
+     */
+    suspend fun markConnectionsSuspect() {
+        val cached = connMutex.withLock { connections.values.toList() }
+        synchronized(suspectConns) { suspectConns.addAll(cached) }
+    }
+
+    /** Whether [lease]'s connection has yet to prove it survived a background stint. */
+    fun isSuspect(lease: StreamLease): Boolean =
+        synchronized(suspectConns) { lease.connection in suspectConns }
+
+    /** A response arrived over [lease]'s connection: it is proven alive. */
+    fun confirmHealthy(lease: StreamLease) {
+        synchronized(suspectConns) { suspectConns.remove(lease.connection) }
+    }
+
+    /**
      * Drops and closes every cached connection. Called when the device's default
      * network changes: connections on the old network blackhole silently, so
      * reconnecting eagerly beats waiting for per-request timeouts to flush them.
@@ -69,6 +100,7 @@ class SessionManager @Inject constructor(
             connections.clear()
             all
         }
+        synchronized(suspectConns) { suspectConns.removeAll(stale.values.toSet()) }
         for (conn in stale.values) runCatching { conn.closeAsync() }
         return stale.keys.toList()
     }
@@ -92,7 +124,10 @@ class SessionManager @Inject constructor(
      */
     suspend fun removeShare(shareId: ShareId) {
         connMutex.withLock { connections.remove(shareId) }
-            ?.let { runCatching { it.closeAsync() } }
+            ?.let {
+                synchronized(suspectConns) { suspectConns.remove(it) }
+                runCatching { it.closeAsync() }
+            }
         val node = nodeMutex.withLock { nodes.remove(shareId) }
             ?: runCatching { repo.storageFor(shareId).restoreOrInitNode().first }.getOrNull()
         node?.let { runCatching { it.logout() } }
@@ -129,6 +164,7 @@ class SessionManager @Inject constructor(
             connMutex.withLock {
                 if (connections[shareId] === conn) connections.remove(shareId)
             }
+            synchronized(suspectConns) { suspectConns.remove(conn) }
             runCatching { conn.closeAsync() }
         }
 

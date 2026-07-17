@@ -42,7 +42,17 @@ internal class UpstreamClient(
     private val rewriter: HeaderRewriter,
     private val shareId: ShareId,
 ) {
-    suspend fun forward(call: ApplicationCall) {
+    /**
+     * [suspectConnection] shortens the head deadline to a probe: the connection may
+     * have died silently in the background, and the caller replays on a fresh one if
+     * the probe fails. [onResponseHead] fires once the response head has arrived —
+     * the connection is proven alive from that point on.
+     */
+    suspend fun forward(
+        call: ApplicationCall,
+        suspectConnection: Boolean,
+        onResponseHead: () -> Unit,
+    ) {
         val upgrade = isUpgradeRequest(call)
         val request = buildOutboundRequest(call, upgrade)
         val reader = StreamReader(stream)
@@ -51,10 +61,12 @@ internal class UpstreamClient(
         // this read forever — no error, no eviction, no recovery. The body pipe (and
         // the upgraded relay) below are exempt so large/slow/long-lived transfers
         // aren't cut off.
-        val response = withTimeout(EXCHANGE_TIMEOUT_MS) {
+        val deadline = if (suspectConnection) PROBE_TIMEOUT_MS else EXCHANGE_TIMEOUT_MS
+        val response = withTimeout(deadline) {
             sendRequest(request, call.receiveChannel())
             readResponseHead(reader, upgrade)
         }
+        onResponseHead()
         Log.d(TAG, "${request.method} ${request.target} → ${response.status}")
 
         if (upgrade && response.status == HttpStatusCode.SwitchingProtocols.value) {
@@ -374,6 +386,14 @@ internal class UpstreamClient(
         const val TAG = "UpstreamClient"
         const val BUFFER_SIZE = 8192
         const val EXCHANGE_TIMEOUT_MS = 15_000L
+
+        // Probe deadline for a suspect connection: long enough for the path RTT
+        // plus a couple of QUIC loss-recovery cycles, short enough that a dead
+        // connection is detected (and the request replayed) before the user
+        // gives up. Deliberately a bet that the upstream answers fast — a slow
+        // upstream on a live-but-suspect connection loses the bet and pays an
+        // unnecessary reconnect, once.
+        const val PROBE_TIMEOUT_MS = 2_500L
         val CRLF = byteArrayOf(0x0D, 0x0A)
         val FINAL_CHUNK = "0\r\n\r\n".toByteArray(Charsets.ISO_8859_1)
         val HOP_BY_HOP = setOf(

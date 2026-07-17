@@ -6,6 +6,7 @@ import android.webkit.WebView
 import dagger.hilt.android.HiltAndroidApp
 import dev.wispers.access.android.proxy.NetworkMonitor
 import dev.wispers.access.android.proxy.ProxyServer
+import dev.wispers.access.android.proxy.ResumeMonitor
 import javax.inject.Inject
 
 @HiltAndroidApp
@@ -16,6 +17,9 @@ class WispersAccessApp : Application() {
 
     @Inject
     lateinit var networkMonitor: NetworkMonitor
+
+    @Inject
+    lateinit var resumeMonitor: ResumeMonitor
 
     @Inject
     lateinit var foregroundTracker: ForegroundTracker
@@ -29,5 +33,6 @@ class WispersAccessApp : Application() {
         registerActivityLifecycleCallbacks(foregroundTracker)
         proxyServer.start()
         networkMonitor.start()
+        resumeMonitor.start()
     }
 }
