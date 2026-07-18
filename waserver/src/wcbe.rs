@@ -104,6 +104,7 @@ impl Client {
             self.api_base
         );
         let mut body = HashMap::new();
+        body.insert("ttlProfile", "asynchronous".to_owned());
         if let Some(node_name) = node_name {
             body.insert("nodeName", node_name.to_owned());
         }
