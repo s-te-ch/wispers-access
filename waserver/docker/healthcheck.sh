@@ -5,12 +5,12 @@
 # Dockerfile HEALTHCHECK --start-period covers that window.
 set -uo pipefail
 
-out="$(waserver status 2>/dev/null)" || exit 1
+out="$(waserver status --json 2>/dev/null)" || exit 1
 [[ -z "$out" ]] && exit 1
-grep -q 'No app shares found' <<<"$out" && exit 1
 
-# Any share row (header skipped) not in the 'serving' state (connecting /
-# offline / error) => unhealthy. TODO: move to `waserver status --json` + jq.
-tail -n +2 <<<"$out" | awk '$2 != "serving" { bad=1 } END { exit bad }' || exit 1
+# Healthy iff there is at least one share and none is in a non-'serving'
+# state (connecting / offline / error).
+jq -e '(.shares | length > 0) and all(.shares[]; .server.state == "serving")' \
+  <<<"$out" >/dev/null || exit 1
 
 exit 0

@@ -1,6 +1,7 @@
 # waserver status overhaul — strawman
 
-Status: accepted 2026-07-20 (open questions resolved); implementation phases below
+Status: implemented 2026-07-20 (phases 1–4 done; hosted backend deployed to
+staging + prod; standalone-hub release for self-hosters still to cut)
 
 ## Motivation
 
@@ -175,7 +176,7 @@ self-contained in waserver and shippable immediately.
 
 Ordering: 1 ∥ 2 (independent), 3 needs both, 4 needs only 1.
 
-### Phase 1 — waserver status rework (wispers-access only)
+### Phase 1 — waserver status rework (wispers-access only) — DONE
 
 Everything except the Invites section, against APIs that exist today.
 
@@ -203,7 +204,8 @@ Verify: `cargo build -p waserver` + unit tests for status derivation/JSON
 shape; manual run against a live share and against a stopped daemon (Share +
 Members must still render).
 
-### Phase 2 — backend: list registration tokens (wispers monorepo)
+### Phase 2 — backend: list registration tokens (wispers monorepo) — DONE
+(deployed to staging + prod; standalone-hub release still to cut)
 
 `GET /connectivity-groups/:id/registration-tokens`, both implementations.
 TDD per `connect/AGENTS.md` (tests first).
@@ -227,19 +229,20 @@ TDD per `connect/AGENTS.md` (tests first).
    `tools/export/export_hub.sh` and cut a standalone-hub release for
    self-hosters.
 
-### Phase 3 — waserver Invites section (needs 1 + 2)
+### Phase 3 — waserver Invites section (needs 1 + 2) — DONE
 
 1. **wcbe.rs**: `list_registration_tokens(cg_id)`.
 2. **`status <share>`**: render the Invites section; derive
    `pending (expires in …)` / `used` / `expired`; populate `invites` in the
    JSON.
-3. **Graceful degrade**: a 404 from the endpoint means an old backend —
-   render `Invites: not supported by this backend (update the hub)` and keep
-   JSON `invites: null`. Never fail the command over it.
+3. **Graceful degrade**: any listing failure renders as
+   `Invites: (unavailable: …)` with JSON `invites: null` + `invitesError` —
+   never failing the command. (An explicit old-backend detection existed
+   briefly but was dropped once all backends were updated.)
 4. Verify against a local standalone hub (old build → degrade path, new build
    → history incl. a rolled-back join showing `used` with no member).
 
-### Phase 4 — Coolify integration + cleanup (needs 1)
+### Phase 4 — Coolify integration + cleanup (needs 1) — DONE
 
 1. **docker/Dockerfile**: add `jq` to the runtime image.
 2. **docker/entrypoint.sh**: replace the `awk '{print $1}'` scrape with
@@ -253,7 +256,7 @@ TDD per `connect/AGENTS.md` (tests first).
 - New CLI ↔ old daemon (or old CLI ↔ new daemon): fine — `StatusData`
   additions are optional JSON fields.
 - New waserver ↔ old backend/hub: everything works except Invites, which
-  degrades with an explicit message (Phase 3.3).
+  degrades to `(unavailable: …)` without failing the command (Phase 3.3).
 - Old waserver ↔ new backend: untouched paths only.
 
 ## Open questions (resolved)

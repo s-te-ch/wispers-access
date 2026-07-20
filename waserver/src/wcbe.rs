@@ -57,6 +57,20 @@ pub struct GroupDetail {
     pub nodes: Vec<GroupNode>,
 }
 
+/// One entry of `GET /connectivity-groups/:id/registration-tokens`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RegistrationToken {
+    #[serde(default)]
+    pub node_name: Option<String>,
+    #[serde(default)]
+    pub node_metadata: Option<String>,
+    pub created_at: String, // RFC 3339
+    pub expires_at: String, // RFC 3339
+    #[serde(default)]
+    pub used_at: Option<String>, // RFC 3339
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupNode {
@@ -121,6 +135,27 @@ impl Client {
 
     pub async fn get_connectivity_group(&self, cg_id: &str) -> Result<GroupDetail> {
         let url = format!("{}/connectivity-groups/{cg_id}", self.api_base);
+        let res = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .context("failed to send request")?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            anyhow::bail!("server returned {status}: {body}");
+        }
+        res.json().await.context("failed to parse response")
+    }
+
+    /// Lists recent registration tokens (pending ones plus 7-day history).
+    pub async fn list_registration_tokens(&self, cg_id: &str) -> Result<Vec<RegistrationToken>> {
+        let url = format!(
+            "{}/connectivity-groups/{cg_id}/registration-tokens",
+            self.api_base
+        );
         let res = self
             .client
             .get(&url)

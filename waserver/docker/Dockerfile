@@ -29,9 +29,10 @@ RUN cargo build --release -p waserver
 
 # --- runtime --------------------------------------------------------------
 FROM debian:bookworm-slim
+# jq: the entrypoint and healthcheck consume `waserver status --json`.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-         supervisor ca-certificates bash \
+         supervisor ca-certificates bash jq \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /src/target/release/waserver /usr/local/bin/waserver

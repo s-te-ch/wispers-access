@@ -61,8 +61,10 @@ struct ShareStatus {
     members: Option<Vec<Member>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     members_error: Option<String>,
-    /// TODO: Right now this is always null. Implement when backend support exists.
-    invites: serde_json::Value,
+    /// `null` when the query failed (see `invitesError`).
+    invites: Option<Vec<Invite>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    invites_error: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -78,6 +80,20 @@ struct ServerStatus {
     pid: Option<u32>,
     started_at: Option<String>,      // RFC 3339
     connected_since: Option<String>, // RFC 3339
+}
+
+/// A recent invite. An invite showing `used` with no matching member means the
+/// join was rolled back — issue a new invite.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Invite {
+    node_name: Option<String>,
+    user_id: Option<String>,
+    created_at: String,           // RFC 3339
+    expires_at: String,           // RFC 3339
+    used_at: Option<String>,      // RFC 3339
+    /// `pending` | `used` | `expired`
+    status: &'static str,
 }
 
 #[derive(Serialize)]
@@ -117,12 +133,17 @@ async fn gather_share(name: &str) -> ShareStatus {
         .ok()
         .and_then(|s| s.load_share_config().ok())
         .flatten();
-    let (server, group) = tokio::join!(
+    let (server, group, invites) = tokio::join!(
         query_server(name),
-        query_connectivity_group(config.as_ref())
+        query_connectivity_group(config.as_ref()),
+        query_invites(config.as_ref())
     );
     let (group, members_error) = match group {
         Ok(g) => (Some(g), None),
+        Err(e) => (None, Some(e)),
+    };
+    let (invites, invites_error) = match invites {
+        Ok(tokens) => (Some(tokens.iter().map(to_invite).collect()), None),
         Err(e) => (None, Some(e)),
     };
     ShareStatus {
@@ -134,7 +155,8 @@ async fn gather_share(name: &str) -> ShareStatus {
         server,
         members: group.as_ref().map(to_members),
         members_error,
-        invites: serde_json::Value::Null,
+        invites,
+        invites_error,
     }
 }
 
@@ -215,6 +237,40 @@ async fn query_connectivity_group(
         .get_connectivity_group(&cfg.connectivity_group_id)
         .await
         .map_err(|e| format!("{:#}", e))
+}
+
+async fn query_invites(
+    config: Option<&storage::ShareConfig>,
+) -> Result<Vec<wcbe::RegistrationToken>, String> {
+    let Some(cfg) = config else {
+        return Err("share is not initialised".to_owned());
+    };
+    let client = wcbe::Client::new(&cfg.api_key, &wcbe::api_base(cfg.backend.as_deref()));
+    client
+        .list_registration_tokens(&cfg.connectivity_group_id)
+        .await
+        .map_err(|e| format!("{:#}", e))
+}
+
+fn to_invite(token: &wcbe::RegistrationToken) -> Invite {
+    Invite {
+        node_name: token.node_name.clone(),
+        user_id: token.node_metadata.as_deref().and_then(parse_user_id),
+        created_at: token.created_at.clone(),
+        expires_at: token.expires_at.clone(),
+        used_at: token.used_at.clone(),
+        status: invite_status(token.used_at.as_deref(), &token.expires_at, Utc::now()),
+    }
+}
+
+fn invite_status(used_at: Option<&str>, expires_at: &str, now: DateTime<Utc>) -> &'static str {
+    if used_at.is_some() {
+        return "used";
+    }
+    match parse_rfc3339(expires_at) {
+        Some(expiry) if expiry <= now => "expired",
+        _ => "pending",
+    }
 }
 
 fn to_members(group: &wcbe::GroupDetail) -> Vec<Member> {
@@ -359,6 +415,33 @@ fn print_share_details(s: &ShareStatus) {
         (None, None) => writeln!(&mut tw, "  (unavailable)").unwrap(),
     }
 
+    writeln!(&mut tw, "\nInvites").unwrap();
+    match (&s.invites, &s.invites_error) {
+        (Some(invites), _) if invites.is_empty() => {
+            writeln!(&mut tw, "  (none in the last 7 days)").unwrap()
+        }
+        (Some(invites), _) => {
+            writeln!(&mut tw, "  NODE NAME\tUSER\tCREATED\tSTATUS").unwrap();
+            for i in invites {
+                let status = match i.status {
+                    "pending" => format!("pending (expires in {})", fmt_until(&i.expires_at)),
+                    other => other.to_owned(),
+                };
+                writeln!(
+                    &mut tw,
+                    "  {}\t{}\t{}\t{}",
+                    i.node_name.as_deref().unwrap_or("-"),
+                    i.user_id.as_deref().unwrap_or("-"),
+                    fmt_ago(&i.created_at),
+                    status
+                )
+                .unwrap();
+            }
+        }
+        (None, Some(e)) => writeln!(&mut tw, "  (unavailable: {})", e).unwrap(),
+        (None, None) => writeln!(&mut tw, "  (unavailable)").unwrap(),
+    }
+
     tw.flush().unwrap();
 }
 
@@ -382,6 +465,14 @@ fn fmt_utc(rfc3339: &str) -> String {
 fn fmt_age(rfc3339: &str) -> String {
     match parse_rfc3339(rfc3339) {
         Some(dt) => fmt_duration((Utc::now() - dt).num_seconds().max(0) as u64),
+        None => "?".to_owned(),
+    }
+}
+
+/// Time until a future timestamp as a compact duration, e.g. `23h 4m`.
+fn fmt_until(rfc3339: &str) -> String {
+    match parse_rfc3339(rfc3339) {
+        Some(dt) => fmt_duration((dt - Utc::now()).num_seconds().max(0) as u64),
         None => "?".to_owned(),
     }
 }
@@ -450,7 +541,15 @@ mod tests {
                 server: ServerStatus::offline(),
                 members: None,
                 members_error: None,
-                invites: serde_json::Value::Null,
+                invites: Some(vec![Invite {
+                    node_name: Some("Nick's iPhone".to_owned()),
+                    user_id: Some("nick@example.com".to_owned()),
+                    created_at: "2026-07-20T09:00:00Z".to_owned(),
+                    expires_at: "2026-07-21T09:00:00Z".to_owned(),
+                    used_at: None,
+                    status: "pending",
+                }]),
+                invites_error: None,
             }],
         };
         let json = serde_json::to_value(&report).unwrap();
@@ -462,9 +561,28 @@ mod tests {
         assert_eq!(share["server"]["state"], "offline");
         assert_eq!(share["server"]["hubConnected"], serde_json::Value::Null);
         assert_eq!(share["members"], serde_json::Value::Null);
-        assert_eq!(share["invites"], serde_json::Value::Null);
+        let invite = &share["invites"][0];
+        assert_eq!(invite["nodeName"], "Nick's iPhone");
+        assert_eq!(invite["userId"], "nick@example.com");
+        assert_eq!(invite["usedAt"], serde_json::Value::Null);
+        assert_eq!(invite["status"], "pending");
         // Errors are omitted, not null, when absent.
         assert!(share["server"].get("error").is_none());
         assert!(share.get("membersError").is_none());
+        assert!(share.get("invitesError").is_none());
+    }
+
+    #[test]
+    fn invite_status_derivation() {
+        let now = parse_rfc3339("2026-07-20T12:00:00Z").unwrap();
+        // Used wins, even over expiry.
+        assert_eq!(
+            invite_status(Some("2026-07-20T11:00:00Z"), "2026-07-19T00:00:00Z", now),
+            "used"
+        );
+        assert_eq!(invite_status(None, "2026-07-21T12:00:00Z", now), "pending");
+        assert_eq!(invite_status(None, "2026-07-20T11:59:59Z", now), "expired");
+        // Unparseable expiry defaults to pending rather than crying wolf.
+        assert_eq!(invite_status(None, "garbage", now), "pending");
     }
 }
