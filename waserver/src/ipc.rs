@@ -191,6 +191,21 @@ pub struct StatusData {
     pub started_at: Option<String>, // RFC 3339
     #[serde(default)]
     pub connected_since: Option<String>, // RFC 3339
+    /// This server's own node number in the connectivity group.
+    #[serde(default)]
+    pub node_number: Option<i32>,
+    /// Guests with a live P2P connection to this server right now.
+    #[serde(default)]
+    pub connected_peers: Option<Vec<PeerData>>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PeerData {
+    pub node_number: i32,
+    #[serde(default)]
+    pub user_id: Option<String>,
+    #[serde(default)]
+    pub connected_since: Option<String>, // RFC 3339
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -243,12 +258,24 @@ async fn parse_request(mut reader: BufReader<ReadHalf>) -> std::result::Result<R
 }
 
 async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
+    let peers = handle
+        .connected_peers()
+        .await
+        .into_iter()
+        .map(|p| PeerData {
+            node_number: p.node_number,
+            user_id: p.user_id,
+            connected_since: Some(fmt_rfc3339(p.connected_since)),
+        })
+        .collect();
     Response::success(ResponseData::Status(StatusData {
         connected_to_hub: handle.connected_to_hub().await,
         upstream: handle.upstream().to_string(),
         pid: Some(std::process::id()),
         started_at: Some(fmt_rfc3339(handle.started_at())),
         connected_since: handle.connected_since().await.map(fmt_rfc3339),
+        node_number: handle.own_node_number(),
+        connected_peers: Some(peers),
     }))
 }
 

@@ -80,6 +80,8 @@ struct ServerStatus {
     pid: Option<u32>,
     started_at: Option<String>,      // RFC 3339
     connected_since: Option<String>, // RFC 3339
+    /// This server's own node number in the Members list.
+    node_number: Option<i32>,
 }
 
 /// A recent invite. An invite showing `used` with no matching member means the
@@ -89,9 +91,9 @@ struct ServerStatus {
 struct Invite {
     node_name: Option<String>,
     user_id: Option<String>,
-    created_at: String,           // RFC 3339
-    expires_at: String,           // RFC 3339
-    used_at: Option<String>,      // RFC 3339
+    created_at: String,      // RFC 3339
+    expires_at: String,      // RFC 3339
+    used_at: Option<String>, // RFC 3339
     /// `pending` | `used` | `expired`
     status: &'static str,
 }
@@ -104,7 +106,9 @@ struct Member {
     user_id: Option<String>,
     created_at: String,           // RFC 3339
     last_seen_at: Option<String>, // RFC 3339
-    is_online: Option<bool>,
+    /// Does the guest have a live P2P connection to this server right now?
+    connected_to_server: Option<bool>,
+    connected_since: Option<String>, // RFC 3339
 }
 
 //-- Gathering -----------------------------------------------------------------
@@ -138,6 +142,7 @@ async fn gather_share(name: &str) -> ShareStatus {
         query_connectivity_group(config.as_ref()),
         query_invites(config.as_ref())
     );
+    let (server, live_peers) = server;
     let (group, members_error) = match group {
         Ok(g) => (Some(g), None),
         Err(e) => (None, Some(e)),
@@ -146,6 +151,19 @@ async fn gather_share(name: &str) -> ShareStatus {
         Ok(tokens) => (Some(tokens.iter().map(to_invite).collect()), None),
         Err(e) => (None, Some(e)),
     };
+    let mut members = group.as_ref().map(to_members);
+    match (members.as_mut(), live_peers.as_ref()) {
+        (Some(members), Some(peers)) => {
+            apply_live_connections(members, peers, server.node_number)
+        }
+        // A stopped server has no connections.
+        (Some(members), None) if server.state == "offline" => {
+            for m in members.iter_mut() {
+                m.connected_to_server = Some(false);
+            }
+        }
+        _ => {}
+    }
     ShareStatus {
         name: name.to_owned(),
         display_name: group.as_ref().and_then(|g| g.name.clone()),
@@ -153,16 +171,39 @@ async fn gather_share(name: &str) -> ShareStatus {
         connectivity_group_id: config.map(|c| c.connectivity_group_id),
         group_created_at: group.as_ref().map(|g| g.created_at.clone()),
         server,
-        members: group.as_ref().map(to_members),
+        members,
         members_error,
         invites,
         invites_error,
     }
 }
 
-async fn query_server(share: &str) -> ServerStatus {
+/// Overlay the server's live view onto the backend's member list: while the
+/// daemon runs it knows authoritatively which guests are connected to it.
+fn apply_live_connections(
+    members: &mut [Member],
+    peers: &[ipc::PeerData],
+    own_node_number: Option<i32>,
+) {
+    for m in members.iter_mut() {
+        if own_node_number == Some(m.node_number) {
+            continue; // the server itself; "connected to server" is meaningless
+        }
+        match peers.iter().find(|p| p.node_number == m.node_number) {
+            Some(p) => {
+                m.connected_to_server = Some(true);
+                m.connected_since = p.connected_since.clone();
+            }
+            None => m.connected_to_server = Some(false),
+        }
+    }
+}
+
+/// Queries the daemon; the second element is its live-peer list (`None` when
+/// the daemon is down or predates peer tracking).
+async fn query_server(share: &str) -> (ServerStatus, Option<Vec<ipc::PeerData>>) {
     let Ok(mut client) = ipc::Client::connect(share).await else {
-        return ServerStatus::offline();
+        return (ServerStatus::offline(), None);
     };
     match client.request(&ipc::Request::Status).await {
         Ok(ipc::Response::Success {
@@ -170,7 +211,7 @@ async fn query_server(share: &str) -> ServerStatus {
             ..
         }) => {
             let upstream_reachable = probe_upstream(&s.upstream).await;
-            ServerStatus {
+            let status = ServerStatus {
                 state: if s.connected_to_hub {
                     "serving"
                 } else {
@@ -183,12 +224,16 @@ async fn query_server(share: &str) -> ServerStatus {
                 pid: s.pid,
                 started_at: s.started_at,
                 connected_since: s.connected_since,
-            }
+                node_number: s.node_number,
+            };
+            (status, s.connected_peers)
         }
-        Ok(ipc::Response::Success { .. }) => ServerStatus::error("unexpected response from server"),
-        Ok(ipc::Response::Error { error, .. }) => ServerStatus::error(error),
+        Ok(ipc::Response::Success { .. }) => {
+            (ServerStatus::error("unexpected response from server"), None)
+        }
+        Ok(ipc::Response::Error { error, .. }) => (ServerStatus::error(error), None),
         // Probably went down just now.
-        Err(_) => ServerStatus::offline(),
+        Err(_) => (ServerStatus::offline(), None),
     }
 }
 
@@ -203,6 +248,7 @@ impl ServerStatus {
             pid: None,
             started_at: None,
             connected_since: None,
+            node_number: None,
         }
     }
 
@@ -283,7 +329,8 @@ fn to_members(group: &wcbe::GroupDetail) -> Vec<Member> {
             user_id: n.metadata.as_deref().and_then(parse_user_id),
             created_at: n.created_at.clone(),
             last_seen_at: n.last_seen_at.clone(),
-            is_online: n.is_online,
+            connected_to_server: None,
+            connected_since: None,
         })
         .collect();
     members.sort_by_key(|m| m.node_number);
@@ -312,10 +359,16 @@ fn print_fleet(report: &StatusReport) {
         };
         let upstream = s.server.upstream.as_deref().unwrap_or("-");
         let nodes = match &s.members {
-            Some(m) => {
-                let online = m.iter().filter(|m| m.is_online == Some(true)).count();
-                format!("{}/{} online", online, m.len())
+            // Live server view: connected guests / total guests.
+            Some(m) if m.iter().any(|m| m.connected_to_server.is_some()) => {
+                let connected = m
+                    .iter()
+                    .filter(|m| m.connected_to_server == Some(true))
+                    .count();
+                let guests = m.iter().filter(|m| m.connected_to_server.is_some()).count();
+                format!("{}/{} connected", connected, guests)
             }
+            Some(m) => format!("{} members", m.len()),
             None => "?".to_owned(),
         };
         writeln!(
@@ -389,15 +442,28 @@ fn print_share_details(s: &ShareStatus) {
         (Some(members), _) => {
             writeln!(&mut tw, "  #\tNAME\tUSER\tLAST SEEN\tSTATUS").unwrap();
             for m in members {
-                let last_seen = match (m.is_online, m.last_seen_at.as_deref()) {
-                    (Some(true), _) => "now".to_owned(),
-                    (_, Some(at)) => fmt_ago(at),
-                    (_, None) => "-".to_owned(),
+                let is_self = s.server.node_number == Some(m.node_number);
+                let live_now = m.connected_to_server == Some(true)
+                    || (is_self && s.server.hub_connected == Some(true));
+                let last_seen = if live_now {
+                    "now".to_owned()
+                } else {
+                    match m.last_seen_at.as_deref() {
+                        Some(at) => fmt_ago(at),
+                        None => "-".to_owned(),
+                    }
                 };
-                let status = match m.is_online {
-                    Some(true) => "online",
-                    Some(false) => "offline",
-                    None => "?",
+                let status = if is_self {
+                    "(this server)".to_owned()
+                } else {
+                    match m.connected_to_server {
+                        Some(true) => match &m.connected_since {
+                            Some(since) => format!("connected ({})", fmt_age(since)),
+                            None => "connected".to_owned(),
+                        },
+                        Some(false) => "-".to_owned(),
+                        None => "?".to_owned(),
+                    }
                 };
                 writeln!(
                     &mut tw,
@@ -560,6 +626,7 @@ mod tests {
         assert_eq!(share["connectivityGroupId"], "cg-1");
         assert_eq!(share["server"]["state"], "offline");
         assert_eq!(share["server"]["hubConnected"], serde_json::Value::Null);
+        assert_eq!(share["server"]["nodeNumber"], serde_json::Value::Null);
         assert_eq!(share["members"], serde_json::Value::Null);
         let invite = &share["invites"][0];
         assert_eq!(invite["nodeName"], "Nick's iPhone");
@@ -570,6 +637,37 @@ mod tests {
         assert!(share["server"].get("error").is_none());
         assert!(share.get("membersError").is_none());
         assert!(share.get("invitesError").is_none());
+    }
+
+    #[test]
+    fn live_connections_overlay_members() {
+        let member = |node_number| Member {
+            node_number,
+            name: None,
+            user_id: None,
+            created_at: "2026-07-01T00:00:00Z".to_owned(),
+            last_seen_at: None,
+            connected_to_server: None,
+            connected_since: None,
+        };
+        let mut members = vec![member(1), member(2), member(3)];
+        let peers = vec![ipc::PeerData {
+            node_number: 2,
+            user_id: Some("lara@example.com".to_owned()),
+            connected_since: Some("2026-07-20T10:00:00Z".to_owned()),
+        }];
+        apply_live_connections(&mut members, &peers, Some(1));
+
+        // The server's own row stays untouched.
+        assert_eq!(members[0].connected_to_server, None);
+        // A live guest gets the connection and its start time.
+        assert_eq!(members[1].connected_to_server, Some(true));
+        assert_eq!(
+            members[1].connected_since.as_deref(),
+            Some("2026-07-20T10:00:00Z")
+        );
+        // A guest without a connection is authoritatively not connected.
+        assert_eq!(members[2].connected_to_server, Some(false));
     }
 
     #[test]

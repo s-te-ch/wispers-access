@@ -82,8 +82,6 @@ pub struct GroupNode {
     pub last_seen_at: Option<String>, // RFC 3339
     #[serde(default)]
     pub metadata: Option<String>,
-    #[serde(default)]
-    pub is_online: Option<bool>, // absent when unknown
 }
 
 impl Client {
