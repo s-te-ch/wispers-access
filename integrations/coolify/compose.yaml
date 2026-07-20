@@ -8,21 +8,26 @@
 #
 # Setup in Coolify:
 #   1. New Resource → Docker Compose Empty → paste this file → Deploy.
-#   2. Set the environment variables (Environment Variables tab):
+#   2. Give each fronted app a stable network name (Coolify renames application
+       containers on every redeploy):
+#        - application (git/Dockerfile/image): set "Custom Network Aliases"
+#          in its Network settings, e.g. odoo
+#        - compose resource / one-click service: its service name already works
+#   3. Set the environment variables (Environment Variables tab):
 #        WC_API_KEY  your Wispers Connect API key
 #        SHARES      one or more shares, ';'-separated, each:
-#                       name | display name | <container>:<port>
-#                    e.g.  odoo | Odoo | odoo-abc123:8069 ; wiki | Wiki | wiki-def456:3000
-#                    (<container> is the app's container name — Coolify names it
-#                     <service>-<uuid> — reachable on the shared 'coolify' network.)
+#                       name | display name | <alias>:<port>
+#                    e.g.  odoo | Odoo | odoo:8069 ; wiki | Wiki | wiki:3000
+#                    (<alias> is the stable name from step 2, resolvable on the
+#                     shared 'coolify' network.)
 #        WC_BACKEND  (optional) base URL of a self-hosted Wispers Connect hub,
 #                    e.g. https://myhub.example.com (https only). Leave blank to
 #                    use the managed backend. Pinned per-share at first deploy and
 #                    carried in invite codes, so guests join the same hub.
-#   3. On each app you want reachable, enable "Connect To Predefined Network".
-#   4. Mint invites from this resource's Terminal:
+#   4. On each app you want reachable, enable "Connect To Predefined Network".
+#   5. Mint invites from this resource's Terminal:
 #        waserver invite <share> <device-name> <user@email>
-#        waserver nodes <share>          # list guests
+#        waserver status <share>         # share detail
 #        waserver revoke <share> <node>  # cut one off
 #
 # The only Coolify-specific token here is the network name 'coolify'; swap it for
