@@ -28,7 +28,7 @@ final class BrowseSession: Identifiable {
         onIcon: @escaping (ShareID, Data, Int) -> Void = { _, _, _ in }
     ) {
         self.shareID = share.id
-        self.name = share.nickname.isEmpty ? "Untitled share" : share.nickname
+        self.name = share.nickname.isEmpty ? "Untitled app" : share.nickname
         self.proxy = LoopbackProxy(shareID: share.id, sessions: sessionManager)
         self.harvester = IconHarvester(shareID: share.id, onIcon: onIcon)
 

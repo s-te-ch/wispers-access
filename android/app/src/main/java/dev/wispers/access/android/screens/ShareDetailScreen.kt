@@ -104,7 +104,7 @@ class ShareDetailViewModel @Inject constructor(
         viewModelScope.launch {
             sessionManager.removeShare(shareId)
             repo.deleteShare(shareId)
-            disableShortcut(appContext, shareId, "This share was removed")
+            disableShortcut(appContext, shareId, "This app was removed")
             _removed.value = true
         }
     }
@@ -135,7 +135,7 @@ fun ShareDetailScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text("Share") },
+                title = { Text("Shared app") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -173,9 +173,13 @@ fun ShareDetailScreen(
     if (confirmRemove) {
         AlertDialog(
             onDismissRequest = { confirmRemove = false },
-            title = { Text("Remove share?") },
+            // Name the thing being removed so this can't read as uninstalling the app itself.
+            title = {
+                val name = share?.nickname?.takeIf { it.isNotBlank() } ?: "this app"
+                Text("Remove $name?")
+            },
             text = {
-                Text("This deletes the local share data. You'll need a new invitation code to rejoin.")
+                Text("This removes it from this device. You'll need a new invitation code to rejoin.")
             },
             confirmButton = {
                 TextButton(
@@ -217,7 +221,7 @@ private fun ShareDetailContent(
         StatusRow(availability = availability)
         ShareAvatar(nickname = share.nickname, iconPng = share.iconPng, size = 64.dp)
         Text(
-            text = share.nickname.ifBlank { "Untitled share" },
+            text = share.nickname.ifBlank { "Untitled app" },
             style = MaterialTheme.typography.headlineLarge,
         )
         InfoCardsRow(share = share)
@@ -236,7 +240,7 @@ private fun ShareDetailContent(
                     onClick = onOpen,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Open share ↗")
+                    Text("Open app ↗")
                 }
                 OutlinedButton(
                     onClick = onAddToHomescreen,
@@ -254,7 +258,7 @@ private fun ShareDetailContent(
                     onClick = onRemove,
                     modifier = Modifier.fillMaxWidth(),
                 ) {
-                    Text("Remove share", color = MaterialTheme.colorScheme.error)
+                    Text("Remove from this device", color = MaterialTheme.colorScheme.error)
                 }
             }
         }

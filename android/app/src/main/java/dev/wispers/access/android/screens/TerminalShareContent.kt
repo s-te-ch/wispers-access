@@ -25,15 +25,15 @@ fun TerminalShareExplanation(state: ShareTerminalState, modifier: Modifier = Mod
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = "This share is no longer available",
+                text = "This app is no longer available",
                 style = MaterialTheme.typography.titleMedium,
             )
             Text(
                 text = when (state) {
                     ShareTerminalState.REMOVED ->
-                        "The share was removed by its owner and can't be reached anymore. "
+                        "The app was removed by its owner and can't be reached anymore. "
                     ShareTerminalState.REVOKED ->
-                        "This device's access to the share was revoked by its owner. "
+                        "This device's access to the app was revoked by its owner. "
                 } + "You can remove it from this device; joining again needs a new invitation code.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,

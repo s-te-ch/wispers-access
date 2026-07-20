@@ -8,7 +8,7 @@ struct TerminalShareExplanation: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("This share is no longer available")
+            Text("This app is no longer available")
                 .font(.headline)
                 .foregroundStyle(AccessColor.onSurface)
             Text(explanation)
@@ -24,9 +24,9 @@ struct TerminalShareExplanation: View {
         let what: String
         switch state {
         case .removed:
-            what = "The share was removed by its owner and can't be reached anymore."
+            what = "The app was removed by its owner and can't be reached anymore."
         case .revoked:
-            what = "This device's access to the share was revoked by its owner."
+            what = "This device's access to the app was revoked by its owner."
         }
         return what + " You can remove it from this device; joining again needs a new invitation code."
     }

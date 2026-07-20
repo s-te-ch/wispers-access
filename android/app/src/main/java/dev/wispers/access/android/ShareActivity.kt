@@ -210,7 +210,7 @@ private fun buildShortcut(
     nickname: String,
     iconPng: ByteArray?,
 ): ShortcutInfoCompat {
-    val label = nickname.ifBlank { "Untitled share" }
+    val label = nickname.ifBlank { "Untitled app" }
     return ShortcutInfoCompat.Builder(context, "share-${shareId.value}")
         .setShortLabel(label)
         .setLongLabel(label)

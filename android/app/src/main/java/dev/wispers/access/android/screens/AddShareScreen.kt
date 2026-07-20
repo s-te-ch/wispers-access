@@ -148,7 +148,7 @@ class AddShareViewModel @Inject constructor(
         } catch (e: Exception) {
             createdId?.let { repo.deleteShare(it) }
             _state.update {
-                it.copy(phase = Phase.Idle, error = e.message ?: "Failed to join share.")
+                it.copy(phase = Phase.Idle, error = e.message ?: "Failed to join.")
             }
         }
     }
@@ -181,7 +181,7 @@ fun AddShareScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text("Add a share") },
+                title = { Text("Add an app") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -296,10 +296,10 @@ private fun EnterCodeContent(
             enabled = code.isNotBlank(),
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Join share")
+            Text("Join")
         }
         Text(
-            "Codes are issued by the person who set up the share.",
+            "Codes are issued by the person sharing the app with you.",
             style = MaterialTheme.typography.bodySmall,
         )
     }
@@ -375,7 +375,7 @@ private fun JoinSuccess(
             onClick = onOpen,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Open share")
+            Text("Open app")
         }
         OutlinedButton(
             onClick = onBackToList,

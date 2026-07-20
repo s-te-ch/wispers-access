@@ -105,6 +105,6 @@ class ShareStatusTracker @Inject constructor(
         // second; only a blackholing connect runs into this.
         const val CHECK_TIMEOUT_MS = 10_000L
 
-        const val SHORTCUT_DISABLED_MESSAGE = "This share is no longer available"
+        const val SHORTCUT_DISABLED_MESSAGE = "This app is no longer available"
     }
 }

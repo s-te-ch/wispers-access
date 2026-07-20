@@ -50,7 +50,7 @@ struct BrowserView: View {
 
     private var title: String {
         guard let nickname = store.metadata(for: shareID)?.nickname, !nickname.isEmpty else {
-            return "Share"
+            return "App"
         }
         return nickname
     }

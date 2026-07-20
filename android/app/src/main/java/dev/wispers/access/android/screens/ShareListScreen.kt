@@ -95,7 +95,7 @@ fun ShareListScreen(
                 contentColor = MaterialTheme.colorScheme.onPrimary,
                 shape = CircleShape,
             ) {
-                Icon(Icons.Filled.Add, contentDescription = "Add share")
+                Icon(Icons.Filled.Add, contentDescription = "Add app")
             }
         },
     ) { innerPadding ->
@@ -145,7 +145,7 @@ private fun SectionHeader(count: Int?) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            text = "YOUR SHARES",
+            text = "SHARED WITH YOU",
             style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 1.5.sp),
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -214,7 +214,7 @@ private fun ShareCard(share: Share, availability: ShareAvailability?, onClick: (
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    text = share.nickname.ifBlank { "Untitled share" },
+                    text = share.nickname.ifBlank { "Untitled app" },
                     style = MaterialTheme.typography.headlineSmall,
                     color = AccessOnSurfaceMedium,
                 )
@@ -274,7 +274,7 @@ private fun EmptyShareList() {
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = "No shares yet. Tap + to add one.",
+            text = "No apps yet. Tap + to add one.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

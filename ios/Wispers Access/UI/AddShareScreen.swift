@@ -23,7 +23,7 @@ struct AddShareScreen: View {
                 AccessColor.background.ignoresSafeArea()
                 content.padding(16)
             }
-            .navigationTitle("Add a share")
+            .navigationTitle("Add an app")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if isIdle {
@@ -99,12 +99,12 @@ struct AddShareScreen: View {
             }
 
             Button { Task { await join() } } label: {
-                Text("Join share").accessFilledButton()
+                Text("Join").accessFilledButton()
             }
             .disabled(trimmedCode.isEmpty)
             .opacity(trimmedCode.isEmpty ? 0.5 : 1)
 
-            Text("Codes are issued by the person who set up the share.")
+            Text("Codes are issued by the person sharing the app with you.")
                 .font(.footnote).foregroundStyle(AccessColor.onSurfaceVariant)
         }
     }
@@ -248,7 +248,7 @@ private struct JoinSuccess: View {
             JoinStepList(steps: JoinStep.allCases.map { ($0.label, .done) })
             StepRow(label: nickname.isEmpty ? "Joined" : "Joined “\(nickname)”", status: .done)
             VStack(spacing: 8) {
-                Button(action: onOpen) { Text("Open share ↗").accessFilledButton() }
+                Button(action: onOpen) { Text("Open app ↗").accessFilledButton() }
                 Button(action: onBackToList) {
                     Text("Back to list").accessOutlinedButton(tint: AccessColor.primaryDark)
                 }

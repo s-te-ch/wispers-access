@@ -1,7 +1,7 @@
 import SwiftUI
 
 /// The roster of joined shares, and the home + switcher in one surface: the
-/// wordmark, a "YOUR SHARES" section, cards (avatar · status · name), and a
+/// wordmark, a "SHARED WITH YOU" section, cards (avatar · status · name), and a
 /// floating add button. Tapping a card opens/resumes its browser (a warm session
 /// shows a live marker); the trailing ⓘ opens the detail screen (info + Remove).
 struct ShareListScreen: View {
@@ -56,7 +56,7 @@ struct ShareListScreen: View {
 
     private var sectionHeader: some View {
         HStack {
-            Text("YOUR SHARES")
+            Text("SHARED WITH YOU")
                 .font(.caption.weight(.medium)).tracking(1.5)
             Spacer()
             Text("\(store.shares.count)")
@@ -102,7 +102,7 @@ struct ShareListScreen: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("Share details")
+            .accessibilityLabel("App details")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 16)
@@ -110,7 +110,7 @@ struct ShareListScreen: View {
     }
 
     private var empty: some View {
-        Text("No shares yet. Tap + to add one.")
+        Text("No apps yet. Tap + to add one.")
             .font(.subheadline)
             .foregroundStyle(AccessColor.onSurfaceVariant)
             .frame(maxWidth: .infinity)
@@ -180,7 +180,7 @@ private struct ShareCard: View {
     }
 
     private var name: String {
-        share.nickname.isEmpty ? "Untitled share" : share.nickname
+        share.nickname.isEmpty ? "Untitled app" : share.nickname
     }
 
     private var statusLine: String {

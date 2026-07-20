@@ -27,7 +27,7 @@ enum QuickAction {
             .map { share in
                 UIApplicationShortcutItem(
                     type: openShareType,
-                    localizedTitle: share.nickname.isEmpty ? "Untitled share" : share.nickname,
+                    localizedTitle: share.nickname.isEmpty ? "Untitled app" : share.nickname,
                     localizedSubtitle: nil,
                     icon: UIApplicationShortcutIcon(systemImageName: "globe"),
                     userInfo: [shareIDKey: share.id.value as NSString]

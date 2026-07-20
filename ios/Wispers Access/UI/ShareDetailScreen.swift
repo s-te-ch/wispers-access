@@ -22,7 +22,7 @@ struct ShareDetailScreen: View {
                 Color.clear.onAppear { dismiss() }
             }
         }
-        .navigationTitle("Share")
+        .navigationTitle("Shared app")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             while !Task.isCancelled {
@@ -56,12 +56,12 @@ struct ShareDetailScreen: View {
             } else {
                 VStack(spacing: 8) {
                     NavigationLink(value: ShareRoute.browse(shareID)) {
-                        Text("Open share ↗").accessFilledButton()
+                        Text("Open app ↗").accessFilledButton()
                     }
                     Button {
                         confirmingRemoval = true
                     } label: {
-                        Text("Remove share").accessOutlinedButton(tint: AccessColor.destructive)
+                        Text("Remove from this device").accessOutlinedButton(tint: AccessColor.destructive)
                     }
                 }
             }
@@ -69,19 +69,19 @@ struct ShareDetailScreen: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .confirmationDialog("Remove this share?", isPresented: $confirmingRemoval) {
+        .confirmationDialog("Remove \(name(share))?", isPresented: $confirmingRemoval) {
             Button("Remove", role: .destructive) {
                 manager.delete(shareID)
                 dismiss()
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This device will be removed from the share on the server. You'll need a new invite to rejoin.")
+            Text("This device's access will be removed on the server. You'll need a new invitation code to rejoin.")
         }
     }
 
     private func name(_ share: ShareMetadata) -> String {
-        share.nickname.isEmpty ? "Untitled share" : share.nickname
+        share.nickname.isEmpty ? "Untitled app" : share.nickname
     }
 
     private func date(_ date: Date?) -> String {
