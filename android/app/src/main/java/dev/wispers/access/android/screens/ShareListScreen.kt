@@ -64,11 +64,12 @@ class ShareListViewModel @Inject constructor(
     statusTracker: ShareStatusTracker,
 ) : ViewModel() {
 
-    val shares: StateFlow<List<Share>> = repo.observeShares()
+    /** Null until the first database emission, so "loading" isn't rendered as "no shares". */
+    val shares: StateFlow<List<Share>?> = repo.observeShares()
         .stateIn(
             scope = viewModelScope,
             started = SharingStarted.WhileSubscribed(5_000),
-            initialValue = emptyList(),
+            initialValue = null,
         )
 
     /** Per-share availability; absent key = not checked yet. */
@@ -81,7 +82,8 @@ fun ShareListScreen(
     onShareClick: (ShareId) -> Unit,
     viewModel: ShareListViewModel = hiltViewModel(),
 ) {
-    val shares by viewModel.shares.collectAsState()
+    // Plain value read (not `by`) so the null check below smart-casts.
+    val shares = viewModel.shares.collectAsState().value
     val availability by viewModel.availability.collectAsState()
 
     Scaffold(
@@ -106,12 +108,16 @@ fun ShareListScreen(
             Spacer(Modifier.height(24.dp))
             BrandHeader()
             Spacer(Modifier.height(40.dp))
-            SectionHeader(count = shares.size)
+            SectionHeader(count = shares?.size)
             Spacer(Modifier.height(12.dp))
-            if (shares.isEmpty()) {
-                EmptyShareList()
-            } else {
-                ShareList(shares = shares, availability = availability, onShareClick = onShareClick)
+            when {
+                shares == null -> LoadingShareList()
+                shares.isEmpty() -> EmptyShareList()
+                else -> ShareList(
+                    shares = shares,
+                    availability = availability,
+                    onShareClick = onShareClick,
+                )
             }
         }
     }
@@ -132,7 +138,7 @@ private fun BrandHeader() {
 }
 
 @Composable
-private fun SectionHeader(count: Int) {
+private fun SectionHeader(count: Int?) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
@@ -144,7 +150,7 @@ private fun SectionHeader(count: Int) {
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            text = count.toString(),
+            text = count?.toString() ?: "",
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -243,6 +249,20 @@ private fun StatusDot(availability: ShareAvailability?) {
                     },
                     shape = CircleShape,
                 ),
+        )
+    }
+}
+
+@Composable
+private fun LoadingShareList() {
+    Box(
+        modifier = Modifier.fillMaxSize(),
+        contentAlignment = Alignment.Center,
+    ) {
+        CircularProgressIndicator(
+            modifier = Modifier.size(32.dp),
+            strokeWidth = 3.dp,
+            color = MaterialTheme.colorScheme.primary,
         )
     }
 }
