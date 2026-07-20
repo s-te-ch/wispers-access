@@ -30,7 +30,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Join a Wispers Accept share.
+    /// Join a Wispers Access share.
     Join {
         /// Invite code for the share (`wax_…`), produced by `waserver invite`.
         invite_code: String,
@@ -329,7 +329,7 @@ async fn forward(
             return Ok(error_response(
                 StatusCode::GONE,
                 &format!(
-                    "This share is no longer available on this device — {}.",
+                    "This app is no longer available on this device — {}.",
                     state.describe()
                 ),
             ));
