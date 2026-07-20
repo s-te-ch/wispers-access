@@ -184,6 +184,13 @@ pub enum ResponseData {
 pub struct StatusData {
     pub connected_to_hub: bool,
     pub upstream: String,
+    // TODO: This is optional for backewards compat. Remove with the next version.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    #[serde(default)]
+    pub started_at: Option<String>, // RFC 3339
+    #[serde(default)]
+    pub connected_since: Option<String>, // RFC 3339
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -239,7 +246,14 @@ async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
     Response::success(ResponseData::Status(StatusData {
         connected_to_hub: handle.connected_to_hub().await,
         upstream: handle.upstream().to_string(),
+        pid: Some(std::process::id()),
+        started_at: Some(fmt_rfc3339(handle.started_at())),
+        connected_since: handle.connected_since().await.map(fmt_rfc3339),
     }))
+}
+
+fn fmt_rfc3339(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 async fn handle_invite(

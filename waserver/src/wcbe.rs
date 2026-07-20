@@ -46,6 +46,32 @@ pub struct NodeMetadata {
     pub user_id: String,
 }
 
+/// A connectivity group as returned by `GET /connectivity-groups/:id`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupDetail {
+    pub created_at: String, // RFC 3339
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub nodes: Vec<GroupNode>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupNode {
+    pub node_number: i32,
+    pub created_at: String, // RFC 3339
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub last_seen_at: Option<String>, // RFC 3339
+    #[serde(default)]
+    pub metadata: Option<String>,
+    #[serde(default)]
+    pub is_online: Option<bool>, // absent when unknown
+}
+
 impl Client {
     pub fn new(api_key: &str, api_base: &str) -> Self {
         Self {
@@ -91,6 +117,23 @@ impl Client {
             anyhow::bail!("server returned {status}: {body}");
         }
         Ok(())
+    }
+
+    pub async fn get_connectivity_group(&self, cg_id: &str) -> Result<GroupDetail> {
+        let url = format!("{}/connectivity-groups/{cg_id}", self.api_base);
+        let res = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .context("failed to send request")?;
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            anyhow::bail!("server returned {status}: {body}");
+        }
+        res.json().await.context("failed to parse response")
     }
 
     pub async fn get_registration_token(

@@ -17,6 +17,8 @@ pub struct ServingHandle {
 
 struct Inner {
     wc_handle: RwLock<Option<wc::ServingHandle>>,
+    connected_since: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
+    started_at: chrono::DateTime<chrono::Utc>,
     wcbe_client: wcbe::Client,
     connectivity_group_id: String,
     upstream: Arc<str>,
@@ -27,6 +29,8 @@ impl ServingHandle {
         Self {
             inner: Arc::new(Inner {
                 wc_handle: RwLock::new(None),
+                connected_since: RwLock::new(None),
+                started_at: chrono::Utc::now(),
                 wcbe_client: wcbe::Client::new(api_key, api_base),
                 connectivity_group_id: cg_id.to_owned(),
                 upstream,
@@ -41,6 +45,14 @@ impl ServingHandle {
 
     pub async fn connected_to_hub(&self) -> bool {
         self.inner.wc_handle.read().await.is_some()
+    }
+
+    pub fn started_at(&self) -> chrono::DateTime<chrono::Utc> {
+        self.inner.started_at
+    }
+
+    pub async fn connected_since(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        *self.inner.connected_since.read().await
     }
 
     pub async fn get_registration_token(&self, node_name: &str, user_id: &str) -> Result<String> {
@@ -78,6 +90,7 @@ impl ServingHandle {
 
     async fn set_wc_handle(&self, handle: wc::ServingHandle) {
         *self.inner.wc_handle.write().await = Some(handle);
+        *self.inner.connected_since.write().await = Some(chrono::Utc::now());
     }
 
     async fn wc_handle(&self) -> Option<wc::ServingHandle> {

@@ -20,7 +20,7 @@ Coolify's specific gestures named.
 4. **Hand out access.** From this resource's **Terminal**:
    ```
    waserver invite <share> <device-name> <user@email>   # prints an invite code / QR
-   waserver nodes  <share>                               # list guests
+   waserver status <share>                               # share detail incl. guests
    waserver revoke <share> <node>                        # cut one off
    ```
 

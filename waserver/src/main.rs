@@ -3,6 +3,7 @@ mod initialization;
 mod ipc;
 mod logging;
 mod serving;
+mod status;
 mod storage;
 mod wcbe;
 
@@ -64,8 +65,16 @@ enum Command {
         /// Name of the application share.
         share: String,
     },
-    /// Shows the status of all running servers.
-    Status,
+    /// Shows the status of all shares, or a detailed view of one share.
+    Status {
+        /// Name of an application share to show in detail. Omit for a
+        /// one-line-per-share fleet overview.
+        share: Option<String>,
+        /// Output a JSON document instead of the human-readable rendering.
+        /// The JSON shape is the stable interface.
+        #[arg(long)]
+        json: bool,
+    },
     /// Prints the logs of the given server to stdout.
     Logs {
         /// Don't stop at EOF. Instead, wait for more logs to be written.
@@ -91,11 +100,6 @@ enum Command {
         share: String,
         /// Node number whose access to revoke.
         node_number: i32,
-    },
-    /// List guest nodes.
-    Nodes {
-        /// Name of the application share.
-        share: String,
     },
 }
 
@@ -151,7 +155,7 @@ async fn async_main(command: Command) -> Result<()> {
             serving::serve(&share, upstream).await
         }
         Command::Stop { share } => stop(&share).await,
-        Command::Status => status().await,
+        Command::Status { share, json } => status::run(share.as_deref(), json).await,
         Command::Logs { follow, share } => logs(follow, &share),
         Command::Invite {
             share,
@@ -160,7 +164,6 @@ async fn async_main(command: Command) -> Result<()> {
             png,
         } => invite(&share, &node_name, &user_id, png.as_deref()).await,
         Command::Revoke { share, node_number } => revoke(&share, &node_number).await,
-        Command::Nodes { share } => nodes(&share).await,
     }
 }
 
@@ -210,45 +213,6 @@ async fn stop(share: &str) -> Result<()> {
         Err(e) => {
             anyhow::bail!("error sending command to server: {}", e);
         }
-    }
-    Ok(())
-}
-
-async fn status() -> Result<()> {
-    let shares = storage::list_shares()?;
-    if shares.is_empty() {
-        println!("No app shares found");
-        return Ok(());
-    }
-    for share in &shares {
-        let status = match ipc::Client::connect(share).await {
-            Ok(mut client) => {
-                match client.request(&ipc::Request::Status).await {
-                    Ok(ipc::Response::Success {
-                        data: ipc::ResponseData::Status(status),
-                        ..
-                    }) => {
-                        if status.connected_to_hub {
-                            format!("serving, upstream {}", status.upstream)
-                        } else {
-                            format!("connecting, upstream {}", status.upstream)
-                        }
-                    }
-                    Ok(ipc::Response::Success { .. }) => {
-                        anyhow::bail!("unexpected response from server");
-                    }
-                    Ok(ipc::Response::Error { error, .. }) => {
-                        format!("error getting status: {}", error)
-                    }
-                    Err(_) => {
-                        // Probably went down just now, return "offline".
-                        "offline".to_string()
-                    }
-                }
-            }
-            Err(_) => "offline".to_string(),
-        };
-        println!("{} ({})", share, status);
     }
     Ok(())
 }
@@ -461,37 +425,6 @@ fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
 async fn revoke(share: &str, node_number: &i32) -> Result<()> {
     println!("revoke({}, {});", share, node_number);
     // TODO: add revocation support to the library. Right now all it has is logout().
-    Ok(())
-}
-
-async fn nodes(share: &str) -> Result<()> {
-    use std::io::Write;
-    use tabwriter::TabWriter;
-
-    // Restore node.
-    let store = storage::ShareStateStore::new(share)?;
-    let Some(_) = store.load_share_config()? else {
-        anyhow::bail!("Share {} is not initialised", share);
-    };
-    let node_storage = wispers_connect::NodeStorage::new(store);
-    let node = node_storage.restore_or_init_node().await?;
-
-    // Query group info.
-    let group_info = node.group_info().await?;
-
-    // Render it.
-    let mut tw = TabWriter::new(std::io::stdout().lock()).padding(2);
-    writeln!(&mut tw, "Number\tName\tStatus").unwrap();
-    for node in &group_info.nodes {
-        let status = if node.is_online { "online" } else { "offline" };
-        let name = if node.name.is_empty() {
-            "<none>"
-        } else {
-            &node.name
-        };
-        writeln!(&mut tw, "{}\t{}\t{}", node.node_number, name, status).unwrap();
-    }
-    tw.flush().unwrap();
     Ok(())
 }
 

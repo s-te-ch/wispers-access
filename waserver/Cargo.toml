@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0"
 bytes = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive", "env"] }
 data-encoding = "2"
 dirs = "5"
@@ -19,7 +20,7 @@ serde_json = "1"
 serde_path_to_error = "0.1"
 tabwriter = "1.4"
 tempfile = "3"
-tokio = { version = "1", features = ["io-util", "macros", "signal"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "signal", "time"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-appender = "0.2"

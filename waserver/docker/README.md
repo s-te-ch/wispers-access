@@ -61,7 +61,8 @@ healthcheck flips to healthy once it reports `serving`. In another shell:
 
 ```sh
 C="docker compose -f waserver/docker/compose.yaml exec waserver"
-$C waserver status                                   # demo (serving, upstream app:8080)
+$C waserver status                                   # fleet table: demo | serving | ...
+$C waserver status demo                              # share detail incl. members
 $C waserver invite demo alice alice@example.com      # prints an invite code
 ```
 

@@ -61,7 +61,8 @@ if [[ ${#NAMES[@]} -eq 0 ]]; then
 fi
 
 # --- Already-initialised shares (names only; `status` reads them off disk) -
-existing="$(waserver status 2>/dev/null | grep -v 'No app shares found' | awk '{print $1}' || true)"
+# NR>1 skips the table header. TODO: move to `waserver status --json` + jq.
+existing="$(waserver status 2>/dev/null | grep -v 'No app shares found' | awk 'NR>1 {print $1}' || true)"
 is_existing() { grep -qxF "$1" <<<"$existing"; }
 is_desired()  { local n; for n in "${NAMES[@]}"; do [[ "$n" == "$1" ]] && return 0; done; return 1; }
 
