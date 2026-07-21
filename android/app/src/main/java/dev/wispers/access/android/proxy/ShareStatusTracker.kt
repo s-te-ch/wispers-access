@@ -3,6 +3,7 @@ package dev.wispers.access.android.proxy
 import android.content.Context
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
+import dev.wispers.access.android.demo.DemoMode
 import dev.wispers.access.android.disableShortcut
 import dev.wispers.access.android.storage.Share
 import dev.wispers.access.android.storage.ShareId
@@ -63,6 +64,11 @@ class ShareStatusTracker @Inject constructor(
     }
 
     private suspend fun pollLoop() {
+        // Demo roster: fixed statuses, no hub to poll.
+        if (DemoMode.active) {
+            _statuses.value = DemoMode.statuses
+            return
+        }
         repo.observeShares().collectLatest { shares ->
             while (true) {
                 coroutineScope {

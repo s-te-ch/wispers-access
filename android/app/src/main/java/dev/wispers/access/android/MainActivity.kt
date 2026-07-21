@@ -13,6 +13,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import androidx.navigation.navArgument
 import dagger.hilt.android.AndroidEntryPoint
+import dev.wispers.access.android.demo.DemoMode
 import dev.wispers.access.android.screens.AddShareScreen
 import dev.wispers.access.android.screens.ShareDetailScreen
 import dev.wispers.access.android.screens.ShareListScreen
@@ -22,6 +23,7 @@ import dev.wispers.access.android.ui.theme.WispersAccessTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        DemoMode.maybeActivate(this)
         // The app theme is always light, so pick dark bar icons explicitly instead
         // of letting edge-to-edge follow the system dark-mode setting.
         enableEdgeToEdge(

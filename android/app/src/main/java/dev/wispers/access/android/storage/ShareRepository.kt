@@ -1,5 +1,6 @@
 package dev.wispers.access.android.storage
 
+import dev.wispers.access.android.demo.DemoMode
 import dev.wispers.connect.WispersConnect
 import dev.wispers.connect.handles.Node
 import dev.wispers.connect.handles.Storage
@@ -10,6 +11,7 @@ import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.withContext
 
@@ -19,10 +21,12 @@ class ShareRepository @Inject internal constructor(
 ) {
 
     fun observeShares(): Flow<List<Share>> =
-        dao.observeShareInfos().map { rows -> rows.map(ShareInfoRow::toShare) }
+        DemoMode.shares?.let(::flowOf)
+            ?: dao.observeShareInfos().map { rows -> rows.map(ShareInfoRow::toShare) }
 
     fun observeShare(id: ShareId): Flow<Share?> =
-        dao.observeShareInfo(id.value).map { it?.toShare() }
+        DemoMode.shares?.let { demo -> flowOf(demo.find { it.id == id }) }
+            ?: dao.observeShareInfo(id.value).map { it?.toShare() }
 
     suspend fun getShare(id: ShareId): Share? = withContext(Dispatchers.IO) {
         dao.getShareInfo(id.value)?.toShare()
