@@ -373,8 +373,11 @@ mod tests {
         )]);
         let mut conn = rusqlite::Connection::open_in_memory().unwrap();
         v1_only.to_latest(&mut conn).unwrap();
-        conn.execute("INSERT INTO shares (created_at, complete) VALUES (1, TRUE)", [])
-            .unwrap();
+        conn.execute(
+            "INSERT INTO shares (created_at, complete) VALUES (1, TRUE)",
+            [],
+        )
+        .unwrap();
 
         // Applying the current set adds only the pending migration.
         migrations().to_latest(&mut conn).unwrap();

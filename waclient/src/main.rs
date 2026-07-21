@@ -135,7 +135,11 @@ async fn list() -> Result<()> {
     writeln!(&mut tw, "Hostname\tName\tStatus")?;
     for row in rows {
         let (_, display_name, hostname) = row.read_names()?;
-        let state = match row.read_terminal_state()?.as_deref().and_then(TerminalState::parse) {
+        let state = match row
+            .read_terminal_state()?
+            .as_deref()
+            .and_then(TerminalState::parse)
+        {
             Some(state) => state.describe(),
             None => "ok",
         };
@@ -227,7 +231,10 @@ async fn serve(port: u16) -> Result<()> {
     for row in rows {
         let (cg_id, display_name, hostname) = row.read_names()?;
         hostname_map.insert(hostname.clone(), cg_id.clone());
-        if let Some(state) = row.read_terminal_state()?.as_deref().and_then(TerminalState::parse)
+        if let Some(state) = row
+            .read_terminal_state()?
+            .as_deref()
+            .and_then(TerminalState::parse)
         {
             report_dead_share(&display_name, &hostname, state);
             dead.insert(cg_id, state);
@@ -576,7 +583,9 @@ fn terminal_from_p2p_err(e: &wc::P2pError) -> Option<TerminalState> {
 fn report_dead_share(display_name: &str, hostname: &str, state: TerminalState) {
     eprintln!(
         "  {} ('{}') is no longer available — {}.",
-        hostname, display_name, state.describe()
+        hostname,
+        display_name,
+        state.describe()
     );
     eprintln!("    Run 'waclient remove {}' to clean it up.", hostname);
 }
@@ -667,7 +676,11 @@ impl StreamFactory {
                 // A mid-session revocation/removal is forever: persist it and
                 // remember it so later requests 410 without dialing.
                 if let Some(state) = terminal_from_p2p_err(&e) {
-                    eprintln!("[{}] share is no longer available — {}", cg_id, state.describe());
+                    eprintln!(
+                        "[{}] share is no longer available — {}",
+                        cg_id,
+                        state.describe()
+                    );
                     let _ = share.row.write_terminal_state(state.as_str());
                     self.dead.lock().await.insert(cg_id.to_owned(), state);
                     return Err(OpenError::Terminal(state));
