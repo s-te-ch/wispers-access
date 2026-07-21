@@ -3696,9 +3696,9 @@ checksum = "d6bbff5f0aada427a1e5a6da5f1f98158182f26556f345ac9e04d36d0ebed650"
 
 [[package]]
 name = "wispers-connect"
-version = "0.11.0"
+version = "0.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "573e3fe85464c27c9b937bf8458e2f180bd8605cdf40488dd53818716a89c16c"
+checksum = "a3d6621592740d7c9c98662ea7de4e098310fcdcf56fef0e156840bf0886ebd6"
 dependencies = [
  "aes-gcm",
  "android_logger",
