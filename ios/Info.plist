@@ -10,5 +10,7 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<key>NSLocalNetworkUsageDescription</key>
+	<string>Used to connect directly to shared apps on devices in your network.</string>
 </dict>
 </plist>
