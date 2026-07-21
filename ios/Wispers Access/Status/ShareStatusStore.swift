@@ -41,6 +41,11 @@ final class ShareStatusStore {
     /// for minutes) can't wedge the others. A terminal result is persisted to
     /// `store`, and terminal shares are skipped — that state is forever.
     func refresh(_ ids: [ShareID], using sessions: SessionManager, store: ShareStore) async {
+        // Demo roster: fixed statuses, no hub to poll.
+        if DemoMode.active {
+            statuses = DemoMode.statuses
+            return
+        }
         let live = ids.filter { store.metadata(for: $0)?.terminalState == nil }
         await withTaskGroup(of: (ShareID, Availability).self) { group in
             for id in live {

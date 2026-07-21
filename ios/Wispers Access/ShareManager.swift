@@ -15,7 +15,7 @@ final class ShareManager {
     let status = ShareStatusStore()
 
     /// Site icons harvested while browsing, for the roster/detail avatars.
-    let icons = ShareIconStore()
+    let icons: ShareIconStore
 
     /// The shares currently open for browsing, switchable in-app. Lazy so its
     /// icon callback can capture `self` (to feed `icons`).
@@ -36,10 +36,11 @@ final class ShareManager {
         onConnected: { [weak self] id in await self?.store.markConnected(id) }
     )
 
-    init(store: ShareStore? = nil) {
-        // Constructed here rather than in a default argument: `ShareStore.init`
-        // is main-actor-isolated, and default arguments evaluate nonisolated.
+    init(store: ShareStore? = nil, icons: ShareIconStore? = nil) {
+        // Constructed here rather than in default arguments: the stores' inits
+        // are main-actor-isolated, and default arguments evaluate nonisolated.
         self.store = store ?? ShareStore()
+        self.icons = icons ?? ShareIconStore()
     }
 
     /// Joins a share from a `wax_` invite code: parse → persist metadata (incl.
