@@ -163,7 +163,7 @@ async fn async_main(command: Command) -> Result<()> {
             user_id,
             png,
         } => invite(&share, &node_name, &user_id, png.as_deref()).await,
-        Command::Revoke { share, node_number } => revoke(&share, &node_number).await,
+        Command::Revoke { share, node_number } => revoke(&share, node_number).await,
     }
 }
 
@@ -422,9 +422,24 @@ fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
     Ok(Some(trimmed.to_owned()))
 }
 
-async fn revoke(share: &str, node_number: &i32) -> Result<()> {
-    println!("revoke({}, {});", share, node_number);
-    // TODO: add revocation support to the library. Right now all it has is logout().
+async fn revoke(share: &str, node_number: i32) -> Result<()> {
+    use wispers_connect as wc;
+
+    let store = storage::ShareStateStore::new(share)?;
+    let Some(cfg) = store.load_share_config()? else {
+        anyhow::bail!("Share {} is not initialised", share);
+    };
+    let node_storage = wc::NodeStorage::new(store);
+    if let Some(backend) = cfg.backend.as_deref() {
+        node_storage.override_hub_addr(backend);
+    }
+    let node = node_storage.restore_or_init_node().await?;
+    node.revoke_node(node_number).await?;
+    println!(
+        "Node {} revoked. It can no longer open new connections. An existing \
+         connection, if any, persists until it disconnects.",
+        node_number
+    );
     Ok(())
 }
 

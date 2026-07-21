@@ -153,9 +153,7 @@ async fn gather_share(name: &str) -> ShareStatus {
     };
     let mut members = group.as_ref().map(to_members);
     match (members.as_mut(), live_peers.as_ref()) {
-        (Some(members), Some(peers)) => {
-            apply_live_connections(members, peers, server.node_number)
-        }
+        (Some(members), Some(peers)) => apply_live_connections(members, peers, server.node_number),
         // A stopped server has no connections.
         (Some(members), None) if server.state == "offline" => {
             for m in members.iter_mut() {
