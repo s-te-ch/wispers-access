@@ -11,7 +11,7 @@ enum AccessColor {
     static let outline = Color(hex: 0xD9D9D2)
     static let online = Color(hex: 0x34A853)
     static let infoCard = Color(hex: 0xECE7F1)      // lavender detail cards
-    static let destructive = Color(hex: 0xB3261E)   // "Remove share"
+    static let destructive = Color(hex: 0xB3261E)   // "Remove from this device"
 }
 
 extension Color {
