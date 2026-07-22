@@ -3,7 +3,7 @@
 The iOS app (`ios/`) is currently the stock Xcode template (`ContentView.swift` =
 "Hello, world!"). The plan: build it out as a **feature-parity port of the Android
 app**, idiomatic SwiftUI, with the **self-hosted-backend** support baked in from the
-first join flow (the one remaining 🟡 in `self-hosting-plan.md` §6).
+first join flow (the one remaining 🟡 in `integrations-plan.md` §6).
 
 ## The binding (the critical dependency — it exists)
 

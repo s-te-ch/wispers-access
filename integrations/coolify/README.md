@@ -40,8 +40,10 @@ the container.
 
 ## Notes
 
-- **Image:** `ghcr.io/s-te-ch/wispers/access/waserver` — publish it before pointing
-  Coolify at it (Coolify pulls the image).
+- **Image:** `ghcr.io/s-te-ch/wispers/access/waserver` (multi-arch: amd64 + arm64).
+  The ghcr package is currently **Internal**, so Coolify needs registry credentials
+  to pull it (Server → Registries, or `docker login ghcr.io` on the host) until the
+  package goes public.
 - **Adding an app:** append `; name | display | alias:port` to `SHARES`, tick the
   app's "Connect To Predefined Network", redeploy. No new container.
 - **Redeploys are safe:** the alias (or service name) survives app redeploys, so

@@ -1,18 +1,16 @@
-# Wispers Access — self-hosting integrations plan
+# Wispers Access — integrations plan
 
-> Status: The **generic waserver container** (`waserver/docker/`) is built and
-> validated end-to-end — a reconcile wrapper + supervisord running one `serve` per
-> share, configured from a `SHARES` env var or a mounted file. It is
-> platform-independent: multi-share (#1), `host:port` upstream (#2), WebSockets (#3),
-> graceful SIGTERM/SIGINT, a healthcheck, and Host-header pass-through (#5) are all
-> done. Proven on a real deployment: an arm64 Lima VM running **Coolify + a private
-> Odoo** (no published ports), reached from an Android Access client *through the
-> container* — landing page, login POST, session, and authenticated navigation all
-> clean. The arm64 image ran healthy, so **#4** is down to the multi-arch *buildx*
-> packaging. **Coolify is the first integration, not the scope** — a thin recipe over
-> the generic container (`integrations/coolify/`), also built and validated (#10).
-> Remaining: multi-arch build (#4), publish the image, the base-URL escape-hatch doc
-> (#5), and future platform recipes.
+> Status (2026-07-22): **Implemented and validated end-to-end.** The generic
+> waserver container (`waserver/docker/`) covers #1–#5, the self-hosted-backend
+> flow (#6) is done across waserver, waclient, Android, and iOS, and the Coolify
+> recipe (#10) is built and validated against a real Coolify + Odoo deployment.
+> The multi-arch image (amd64+arm64) is published at
+> `ghcr.io/s-te-ch/wispers/access/waserver` — the ghcr package is currently
+> **Internal**, so anonymous pulls fail; flip to public alongside open-sourcing.
+> Remaining, all non-code: the base-URL escape-hatch doc (#5), the Coolify
+> knowledge-base page / catalog template (star-gated), and log polish (per-share
+> prefixing; `serve`'s redundant daily file under `/data`). The Coolify admin TUI
+> stays a v2 idea.
 
 ## Goal
 
