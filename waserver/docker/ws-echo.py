@@ -4,7 +4,7 @@
 Serves a tiny HTML page AND a WebSocket endpoint on the SAME port, so the whole
 thing can be proxied same-origin:
 
-    python3 demo/ws-echo.py 8080         # then point waserver at port 8080
+    python3 waserver/docker/ws-echo.py 8080   # then point waserver at port 8080
 
 The page (GET /) opens a WebSocket to ws://<this-host>/ws, echoes whatever you
 type, and also receives an unsolicited server push every 2s. The push exercises
