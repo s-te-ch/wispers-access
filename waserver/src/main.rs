@@ -425,6 +425,11 @@ fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
 async fn revoke(share: &str, node_number: i32) -> Result<()> {
     use wispers_connect as wc;
 
+    if node_number == 1 {
+        anyhow::bail!("Node 1 is the server and cannot be revoked");
+    }
+
+    // Restore the node.
     let store = storage::ShareStateStore::new(share)?;
     let Some(cfg) = store.load_share_config()? else {
         anyhow::bail!("Share {} is not initialised", share);
@@ -434,12 +439,33 @@ async fn revoke(share: &str, node_number: i32) -> Result<()> {
         node_storage.override_hub_addr(backend);
     }
     let node = node_storage.restore_or_init_node().await?;
-    node.revoke_node(node_number).await?;
-    println!(
-        "Node {} revoked. It can no longer open new connections. An existing \
-         connection, if any, persists until it disconnects.",
-        node_number
-    );
+
+    // Check group info for the node first, revoke if activated, and deal with
+    // other states accordingly.
+    let info = node.group_info().await?;
+    match info.nodes.iter().find(|n| n.node_number == node_number) {
+        Some(n) => match n.state {
+            wc::NodeState::Activated => {
+                // The standard case. The node is both activated and registered.
+                node.revoke_node(node_number).await?;
+            }
+            wc::NodeState::Revoked => {
+                // The node was already revoked but not yet deregistered. Try again below.
+            }
+            // TODO: Registered-but-never-activated could technically happen, so
+            // we should have a cleaner solution than the one below.
+            _ => anyhow::bail!("node {node_number} has never been activated."),
+        },
+        None => anyhow::bail!("Node {} is unknown", node_number),
+    }
+
+    // At this point we can be sure the node is revoked, so we proceed to
+    // deregistering it.
+    let client = wcbe::Client::new(&cfg.api_key, &wcbe::api_base(cfg.backend.as_deref()));
+    client
+        .delete_node(&cfg.connectivity_group_id, node_number)
+        .await?;
+    println!("Node {node_number} is now revoked and deregistered");
     Ok(())
 }
 

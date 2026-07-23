@@ -71,6 +71,15 @@ pub struct RegistrationToken {
     pub used_at: Option<String>, // RFC 3339
 }
 
+/// Outcome of `delete_node`: 404 means the registration is already gone
+/// (deleted earlier, or the node deregistered itself), which callers treat
+/// as "nothing left to do" rather than an error.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DeleteNodeOutcome {
+    Deleted,
+    AlreadyGone,
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupNode {
@@ -167,6 +176,32 @@ impl Client {
             anyhow::bail!("server returned {status}: {body}");
         }
         res.json().await.context("failed to parse response")
+    }
+
+    /// Deletes a node's registration, freeing its quota seat. The backend
+    /// only permits this once the group's roster marks the node revoked
+    /// (409 otherwise), so callers revoke first and delete second.
+    pub async fn delete_node(&self, cg_id: &str, node_number: i32) -> Result<DeleteNodeOutcome> {
+        let url = format!(
+            "{}/connectivity-groups/{cg_id}/nodes/{node_number}",
+            self.api_base
+        );
+        let res = self
+            .client
+            .delete(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .context("failed to send request")?;
+        if res.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(DeleteNodeOutcome::AlreadyGone);
+        }
+        if !res.status().is_success() {
+            let status = res.status();
+            let body = res.text().await.unwrap_or_default();
+            anyhow::bail!("server returned {status}: {body}");
+        }
+        Ok(DeleteNodeOutcome::Deleted)
     }
 
     pub async fn get_registration_token(
