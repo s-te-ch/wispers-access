@@ -46,6 +46,7 @@ import dev.wispers.access.android.InviteCode
 import dev.wispers.access.android.storage.ShareId
 import dev.wispers.access.android.storage.ShareRepository
 import dev.wispers.access.android.storage.restoreOrInitNode
+import dev.wispers.connect.handles.Node
 import javax.inject.Inject
 import kotlin.coroutines.cancellation.CancellationException
 import kotlinx.coroutines.NonCancellable
@@ -112,6 +113,7 @@ class AddShareViewModel @Inject constructor(
 
     private suspend fun runJoin(invite: InviteCode) {
         var createdId: ShareId? = null
+        var node: Node? = null
         try {
             startStep(JoinStep.VALIDATING)
             completeStep(JoinStep.VALIDATING)
@@ -120,7 +122,7 @@ class AddShareViewModel @Inject constructor(
             val id = repo.createShare(backend = invite.backend)
             createdId = id
             val storage = repo.storageFor(id)
-            val (node, _) = storage.restoreOrInitNode()
+            node = storage.restoreOrInitNode().first
             completeStep(JoinStep.INITIALIZING)
 
             startStep(JoinStep.REGISTERING)
@@ -143,14 +145,26 @@ class AddShareViewModel @Inject constructor(
             val nickname = repo.getShare(id)?.nickname.orEmpty()
             _state.update { it.copy(phase = Phase.Joined(shareId = id, nickname = nickname)) }
         } catch (e: CancellationException) {
-            createdId?.let { withContext(NonCancellable) { repo.deleteShare(it) } }
+            withContext(NonCancellable) { rollBack(node, createdId) }
             throw e
         } catch (e: Exception) {
-            createdId?.let { repo.deleteShare(it) }
+            rollBack(node, createdId)
             _state.update {
                 it.copy(phase = Phase.Idle, error = e.message ?: "Failed to join.")
             }
         }
+    }
+
+    /**
+     * Rolls back a partial join. The logout is best-effort and matters once
+     * `register` has succeeded: it revokes + deregisters the node, so the hub
+     * doesn't keep a never-activated registration whose group seat no
+     * per-node operation can reclaim. Before registration it fails without
+     * having reached the hub, and the local delete is all that's needed.
+     */
+    private suspend fun rollBack(node: Node?, createdId: ShareId?) {
+        node?.let { runCatching { it.logout() } }
+        createdId?.let { repo.deleteShare(it) }
     }
 
     private fun startStep(step: JoinStep) {
