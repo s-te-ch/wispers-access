@@ -276,7 +276,7 @@ async fn serve(port: u16) -> Result<()> {
     let bind_addr = format!("localhost:{}", port);
     let listener = TcpListener::bind(&bind_addr)
         .await
-        .with_context(|| format!("failed to bind to {}", &bind_addr))?;
+        .with_context(|| format!("failed to bind to {}", bind_addr))?;
     println!("Listening on {}", bind_addr);
 
     // Serve.
