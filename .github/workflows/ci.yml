@@ -23,13 +23,23 @@ concurrency:
 jobs:
   rust:
     runs-on: ubuntu-24.04
+    # Without this, a hung download blocks the job for the 6-hour default.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # boring-sys needs libclang (bindgen); tonic/prost need protoc. cmake and
       # the C/C++ toolchain are preinstalled on the runner image.
+      #
+      # The runners' Azure-hosted apt mirrors stall out semi-regularly; the
+      # Acquire options turn a silent hang into retries, and the step timeout
+      # turns a dead mirror into a fast fail instead of a wedged job.
       - name: Install native build deps
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libclang-dev
+        timeout-minutes: 5
+        run: |
+          APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
+          $APT update
+          $APT install -y --no-install-recommends protobuf-compiler libclang-dev
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (stable)
         with:
@@ -44,6 +54,7 @@ jobs:
 
   android:
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     defaults:
       run:
         working-directory: android

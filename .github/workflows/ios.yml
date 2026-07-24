@@ -25,6 +25,8 @@ permissions:
 jobs:
   build:
     runs-on: macos-26
+    # Without this, a hung download blocks the job for the 6-hour default.
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: ios
