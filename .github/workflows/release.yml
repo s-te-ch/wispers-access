@@ -1,0 +1,235 @@
+# Per-component releases, triggered by version tags:
+#
+#   waserver-vX.Y.Z  -> linux amd64+arm64 binaries on a GitHub Release, plus
+#                       the multi-arch container image on ghcr (:X.Y.Z, :latest)
+#   waclient-vX.Y.Z  -> linux amd64+arm64 + macOS arm64 binaries on a GitHub
+#                       Release
+#
+# The tag must match the crate version in Cargo.toml, so a release is:
+#  1. bump the version, commit & push
+#  2. tag that commit, push the tag.
+#
+# All binaries and image slices are built on native runners for their
+# architecture.
+#
+# Third-party actions are pinned to commit SHAs instead of version tags, so the
+# publisher can't change the tag and make us run something we don't want.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - "waserver-v*"
+      - "waclient-v*"
+
+permissions:
+  contents: read
+
+env:
+  IMAGE: ghcr.io/s-te-ch/wispers/access/waserver
+
+jobs:
+  # Parses the tag into component + version, verifies it against Cargo.toml,
+  # and emits the build matrix for that component.
+  meta:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      component: ${{ steps.parse.outputs.component }}
+      version: ${{ steps.parse.outputs.version }}
+      matrix: ${{ steps.parse.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - id: parse
+        run: |
+          tag="$GITHUB_REF_NAME"
+          component="${tag%-v*}"
+          version="${tag#*-v}"
+
+          case "$component" in
+            waserver)
+              matrix='[{"os": "ubuntu-24.04", "target": "linux-amd64"},
+                       {"os": "ubuntu-24.04-arm", "target": "linux-arm64"}]'
+              ;;
+            waclient)
+              matrix='[{"os": "ubuntu-24.04", "target": "linux-amd64"},
+                       {"os": "ubuntu-24.04-arm", "target": "linux-arm64"},
+                       {"os": "macos-26", "target": "macos-arm64"}]'
+              ;;
+            *)
+              echo "unexpected tag '$tag'" >&2
+              exit 1
+              ;;
+          esac
+
+          crate_version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r ".packages[] | select(.name == \"$component\") | .version")
+          if [ "$version" != "$crate_version" ]; then
+            echo "tag says $version but $component/Cargo.toml says $crate_version" >&2
+            exit 1
+          fi
+
+          {
+            echo "component=$component"
+            echo "version=$version"
+            echo "matrix=$(echo "$matrix" | jq -c .)"
+          } >> "$GITHUB_OUTPUT"
+
+  binaries:
+    needs: meta
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.meta.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Same native build deps as CI (boring-sys needs libclang, tonic/prost
+      # need protoc), with the same apt hardening against stalled mirrors.
+      - name: Install native build deps (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 5
+        run: |
+          APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
+          $APT update
+          $APT install -y --no-install-recommends protobuf-compiler libclang-dev
+      - name: Install native build deps (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        run: brew install protobuf
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (stable)
+        with:
+          toolchain: stable
+
+      - name: Build
+        run: cargo build --release -p ${{ needs.meta.outputs.component }}
+
+      - name: Package
+        run: |
+          component="${{ needs.meta.outputs.component }}"
+          version="${{ needs.meta.outputs.version }}"
+          target="${{ matrix.target }}"
+          staging="$component-$version-$target"
+          mkdir "$staging"
+          cp "target/release/$component" LICENSE "$staging/"
+          tar czf "$staging.tar.gz" "$staging"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: binary-${{ matrix.target }}
+          path: "*.tar.gz"
+          if-no-files-found: error
+
+  # waserver only: build each image slice natively and push by digest ...
+  image:
+    needs: meta
+    if: needs.meta.outputs.component == 'waserver'
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            arch: amd64
+          - os: ubuntu-24.04-arm
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: build
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          file: waserver/docker/Dockerfile
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Export digest
+        run: |
+          mkdir -p /tmp/digests
+          digest="${{ steps.build.outputs.digest }}"
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: digest-${{ matrix.arch }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+
+  # ... then stitch the per-arch digests into one multi-arch manifest.
+  image-manifest:
+    needs: [meta, image]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: digest-*
+          merge-multiple: true
+          path: /tmp/digests
+
+      - uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-arch manifest
+        working-directory: /tmp/digests
+        run: |
+          version="${{ needs.meta.outputs.version }}"
+          refs=()
+          for digest in *; do refs+=("$IMAGE@sha256:$digest"); done
+          docker buildx imagetools create \
+            -t "$IMAGE:$version" -t "$IMAGE:latest" "${refs[@]}"
+          docker buildx imagetools inspect "$IMAGE:$version"
+
+  # Creates the GitHub Release once everything that applies has succeeded.
+  # image-manifest is skipped for waclient tags, hence the explicit condition
+  # instead of a plain `needs`.
+  release:
+    needs: [meta, binaries, image-manifest]
+    if: >-
+      always() && needs.binaries.result == 'success' &&
+      (needs.image-manifest.result == 'success' || needs.image-manifest.result == 'skipped')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: binary-*
+          merge-multiple: true
+          path: dist
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd dist
+          sha256sum -- *.tar.gz > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "${{ needs.meta.outputs.component }} ${{ needs.meta.outputs.version }}" \
+            --generate-notes \
+            ./*.tar.gz SHA256SUMS
