@@ -83,8 +83,8 @@ async fn join(invite_code: &str) -> Result<()> {
     let db = storage::DB::new()?;
     let row = db.new_row()?;
 
-    // Register & activate the Wispers node. If the invite named a self-hosted
-    // backend, use override_hub_addr().
+    // Register the Wispers node. If the invite named a self-hosted backend,
+    // use override_hub_addr().
     let ns = wc::NodeStorage::new(row.clone());
     if let Some(backend) = backend.as_deref() {
         println!("Using Wispers Connect backend: {}", backend);
@@ -93,6 +93,29 @@ async fn join(invite_code: &str) -> Result<()> {
     let mut node = ns.restore_or_init_node().await?;
     println!("Registering Wispers node...");
     node.register(registration_token).await?;
+
+    // From here on the hub holds a registration that consumes quota, so
+    // a failed join must log the node out again (revoke + deregister) rather
+    // than orphan the registration. This is best-effort.
+    if let Err(e) = finish_join(&mut node, &row, activation_code, backend.as_deref()).await {
+        match node.logout().await {
+            Ok(()) => eprintln!("Join failed; deregistered from the hub again."),
+            Err(le) => eprintln!("Join failed; could not deregister from the hub either ({le})."),
+        }
+        let _ = row.delete_row();
+        return Err(e);
+    }
+    Ok(())
+}
+
+/// The steps of `join` after registration: activation and local bookkeeping.
+/// Any failure here makes `join` roll the registration back.
+async fn finish_join(
+    node: &mut wc::Node,
+    row: &storage::Row,
+    activation_code: &str,
+    backend: Option<&str>,
+) -> Result<()> {
     println!("Activating Wispers node...");
     node.activate(activation_code).await?;
 
@@ -100,7 +123,7 @@ async fn join(invite_code: &str) -> Result<()> {
     let group_info = node.group_info().await?;
     let cg_id = group_info.id.to_string();
     row.write_connectivity_group_id(&cg_id)?;
-    row.write_backend(backend.as_deref())?;
+    row.write_backend(backend)?;
     let display_name = group_info.name.unwrap_or_else(|| cg_id.clone());
     row.write_display_name(&display_name)?;
     let hostname = host_slug(&display_name).unwrap_or_else(|| cg_id.clone());
@@ -108,8 +131,6 @@ async fn join(invite_code: &str) -> Result<()> {
 
     // Mark the row complete, so it doesn't get cleaned up at next start.
     row.mark_complete()?;
-    // TODO: There's a problem here: if activation works but something fails
-    // afterwards, we should revoke the node and not just kill the registration.
 
     println!(
         "Joined share: {}\n  Hostname: {}\n  Connectivity group: {}\n  Node: {}\n",
