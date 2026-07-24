@@ -1,0 +1,60 @@
+# iOS build check
+#
+# macOS jobs are long, so instead of running per push this builds at head (of
+# branch main) on a 6-hour schedule. A guard step skips the build entirely when
+# no new commits arrived since the last successful run. workflow_dispatch gives
+# an immediate manual run.
+#
+# Build-only, no simulator tests yet. Signing is disabled; the WispersConnect
+# simulator binary is arm64-only, hence ARCHS=arm64 (runner is Apple Silicon).
+#
+# Third-party actions are pinned to commit SHAs instead of version tags, so the
+# publisher can't change the tag and make us run something we don't want.
+
+name: iOS
+
+on:
+  schedule:
+    - cron: "17 */6 * * *" # offset from :00 to dodge the top-of-hour queue spike
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read # the guard step lists this workflow's previous runs
+
+jobs:
+  build:
+    runs-on: macos-26
+    defaults:
+      run:
+        working-directory: ios
+    steps:
+      - name: Skip if already built at this commit
+        id: guard
+        if: github.event_name == 'schedule'
+        working-directory: .
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          last=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ios.yml/runs?status=success&per_page=1" \
+                   --jq '.workflow_runs[0].head_sha // ""')
+          if [ "$last" = "$GITHUB_SHA" ]; then
+            echo "No new commits since last successful run ($last) — skipping."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.guard.outputs.skip != 'true'
+
+      # -skipMacroValidation/-skipPackagePluginValidation: package macros and
+      # plugins normally need interactive approval, which a headless runner
+      # can't give.
+      - name: Build (iOS Simulator, arm64, unsigned)
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          xcodebuild build \
+            -project "Wispers Access.xcodeproj" \
+            -scheme "Wispers Access" \
+            -destination "generic/platform=iOS Simulator" \
+            -skipMacroValidation -skipPackagePluginValidation \
+            ARCHS=arm64 CODE_SIGNING_ALLOWED=NO
