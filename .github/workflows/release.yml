@@ -204,13 +204,14 @@ jobs:
           docker buildx imagetools inspect "$IMAGE:$version"
 
   # Creates the GitHub Release once everything that applies has succeeded.
-  # image-manifest is skipped for waclient tags, hence the explicit condition
-  # instead of a plain `needs`.
+  # image-manifest is legitimately skipped for waclient tags, hence the
+  # explicit condition instead of a plain `needs`. But for waserver it must
+  # have succeeded (a skip there means the image jobs failed).
   release:
     needs: [meta, binaries, image-manifest]
     if: >-
       always() && needs.binaries.result == 'success' &&
-      (needs.image-manifest.result == 'success' || needs.image-manifest.result == 'skipped')
+      (needs.meta.outputs.component != 'waserver' || needs.image-manifest.result == 'success')
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -222,14 +223,22 @@ jobs:
           merge-multiple: true
           path: dist
 
+      # Create-or-update: reruns (e.g. after a failed image job) land in the
+      # upload branch instead of tripping over the already-created release.
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
           sha256sum -- *.tar.gz > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "${{ needs.meta.outputs.component }} ${{ needs.meta.outputs.version }}" \
-            --generate-notes \
-            ./*.tar.gz SHA256SUMS
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" --clobber \
+              ./*.tar.gz SHA256SUMS
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "${{ needs.meta.outputs.component }} ${{ needs.meta.outputs.version }}" \
+              --generate-notes \
+              ./*.tar.gz SHA256SUMS
+          fi
