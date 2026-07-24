@@ -9,7 +9,7 @@ struct ShareListScreen: View {
     @Environment(ShareManager.self) private var manager
     @Environment(ShareIconStore.self) private var icons
     @Environment(BrowseRouter.self) private var router
-    @State private var showingAdd = false
+    @State private var showingAdd = DemoMode.presentAddSheet
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {

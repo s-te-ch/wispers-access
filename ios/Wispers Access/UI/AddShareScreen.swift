@@ -12,7 +12,7 @@ struct AddShareScreen: View {
     @Environment(\.dismiss) private var dismiss
 
     @State private var tab: AddTab = .enterCode
-    @State private var code = ""
+    @State private var code = DemoMode.presentAddSheet ? DemoMode.sampleInvite : ""
     @State private var phase: JoinPhase = .idle
     @State private var errorMessage: String?
     @State private var showingScanner = false

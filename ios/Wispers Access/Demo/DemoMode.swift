@@ -57,6 +57,17 @@ enum DemoMode {
         return .detail(ShareID(args[flag + 1]))
     }
 
+    /// Whether to open the add-app sheet on launch (`--demo-add`), pre-filled
+    /// with `sampleInvite`, so capture scripts can shoot the code-entry screen.
+    static var presentAddSheet: Bool {
+        active && ProcessInfo.processInfo.arguments.contains("--demo-add")
+    }
+
+    /// Shaped like a real `waserver invite` code (hex token, `node-secret`
+    /// activation) but pure fiction — it parses, so the screenshot shows the
+    /// backend note, and joins nothing.
+    static let sampleInvite = "wax_e3b7a4c92d15f8607b2a_7-h4kq9tm2xw"
+
     /// Fixed per-share availability, replacing the hub poll.
     static var statuses: [ShareID: Availability] {
         Dictionary(uniqueKeysWithValues: roster.map { ($0.id, $0.availability) })
