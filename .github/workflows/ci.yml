@@ -1,0 +1,62 @@
+# Validation for every PR and push to main. This currently covers Rust (fmt,
+# clippy, tests) and the Android app (unit tests, debug build).
+#
+# TODO: Figure out how to cover iOS without making CI take forever.
+#
+# Third-party actions are pinned to commit SHAs instead of version tags, so the
+# publisher can't change the tag and make use run something we don't want.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # boring-sys needs libclang (bindgen); tonic/prost need protoc. cmake and
+      # the C/C++ toolchain are preinstalled on the runner image.
+      - name: Install native build deps
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends protobuf-compiler libclang-dev
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (stable)
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  android:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: android
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: actions/setup-java@03ad4de0992f5dab5e18fcb136590ce7c4a0ac95 # v5.6.0
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+
+      # Release signing is skipped automatically: keystore.properties is not in
+      # the repo, so the build produces test/debug artifacts only.
+      - run: ./gradlew testDebugUnitTest assembleDebug
