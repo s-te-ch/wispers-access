@@ -29,7 +29,8 @@ or to inject malicious nodes. Mesh VPNs do not offer this.
 
 Wispers Access is currently in open beta. The Android client is in open testing
 ([Play Store](https://play.google.com/store/apps/details?id=dev.wispers.access.android)).
-The iOS client is in review.
+The iOS client is in open testing
+([TestFlight](https://testflight.apple.com/join/AjsJChhq)).
 
 ## Quick start
 
@@ -84,7 +85,9 @@ is connected without needing its own login.
 
 Install Wispers Access from the
 [Play Store](https://play.google.com/store/apps/details?id=dev.wispers.access.android)
-(the iOS app is in review), tap **+**, and scan the QR code (or copy-paste the
+(Android) or via
+[TestFlight](https://testflight.apple.com/join/AjsJChhq) (iOS), tap **+**, and
+scan the QR code (or copy-paste the
 invite code). The shared app opens right inside Wispers Access: no VPN
 profile, no open port on the internet.
 
