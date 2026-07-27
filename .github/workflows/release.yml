@@ -1,7 +1,8 @@
 # Per-component releases, triggered by version tags:
 #
-#   waserver-vX.Y.Z  -> linux amd64+arm64 binaries on a GitHub Release, plus
-#                       the multi-arch container image on ghcr (:X.Y.Z, :latest)
+#   waserver-vX.Y.Z  -> linux amd64+arm64 + macOS arm64 binaries on a GitHub
+#                       Release, plus the multi-arch container image on ghcr
+#                       (:X.Y.Z, :latest)
 #   waclient-vX.Y.Z  -> linux amd64+arm64 + macOS arm64 binaries on a GitHub
 #                       Release
 #
@@ -11,6 +12,14 @@
 #
 # All binaries and image slices are built on native runners for their
 # architecture.
+#
+# macOS binaries are Developer ID-signed and notarized so Gatekeeper accepts
+# browser-downloaded tarballs. This needs five repo secrets:
+#   MACOS_SIGN_P12           base64 of the Developer ID Application .p12
+#   MACOS_SIGN_P12_PASSWORD  its passphrase
+#   APPLE_API_KEY_ID         App Store Connect API key for notarytool
+#   APPLE_API_ISSUER_ID      (Developer role is sufficient)
+#   APPLE_API_KEY            contents of the .p8 private key
 #
 # Third-party actions are pinned to commit SHAs instead of version tags, so the
 # publisher can't change the tag and make us run something we don't want.
@@ -108,6 +117,65 @@ jobs:
 
       - name: Build
         run: cargo build --release -p ${{ needs.meta.outputs.component }}
+
+      - name: Sign and notarize (macOS)
+        if: runner.os == 'macOS'
+        env:
+          P12_BASE64: ${{ secrets.MACOS_SIGN_P12 }}
+          P12_PASSWORD: ${{ secrets.MACOS_SIGN_P12_PASSWORD }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          API_KEY: ${{ secrets.APPLE_API_KEY }}
+        run: |
+          component="${{ needs.meta.outputs.component }}"
+          binary="target/release/$component"
+
+          # One-off keychain so no key material outlives the job.
+          keychain="$RUNNER_TEMP/sign.keychain-db"
+          keychain_pw="$(openssl rand -base64 24)"
+          security create-keychain -p "$keychain_pw" "$keychain"
+          security unlock-keychain -p "$keychain_pw" "$keychain"
+          printf '%s' "$P12_BASE64" | base64 -d > "$RUNNER_TEMP/sign.p12"
+          security import "$RUNNER_TEMP/sign.p12" -k "$keychain" \
+            -P "$P12_PASSWORD" -T /usr/bin/codesign
+          rm "$RUNNER_TEMP/sign.p12"
+          security set-key-partition-list -S apple-tool:,apple: \
+            -s -k "$keychain_pw" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain"
+
+          identity=$(security find-identity -v -p codesigning "$keychain" \
+            | awk -F'"' '/Developer ID Application/ {print $2; exit}')
+          if [ -z "$identity" ]; then
+            echo "no Developer ID Application identity in the keychain" >&2
+            exit 1
+          fi
+
+          codesign --force --options runtime --timestamp \
+            --sign "$identity" "$binary"
+          codesign --verify --strict --verbose=2 "$binary"
+
+          # A bare executable can't have a ticket stapled to it; Gatekeeper
+          # looks the ticket up online by signature, so submit+accept is
+          # enough. The zip is only the submission vehicle.
+          printf '%s' "$API_KEY" > "$RUNNER_TEMP/apikey.p8"
+          ditto -c -k "$binary" "$RUNNER_TEMP/notarize.zip"
+          xcrun notarytool submit "$RUNNER_TEMP/notarize.zip" \
+            --key "$RUNNER_TEMP/apikey.p8" --key-id "$API_KEY_ID" \
+            --issuer "$API_ISSUER_ID" \
+            --wait --timeout 20m --output-format json | tee notarize.json
+          status=$(jq -r .status notarize.json)
+          if [ "$status" != "Accepted" ]; then
+            xcrun notarytool log "$(jq -r .id notarize.json)" \
+              --key "$RUNNER_TEMP/apikey.p8" --key-id "$API_KEY_ID" \
+              --issuer "$API_ISSUER_ID" || true
+            echo "notarization ended as '$status'" >&2
+            exit 1
+          fi
+          rm "$RUNNER_TEMP/apikey.p8" notarize.json
+
+      - name: Clean up signing keychain (macOS)
+        if: always() && runner.os == 'macOS'
+        run: security delete-keychain "$RUNNER_TEMP/sign.keychain-db" 2>/dev/null || true
 
       - name: Package
         run: |
