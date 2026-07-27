@@ -107,10 +107,6 @@ be fully cloud-independent, [run your own hub](https://github.com/s-te-ch/wisper
 and pass `--backend https://hub.example.com` to `waserver init`. Invite codes
 contain the backend, so guests land on the right hub automatically.
 
-## Why not use ${some_other_option}
-
-TODO
-
 ## Licensing
 
 TODO
@@ -122,6 +118,10 @@ TODO content:
   - cloud independence
   - secure
 - How to get it running
-- Why not some-other-option
 - Licensing, hosted option, self-hosted option
+- Deferred: a short "When to use something else" after the quick start —
+  one honest line each for ngrok / Tailscale / Cloudflare Tunnel, conceding
+  their sweet spots instead of arguing ("why not X" grows long and reads
+  combative). Somewhere, state the moat explicitly: the rendezvous server
+  cryptographically can't read traffic or inject members.
 -->
