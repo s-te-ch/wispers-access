@@ -109,19 +109,13 @@ contain the backend, so guests land on the right hub automatically.
 
 ## Licensing
 
-TODO
+Everything you need to run Wispers Access is open source:
 
-<!--
-TODO content:
-- What is it
-  - web app sharing
-  - cloud independence
-  - secure
-- How to get it running
-- Licensing, hosted option, self-hosted option
-- Deferred: a short "When to use something else" after the quick start —
-  one honest line each for ngrok / Tailscale / Cloudflare Tunnel, conceding
-  their sweet spots instead of arguing ("why not X" grows long and reads
-  combative). Somewhere, state the moat explicitly: the rendezvous server
-  cryptographically can't read traffic or inject members.
--->
+- **Wispers Access** (this repo) is [MIT licensed](LICENSE), as is the
+  underlying [wispers-connect](https://github.com/s-te-ch/wispers-client)
+  library.
+- **The standalone hub**, [wispers-hub](https://github.com/s-te-ch/wispers-hub),
+  is AGPL-3.0.
+
+The managed Wispers Connect backend at
+[connect.wispers.dev](https://connect.wispers.dev) offers a free personal tier.
