@@ -86,10 +86,12 @@ automatically. This is per-share, so different shares can use different
 backends. See the [wispers-hub](https://github.com/s-te-ch/wispers-hub)
 repo for standing up your own hub.
 
-## Notes / TODO
+## Notes
 
-- **Multi-arch:** `docker buildx build --platform linux/amd64,linux/arm64`. arm64 is
-  validated end-to-end; the amd64 side of the multi-arch build is the open item.
-- **Build caching:** no `cargo-chef` layer yet, so a source change recompiles the crates.
+- **Prebuilt image:** every release publishes a multi-arch (amd64 + arm64) image at
+  `ghcr.io/s-te-ch/wispers/access/waserver`, tagged `:X.Y.Z` and `:latest`. No need
+  to build unless you're changing it.
+- **Build caching:** no `cargo-chef` layer yet, so when building locally a source
+  change recompiles the crates.
 - **Logs:** `serve` writes stdout/stderr (captured) plus a redundant daily file under
-  `/data`; per-share log prefixing is not done yet.
+  `/data`. No per-share log prefixing yet.
