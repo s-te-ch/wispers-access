@@ -1,6 +1,9 @@
 <center>
-  <img src="assets/access-logo-txt.svg"
-	   width="256" alt="Wispers Access logo"/>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/access-logo-txt-dark.svg">
+    <img src="assets/access-logo-txt.svg"
+         width="256" alt="Wispers Access logo"/>
+  </picture>
 </center>
 
 ## About Wispers Access
@@ -9,8 +12,11 @@ Wispers Access makes it easy to share a web app with your coworkers or friends
 without having to publish it to the internet.
 
 <p align="center">
-  <img src="assets/invite-composite.png" width="820"
-       alt="A terminal minting a Wispers Access invite, and a phone showing the shared app it unlocks"/>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="assets/invite-composite-dark.png">
+    <img src="assets/invite-composite.png" width="820"
+         alt="A terminal minting a Wispers Access invite, and a phone showing the shared app it unlocks"/>
+  </picture>
 </p>
 
 This is most useful for your internal apps, for example your team's ERP
