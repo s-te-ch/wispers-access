@@ -1,0 +1,123 @@
+<!doctype html>
+<!--
+  Source for ../invite-composite{,-dark}.png (the README hero image).
+
+  composite.html is the light variant; composite-dark.html is the same file
+  with a wgreen hint and hairline borders for dark backgrounds. Keep them in
+  sync when editing.
+
+  qr.png encodes the FICTIONAL sample invite (DemoMode.sampleInvite,
+  wax_e3b7a4c92d15f8607b2a_7-h4kq9tm2xw) — never replace it with a real one.
+  phone.png is a real Android screenshot of the demos/dutyroster app opened
+  through a share.
+
+  Render (from this directory):
+    chrome --headless --disable-gpu --force-device-scale-factor=2 \
+      --default-background-color=00000000 --window-size=1060,600 \
+      --screenshot=../invite-composite.png "file://$PWD/composite.html"
+  (same for composite-dark.html -> ../invite-composite-dark.png)
+-->
+<html lang="en">
+<meta charset="utf-8">
+<title>Wispers Access — invite composite</title>
+<style>
+  * { margin: 0; box-sizing: border-box; }
+  body {
+    font-family: "Nunito Sans", system-ui, sans-serif;
+    background: transparent;
+    display: flex; align-items: center; justify-content: center;
+    min-height: 100vh; padding: 2rem;
+  }
+  .stage { display: flex; align-items: center; gap: 2.5rem; }
+
+  /* ---- terminal window ---- */
+  .term {
+    background: #1b1e24; border-radius: 10px;
+    box-shadow: 0 12px 30px rgba(0,0,0,.25);
+    overflow: hidden; width: 560px;
+  }
+  .term-bar {
+    background: #2a2e37; padding: 9px 12px;
+    display: flex; align-items: center; gap: 7px;
+  }
+  .dot { width: 12px; height: 12px; border-radius: 50%; }
+  .dot.r { background: #ff5f57; } .dot.y { background: #febc2e; } .dot.g { background: #28c840; }
+  .term-title {
+    flex: 1; text-align: center; color: #9aa0aa; font-size: 12px;
+    margin-right: 45px; /* balance the traffic lights */
+  }
+  .term-body {
+    padding: 14px 16px 18px;
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 12.5px; line-height: 1.45; color: #d6d8dd;
+    white-space: pre;
+  }
+  .prompt { color: #8bc26a; }
+  .dim { color: #7b8290; }
+  .qrimg {
+    width: 200px; height: 200px; image-rendering: pixelated;
+    display: block; margin: 6px 0;
+  }
+
+  /* ---- scan hint ---- */
+  .hint { text-align: center; color: #4A6B36; }
+  .hint .arrow { font-size: 40px; line-height: 1; }
+  .hint .label { font-size: 14px; margin-top: 4px; }
+
+  /* ---- phone ---- */
+  .phone {
+    width: 232px; height: 494px; background: #0c0d10;
+    border-radius: 30px; padding: 9px;
+    box-shadow: 0 12px 30px rgba(0,0,0,.25);
+    position: relative;
+  }
+  .phone .screen {
+    width: 100%; height: 100%; border-radius: 22px; overflow: hidden;
+    background: #fff;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .phone .island {
+    position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
+    width: 74px; height: 20px; border-radius: 12px; background: #0c0d10;
+    z-index: 2;
+  }
+  /* placeholder — replace this div with <img class="shot" src="..."> */
+  .placeholder {
+    width: 82%; height: 88%; border: 2px dashed #b9c2b0; border-radius: 12px;
+    display: flex; align-items: center; justify-content: center;
+    color: #8a927f; font-size: 13px; text-align: center; padding: 1rem;
+  }
+  .shot { width: 100%; height: 100%; object-fit: cover; }
+</style>
+<body>
+<div class="stage">
+
+  <div class="term">
+    <div class="term-bar">
+      <div class="dot r"></div><div class="dot y"></div><div class="dot g"></div>
+      <div class="term-title">mbs@server: ~</div>
+    </div>
+    <div class="term-body"><span class="prompt">$</span> waserver invite dutyroster "Alice's phone" alice@example.com
+Invite code (valid for 24 hours):
+
+  wax_e3b7a4c92d15f8607b2a_7-h4kq9tm2xw
+
+<img class="qrimg" src="qr.png" alt="invite QR code">
+
+<span class="prompt">$</span> ▊</div>
+  </div>
+
+  <div class="hint">
+    <div class="arrow">→</div>
+    <div class="label">scan with the<br>Wispers&nbsp;Access&nbsp;app</div>
+  </div>
+
+  <div class="phone">
+    <div class="screen">
+      <img class="shot" src="phone.png" alt="Duty Roster app open in Wispers Access">
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
