@@ -23,7 +23,7 @@ because they're at the application level, they never clash, not even with your
 existing VPN. Wispers also aims to be as cloud-independent as possible.
 Peer-to-peer connection establishment still requires a cloud-hosted rendezvous
 server, but that server is cryptographically unable to eavesdrop on your traffic
-or to inject malicious nodes. Mesh VPNs do not offer this.
+or to inject malicious nodes.
 
 ## Project status
 
@@ -109,6 +109,29 @@ your normal browser.
 be fully cloud-independent, [run your own hub](https://github.com/s-te-ch/wispers-hub)
 and pass `--backend https://hub.example.com` to `waserver init`. Invite codes
 contain the backend, so guests land on the right hub automatically.
+
+## When to use something else
+
+Wispers Access shares web apps with specific, invited people, without having to
+publish those apps to the internet. Adjacent use cases may be better served by
+other tools. Some examples:
+
+- **ngrok** and friends are the fastest way to put a dev server on a public
+  URL. If you _want_ the whole internet to reach your app, that's the tool.
+- **Cloudflare Tunnel** publishes an app through Cloudflare's edge, with
+  optional access control in front. Great for public sites and for teams already
+  on Cloudflare. The trade-off is that Cloudflare terminates TLS and sees your
+  traffic.
+- **Tailscale** and other mesh VPNs connect whole devices into one private
+  network. If you can get everyone and all their devices onto a single tailnet,
+  that's a great solution. The Wispers author couldn't, got annoyed, and started
+  Wispers =)
+
+What sets Wispers Access apart is the trust model: connections are end-to-end
+encrypted _and_ membership is verified peer-to-peer, so the rendezvous server
+cryptographically cannot read your traffic or sneak a device into your share.
+Tunnel providers and mesh-VPN coordination servers have to be trusted on one or
+both of these.
 
 ## Licensing
 
