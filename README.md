@@ -8,6 +8,11 @@
 Wispers Access makes it easy to share a web app with your coworkers or friends
 without having to publish it to the internet.
 
+<p align="center">
+  <img src="assets/invite-composite.png" width="820"
+       alt="A terminal minting a Wispers Access invite, and a phone showing the shared app it unlocks"/>
+</p>
+
 This is most useful for your internal apps, for example your team's ERP
 software, that vibe-coded app your team finds useful, or your private photo
 archive at home. Until now, sharing these apps usually meant putting them on the
