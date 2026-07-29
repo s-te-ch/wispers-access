@@ -8,6 +8,24 @@ This is `waserver`, containerized: the binary plus a process supervisor. It's
 provider-agnostic — it runs in any docker-compose stack, plain `docker run`, or an
 orchestrator. Platform-specific recipes (Coolify, …) live under `integrations/`.
 
+## Quick start
+
+Share an app listening on the host's port 3000, using the prebuilt image:
+
+```sh
+docker run -d --name waserver --restart unless-stopped \
+  -e WC_API_KEY=… \
+  -e "SHARES=myapp | My App | host.docker.internal:3000" \
+  --add-host host.docker.internal:host-gateway \
+  -v waserver-data:/data \
+  ghcr.io/s-te-ch/wispers/access/waserver:latest
+
+docker exec waserver waserver invite myapp "Alice's phone" alice@example.com
+```
+
+For an app in the same compose stack, the upstream is just `service:port` and
+`--add-host` isn't needed. The rest of this README explains the moving parts.
+
 ## How it works
 
 ```

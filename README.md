@@ -63,9 +63,21 @@ API key: sign up at [connect.wispers.dev](https://connect.wispers.dev), open the
 
 Download the tarball for your platform from the
 [releases page](https://github.com/s-te-ch/wispers-access/releases) and put
-`waserver` on your `PATH`. Prefer containers? There's an image at
-`ghcr.io/s-te-ch/wispers/access/waserver` — see
-[waserver/docker](waserver/docker/README.md).
+`waserver` on your `PATH`.
+
+Prefer containers? This one command replaces steps 2 and 3
+(see [waserver/docker](waserver/docker/README.md) for details):
+
+```sh
+docker run -d --name waserver --restart unless-stopped \
+  -e WC_API_KEY=… \
+  -e "SHARES=myapp | My App | host.docker.internal:3000" \
+  --add-host host.docker.internal:host-gateway \
+  -v waserver-data:/data \
+  ghcr.io/s-te-ch/wispers/access/waserver:latest
+```
+
+Then prefix the commands in step 4 with `docker exec waserver`.
 
 ### 3. Share your app
 
