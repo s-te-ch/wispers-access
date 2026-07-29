@@ -16,7 +16,12 @@ nonisolated struct HeaderRewriter: Sendable {
         headers: inout [HTTPHeader],
         shareID: ShareID
     ) {
-        // No-op for now. Host rewriting / Origin scrubbing hooks land here.
+        // The proxy-auth cookie authenticates the web view to the loopback
+        // proxy; it must not travel upstream.
+        for i in headers.indices where headers[i].name.lowercased() == "cookie" {
+            headers[i].value = Self.stripProxyAuthPair(headers[i].value)
+        }
+        headers.removeAll { $0.name.lowercased() == "cookie" && $0.value.isEmpty }
     }
 
     func rewriteResponse(
@@ -24,12 +29,26 @@ nonisolated struct HeaderRewriter: Sendable {
         headers: inout [HTTPHeader],
         shareID: ShareID
     ) {
+        // The upstream app mustn't clobber the proxy-auth cookie in the web
+        // view's store.
+        headers.removeAll {
+            $0.name.lowercased() == "set-cookie"
+                && ProxyAuth.cookiePairs($0.value).first?.name == ProxyAuth.cookieName
+        }
         // Strip the Set-Cookie `Domain=` attribute so cookies bind to the
         // loopback origin the WebView actually talks to, not whatever host the
         // upstream app assumed it was running on.
         for i in headers.indices where headers[i].name.lowercased() == "set-cookie" {
             headers[i].value = Self.stripDomainAttribute(headers[i].value)
         }
+    }
+
+    private static func stripProxyAuthPair(_ cookie: String) -> String {
+        cookie
+            .split(separator: ";")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.hasPrefix(ProxyAuth.cookieName + "=") }
+            .joined(separator: "; ")
     }
 
     private static func stripDomainAttribute(_ setCookie: String) -> String {

@@ -54,6 +54,10 @@ final class BrowseSession: Identifiable {
         Task { [weak self] in
             guard let self else { return }
             do {
+                // Install the proxy-auth cookie before the first load; without
+                // it the proxy 403s the web view like any other local process.
+                await webView.configuration.websiteDataStore.httpCookieStore
+                    .setCookie(ProxyAuth.shared.cookie())
                 let port = try await proxy.start()
                 let url = URL(string: "http://127.0.0.1:\(port)/")
                 self.url = url
