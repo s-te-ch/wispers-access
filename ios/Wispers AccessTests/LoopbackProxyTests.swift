@@ -16,15 +16,51 @@ struct LoopbackProxyTests {
         // A SessionManager whose storage provider always fails, so every request
         // takes the "couldn't reach the serving node" path.
         let sessions = SessionManager(storageProvider: { _ in throw UpstreamUnavailable() })
-        let proxy = LoopbackProxy(shareID: ShareID("test-share"), sessions: sessions)
+        let auth = ProxyAuth()
+        let proxy = LoopbackProxy(shareID: ShareID("test-share"), sessions: sessions, auth: auth)
 
         let port = try await proxy.start()
         defer { proxy.stop() }
         #expect(port != 0, "proxy should bind an ephemeral loopback port")
 
-        let response = try await httpGet(port: port, path: "/")
+        let response = try await httpGet(port: port, path: "/", cookie: authCookie(auth))
         #expect(response.status == 502, "upstream failure should surface as 502 Bad Gateway")
         #expect(response.body.contains("Connection problem"))
+    }
+
+    @Test func rejectsRequestWithoutAuthCookie() async throws {
+        let sessions = SessionManager(storageProvider: { _ in throw UpstreamUnavailable() })
+        let proxy = LoopbackProxy(
+            shareID: ShareID("test-share"), sessions: sessions, auth: ProxyAuth())
+
+        let port = try await proxy.start()
+        defer { proxy.stop() }
+
+        let bare = try await httpGet(port: port, path: "/")
+        #expect(bare.status == 403, "requests without the auth cookie must be rejected")
+        #expect(!bare.body.contains("Connection problem"), "403 must not carry the error page")
+
+        let wrong = try await httpGet(
+            port: port, path: "/", cookie: "\(ProxyAuth.cookieName)=0000")
+        #expect(wrong.status == 403, "a wrong secret must be rejected")
+    }
+
+    @Test func acceptsAuthCookieAmongOthers() async throws {
+        let sessions = SessionManager(storageProvider: { _ in throw UpstreamUnavailable() })
+        let auth = ProxyAuth()
+        let proxy = LoopbackProxy(shareID: ShareID("test-share"), sessions: sessions, auth: auth)
+
+        let port = try await proxy.start()
+        defer { proxy.stop() }
+
+        // The upstream app's own cookies ride alongside ours in one header.
+        let response = try await httpGet(
+            port: port, path: "/", cookie: "theme=dark; \(authCookie(auth)); session=abc")
+        #expect(response.status == 502, "auth must pass even with other cookies present")
+    }
+
+    private func authCookie(_ auth: ProxyAuth) -> String {
+        "\(ProxyAuth.cookieName)=\(auth.secret)"
     }
 
     // MARK: - Minimal loopback HTTP client
@@ -34,7 +70,7 @@ struct LoopbackProxyTests {
         let body: String
     }
 
-    private func httpGet(port: UInt16, path: String) async throws -> HTTPResponse {
+    private func httpGet(port: UInt16, path: String, cookie: String? = nil) async throws -> HTTPResponse {
         let connection = NWConnection(
             host: "127.0.0.1",
             port: NWEndpoint.Port(rawValue: port)!,
@@ -59,7 +95,9 @@ struct LoopbackProxyTests {
             connection.start(queue: queue)
         }
 
-        let request = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n\r\n"
+        var request = "GET \(path) HTTP/1.1\r\nHost: 127.0.0.1:\(port)\r\n"
+        if let cookie { request += "Cookie: \(cookie)\r\n" }
+        request += "\r\n"
         try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
             connection.send(content: Data(request.utf8), completion: .contentProcessed { error in
                 if let error { cont.resume(throwing: error) } else { cont.resume() }

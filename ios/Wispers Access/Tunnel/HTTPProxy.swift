@@ -10,18 +10,21 @@ import WispersConnect
 ///
 /// Loopback-only bind, no `*.localhost` subdomain routing like Android: the
 /// share is fixed per proxy, so identity comes from which proxy (port) the
-/// request arrived on, not from the Host header.
+/// request arrived on, not from the Host header. Loopback is reachable by any
+/// process on the device, so every request must present the [ProxyAuth] cookie.
 final class LoopbackProxy: @unchecked Sendable {
     let shareID: ShareID
     private let sessions: SessionManager
+    private let auth: ProxyAuth
     private let rewriter = HeaderRewriter()
     private let queue = DispatchQueue(label: "dev.wispers.access.proxy", attributes: .concurrent)
     private var listener: NWListener?
     private(set) var port: UInt16 = 0
 
-    init(shareID: ShareID, sessions: SessionManager) {
+    init(shareID: ShareID, sessions: SessionManager, auth: ProxyAuth = .shared) {
         self.shareID = shareID
         self.sessions = sessions
+        self.auth = auth
     }
 
     /// Starts listening on a loopback ephemeral port and returns it.
@@ -37,6 +40,7 @@ final class LoopbackProxy: @unchecked Sendable {
 
         let shareID = self.shareID
         let sessions = self.sessions
+        let auth = self.auth
         let rewriter = self.rewriter
         let queue = self.queue
         listener.newConnectionHandler = { nwConnection in
@@ -46,6 +50,7 @@ final class LoopbackProxy: @unchecked Sendable {
                     browser: connection,
                     shareID: shareID,
                     sessions: sessions,
+                    auth: auth,
                     rewriter: rewriter,
                     queue: queue
                 ).run()
@@ -91,6 +96,7 @@ nonisolated final class ProxyConnection: @unchecked Sendable {
     private let browser: TCPConnection
     private let shareID: ShareID
     private let sessions: SessionManager
+    private let auth: ProxyAuth
     private let rewriter: HeaderRewriter
     private let queue: DispatchQueue
     private var responded = false
@@ -99,12 +105,14 @@ nonisolated final class ProxyConnection: @unchecked Sendable {
         browser: TCPConnection,
         shareID: ShareID,
         sessions: SessionManager,
+        auth: ProxyAuth,
         rewriter: HeaderRewriter,
         queue: DispatchQueue
     ) {
         self.browser = browser
         self.shareID = shareID
         self.sessions = sessions
+        self.auth = auth
         self.rewriter = rewriter
         self.queue = queue
     }
@@ -118,6 +126,13 @@ nonisolated final class ProxyConnection: @unchecked Sendable {
         }
         do {
             guard let request = try await readRequest() else {
+                browser.cancel()
+                return
+            }
+            // Reject foreign local processes before any upstream work: no QUIC
+            // stream is opened, and nothing but a bare 403 leaks back.
+            guard auth.authorizes(request.headers) else {
+                try await writeForbidden()
                 browser.cancel()
                 return
             }
@@ -331,6 +346,15 @@ nonisolated final class ProxyConnection: @unchecked Sendable {
     }
 
     // MARK: - Error page
+
+    private func writeForbidden() async throws {
+        responded = true
+        var head = "HTTP/1.1 403 Forbidden\r\n"
+        head += "Content-Length: 0\r\n"
+        head += "Connection: close\r\n\r\n"
+        try await browser.write(latin1(head))
+        browser.finishSending()
+    }
 
     private func writeErrorPage(_ error: Error) async throws {
         responded = true
