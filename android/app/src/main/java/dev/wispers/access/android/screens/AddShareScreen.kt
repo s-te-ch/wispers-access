@@ -158,7 +158,7 @@ class AddShareViewModel @Inject constructor(
     /**
      * Rolls back a partial join. The logout is best-effort and matters once
      * `register` has succeeded: it revokes + deregisters the node, so the hub
-     * doesn't keep a never-activated registration whose group seat no
+     * doesn't keep a never-activated registration whose quota usage no
      * per-node operation can reclaim. Before registration it fails without
      * having reached the hub, and the local delete is all that's needed.
      */

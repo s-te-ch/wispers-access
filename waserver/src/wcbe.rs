@@ -178,7 +178,7 @@ impl Client {
         res.json().await.context("failed to parse response")
     }
 
-    /// Deletes a node's registration, freeing its quota seat. The backend
+    /// Deletes a node's registration, freeing the quota it occupies. The backend
     /// only permits this once the group's roster marks the node revoked
     /// (409 otherwise), so callers revoke first and delete second.
     pub async fn delete_node(&self, cg_id: &str, node_number: i32) -> Result<DeleteNodeOutcome> {
