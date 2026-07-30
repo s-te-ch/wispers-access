@@ -11,6 +11,14 @@ type ConnectivityGroupId = String;
 
 pub const MANAGED_API_BASE: &str = "https://connect.wispers.dev/api/v1";
 
+/// The public ID part of an API key: everything before the dot in
+/// `wc_<env>_<id>.<secret>`. Safe to display. `None` when the key doesn't
+/// have that shape.
+pub fn key_id(api_key: &str) -> Option<&str> {
+    let (id, _secret) = api_key.split_once('.')?;
+    Some(id)
+}
+
 /// The Integrator REST API base to use, based on the --backend flag.
 pub fn api_base(backend: Option<&str>) -> String {
     match backend {
@@ -69,6 +77,22 @@ pub struct NodeQuota {
     /// `None` = unlimited (a backend without plans, e.g. standalone).
     pub limit: Option<i32>,
     pub current: i32,
+}
+
+/// Domain-level stats as returned by `GET /stats`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Stats {
+    pub connectivity_groups: GroupsStats,
+}
+
+/// The domain's connectivity-group quota usage.
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupsStats {
+    pub count: i32,
+    /// `None` = unlimited (a backend without plans, e.g. standalone).
+    pub max: Option<i32>,
 }
 
 /// One entry of `GET /connectivity-groups/:id/registration-tokens`.
@@ -137,6 +161,19 @@ impl Client {
             api_key: api_key.to_owned(),
             client: reqwest::Client::new(),
         }
+    }
+
+    pub async fn get_stats(&self) -> Result<Stats> {
+        let url = format!("{}/stats", self.api_base);
+        let res = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .context("failed to send request")?;
+        let res = ok_or_error(res).await?;
+        res.json().await.context("failed to parse response")
     }
 
     pub async fn add_connectivity_group(&self, name: &str) -> Result<ConnectivityGroupId> {
@@ -311,6 +348,29 @@ mod tests {
         // `limit: null` = unlimited (standalone mode).
         let unlimited: NodeQuota = serde_json::from_str(r#"{"limit":null,"current":3}"#).unwrap();
         assert_eq!(unlimited.limit, None);
+    }
+
+    #[test]
+    fn key_id_never_contains_secret_material() {
+        assert_eq!(
+            key_id("wc_prod_1a2B3c4D5e6F7g8H9.supersecretsupersecret"),
+            Some("wc_prod_1a2B3c4D5e6F7g8H9")
+        );
+        // An unrecognisable key yields nothing rather than a guess.
+        assert_eq!(key_id("no-dot-in-here"), None);
+    }
+
+    #[test]
+    fn stats_parse_groups_quota() {
+        let s: Stats =
+            serde_json::from_str(r#"{"connectivityGroups":{"count":5,"max":7}}"#).unwrap();
+        let groups = s.connectivity_groups;
+        assert_eq!((groups.count, groups.max), (5, Some(7)));
+
+        // `max: null` = unlimited (standalone mode).
+        let s: Stats =
+            serde_json::from_str(r#"{"connectivityGroups":{"count":5,"max":null}}"#).unwrap();
+        assert_eq!(s.connectivity_groups.max, None);
     }
 
     #[test]

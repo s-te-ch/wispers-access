@@ -25,6 +25,7 @@ pub async fn run(share: Option<&str>, json: bool) -> Result<()> {
             }
             StatusReport {
                 shares: vec![gather_share(share).await],
+                groups_quota: None,
             }
         }
         None => gather_fleet().await?,
@@ -45,6 +46,31 @@ pub async fn run(share: Option<&str>, json: bool) -> Result<()> {
 #[serde(rename_all = "camelCase")]
 struct StatusReport {
     shares: Vec<ShareStatus>,
+    /// Domain-wide connectivity-group quota, one entry per distinct
+    /// backend + API key among the shares. Fleet view only; omitted when
+    /// no stats query succeeded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    groups_quota: Option<Vec<GroupsQuota>>,
+}
+
+/// One backend's connectivity-group quota usage (see `groupsQuota`).
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GroupsQuota {
+    /// Custom backend URL, `null` for the managed backend.
+    backend: Option<String>,
+    /// The local shares whose API key counts against this quota. Two shares
+    /// with different keys live in different domains — each gets its own
+    /// entry, even on the same backend.
+    shares: Vec<String>,
+    /// The API key's public ID part (`wc_<env>_<id>`, everything before the
+    /// dot — the secret half is never shown). Matches the key listing in the
+    /// backend's console. `null` when the key doesn't have the expected shape.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    key_id: Option<String>,
+    count: i32,
+    /// `null` = unlimited.
+    max: Option<i32>,
 }
 
 #[derive(Serialize)]
@@ -121,6 +147,14 @@ struct Member {
 async fn gather_fleet() -> Result<StatusReport> {
     let mut names = storage::list_shares()?;
     names.sort();
+    let (shares, groups_quota) = tokio::join!(gather_shares(&names), gather_groups_quota(&names));
+    Ok(StatusReport {
+        shares: shares?,
+        groups_quota,
+    })
+}
+
+async fn gather_shares(names: &[String]) -> Result<Vec<ShareStatus>> {
     // Query all shares concurrently.
     let mut tasks = tokio::task::JoinSet::new();
     for (i, name) in names.iter().enumerate() {
@@ -132,9 +166,58 @@ async fn gather_fleet() -> Result<StatusReport> {
         let (i, share) = joined.context("status task failed")?;
         shares[i] = Some(share);
     }
-    Ok(StatusReport {
-        shares: shares.into_iter().flatten().collect(),
-    })
+    Ok(shares.into_iter().flatten().collect())
+}
+
+/// Queries `GET /stats` once per distinct backend + API key among the
+/// shares. The group count is domain-wide, so it can exceed the number of
+/// local shares (other machines and integrations mint into the same
+/// domain). `None` when no query succeeded (connectivity trouble already
+/// surfaces per share as `membersError`).
+async fn gather_groups_quota(names: &[String]) -> Option<Vec<GroupsQuota>> {
+    struct Target {
+        api_base: String,
+        api_key: String,
+        backend: Option<String>,
+        shares: Vec<String>,
+    }
+    let mut targets: Vec<Target> = Vec::new();
+    for name in names {
+        let Some(cfg) = storage::ShareStateStore::new(name)
+            .ok()
+            .and_then(|s| s.load_share_config().ok())
+            .flatten()
+        else {
+            continue;
+        };
+        let api_base = wcbe::api_base(cfg.backend.as_deref());
+        match targets
+            .iter_mut()
+            .find(|t| t.api_base == api_base && t.api_key == cfg.api_key)
+        {
+            Some(t) => t.shares.push(name.clone()),
+            None => targets.push(Target {
+                api_base,
+                api_key: cfg.api_key,
+                backend: cfg.backend,
+                shares: vec![name.clone()],
+            }),
+        }
+    }
+    let mut quotas = Vec::new();
+    for t in targets {
+        let client = wcbe::Client::new(&t.api_key, &t.api_base);
+        if let Ok(stats) = client.get_stats().await {
+            quotas.push(GroupsQuota {
+                backend: t.backend,
+                shares: t.shares,
+                key_id: wcbe::key_id(&t.api_key).map(str::to_owned),
+                count: stats.connectivity_groups.count,
+                max: stats.connectivity_groups.max,
+            });
+        }
+    }
+    (!quotas.is_empty()).then_some(quotas)
 }
 
 async fn gather_share(name: &str) -> ShareStatus {
@@ -383,6 +466,23 @@ fn print_fleet(report: &StatusReport) {
         .unwrap();
     }
     tw.flush().unwrap();
+
+    if let Some(quotas) = &report.groups_quota {
+        println!("\nShare usage per API key");
+        for q in quotas {
+            let limit = match q.max {
+                Some(max) => max.to_string(),
+                None => "∞".to_owned(),
+            };
+            println!(
+                "   {} ({}): {} of {}",
+                q.key_id.as_deref().unwrap_or("unknown key"),
+                q.shares.join(", "),
+                q.count,
+                limit
+            );
+        }
+    }
 }
 
 fn print_share_details(s: &ShareStatus) {
@@ -394,16 +494,12 @@ fn print_share_details(s: &ShareStatus) {
         None => s.name.clone(),
     };
     writeln!(&mut tw, "  Name\t{}", name).unwrap();
-    let backend = match &s.backend {
-        Some(b) => format!("self-hosted ({})", b),
-        None => {
-            let host = wcbe::MANAGED_API_BASE
-                .trim_start_matches("https://")
-                .trim_end_matches("/api/v1");
-            format!("managed ({})", host)
-        }
-    };
-    writeln!(&mut tw, "  Backend\t{}", backend).unwrap();
+    writeln!(
+        &mut tw,
+        "  Backend\t{}",
+        backend_label(s.backend.as_deref())
+    )
+    .unwrap();
     writeln!(
         &mut tw,
         "  Connectivity group\t{}",
@@ -522,10 +618,7 @@ fn print_share_details(s: &ShareStatus) {
 /// Renders node-quota usage, e.g. `11 of 12 used (9 members + 2 pending
 /// invites)`.
 fn fmt_quota(quota: &wcbe::NodeQuota, member_count: usize) -> String {
-    let used = match quota.limit {
-        Some(limit) => format!("{} of {} used", quota.current, limit),
-        None => format!("{} used (no limit)", quota.current),
-    };
+    let used = fmt_used(quota.current, quota.limit);
     let pending = (quota.current.max(0) as usize).saturating_sub(member_count);
     if pending == 0 {
         return used;
@@ -538,6 +631,28 @@ fn fmt_quota(quota: &wcbe::NodeQuota, member_count: usize) -> String {
         pending,
         if pending == 1 { "" } else { "s" },
     )
+}
+
+/// `11 of 12 used`, or `11 used (no limit)` on an unlimited backend.
+fn fmt_used(current: i32, limit: Option<i32>) -> String {
+    match limit {
+        Some(limit) => format!("{} of {} used", current, limit),
+        None => format!("{} used (no limit)", current),
+    }
+}
+
+/// `managed (connect.wispers.dev)`, or `self-hosted (<url>)` for a custom
+/// backend.
+fn backend_label(backend: Option<&str>) -> String {
+    match backend {
+        Some(b) => format!("self-hosted ({})", b),
+        None => {
+            let host = wcbe::MANAGED_API_BASE
+                .trim_start_matches("https://")
+                .trim_end_matches("/api/v1");
+            format!("managed ({})", host)
+        }
+    }
 }
 
 //-- Time formatting -----------------------------------------------------------
@@ -650,6 +765,7 @@ mod tests {
                     current: 11,
                 }),
             }],
+            groups_quota: None,
         };
         let json = serde_json::to_value(&report).unwrap();
         let share = &json["shares"][0];
@@ -672,6 +788,29 @@ mod tests {
         assert!(share.get("invitesError").is_none());
         assert_eq!(share["nodeQuota"]["limit"], 12);
         assert_eq!(share["nodeQuota"]["current"], 11);
+        // Single-share reports have no fleet-level groups quota; omitted.
+        assert!(json.get("groupsQuota").is_none());
+    }
+
+    #[test]
+    fn groups_quota_json_shape() {
+        let report = StatusReport {
+            shares: vec![],
+            groups_quota: Some(vec![GroupsQuota {
+                backend: None,
+                shares: vec!["myapp".to_owned()],
+                key_id: Some("wc_prod_1a2B3c4D5e6F7g8H9".to_owned()),
+                count: 5,
+                max: Some(7),
+            }]),
+        };
+        let json = serde_json::to_value(&report).unwrap();
+        let quota = &json["groupsQuota"][0];
+        assert_eq!(quota["backend"], serde_json::Value::Null);
+        assert_eq!(quota["shares"][0], "myapp");
+        assert_eq!(quota["keyId"], "wc_prod_1a2B3c4D5e6F7g8H9");
+        assert_eq!(quota["count"], 5);
+        assert_eq!(quota["max"], 7);
     }
 
     #[test]
