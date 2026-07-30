@@ -65,6 +65,11 @@ struct ShareStatus {
     invites: Option<Vec<Invite>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     invites_error: Option<String>,
+    /// Node-quota usage of the group: `current` (members + pending invites)
+    /// vs `limit` (`null` = unlimited). Omitted when the backend doesn't
+    /// report it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    node_quota: Option<wcbe::NodeQuota>,
 }
 
 #[derive(Serialize)]
@@ -173,6 +178,7 @@ async fn gather_share(name: &str) -> ShareStatus {
         members_error,
         invites,
         invites_error,
+        node_quota: group.as_ref().and_then(|g| g.node_quota),
     }
 }
 
@@ -407,6 +413,10 @@ fn print_share_details(s: &ShareStatus) {
     if let Some(created) = &s.group_created_at {
         writeln!(&mut tw, "  Created\t{}", fmt_utc(created)).unwrap();
     }
+    if let Some(quota) = &s.node_quota {
+        let members = s.members.as_ref().map(|m| m.len()).unwrap_or(0);
+        writeln!(&mut tw, "  Quota\t{}", fmt_quota(quota, members)).unwrap();
+    }
 
     writeln!(&mut tw, "\nServer").unwrap();
     let server = &s.server;
@@ -507,6 +517,27 @@ fn print_share_details(s: &ShareStatus) {
     }
 
     tw.flush().unwrap();
+}
+
+/// Renders node-quota usage, e.g. `11 of 12 used (9 members + 2 pending
+/// invites)`.
+fn fmt_quota(quota: &wcbe::NodeQuota, member_count: usize) -> String {
+    let used = match quota.limit {
+        Some(limit) => format!("{} of {} used", quota.current, limit),
+        None => format!("{} used (no limit)", quota.current),
+    };
+    let pending = (quota.current.max(0) as usize).saturating_sub(member_count);
+    if pending == 0 {
+        return used;
+    }
+    format!(
+        "{} ({} member{} + {} pending invite{})",
+        used,
+        member_count,
+        if member_count == 1 { "" } else { "s" },
+        pending,
+        if pending == 1 { "" } else { "s" },
+    )
 }
 
 //-- Time formatting -----------------------------------------------------------
@@ -614,6 +645,10 @@ mod tests {
                     status: "pending",
                 }]),
                 invites_error: None,
+                node_quota: Some(wcbe::NodeQuota {
+                    limit: Some(12),
+                    current: 11,
+                }),
             }],
         };
         let json = serde_json::to_value(&report).unwrap();
@@ -635,6 +670,24 @@ mod tests {
         assert!(share["server"].get("error").is_none());
         assert!(share.get("membersError").is_none());
         assert!(share.get("invitesError").is_none());
+        assert_eq!(share["nodeQuota"]["limit"], 12);
+        assert_eq!(share["nodeQuota"]["current"], 11);
+    }
+
+    #[test]
+    fn quota_renders_pending_breakdown() {
+        let quota = |limit, current| wcbe::NodeQuota { limit, current };
+        assert_eq!(
+            fmt_quota(&quota(Some(12), 11), 9),
+            "11 of 12 used (9 members + 2 pending invites)"
+        );
+        // No pending invites: the member count would just repeat the table.
+        assert_eq!(fmt_quota(&quota(Some(12), 9), 9), "9 of 12 used");
+        assert_eq!(
+            fmt_quota(&quota(Some(12), 2), 1),
+            "2 of 12 used (1 member + 1 pending invite)"
+        );
+        assert_eq!(fmt_quota(&quota(None, 3), 3), "3 used (no limit)");
     }
 
     #[test]

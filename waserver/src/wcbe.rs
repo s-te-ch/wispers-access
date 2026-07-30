@@ -55,6 +55,20 @@ pub struct GroupDetail {
     pub name: Option<String>,
     #[serde(default)]
     pub nodes: Vec<GroupNode>,
+    /// `None` on backends that predate the field.
+    #[serde(default)]
+    pub node_quota: Option<NodeQuota>,
+}
+
+/// A group's node-quota usage. `current` counts registered nodes plus
+/// unexpired pending registration tokens. The quota spent on pending tokens is
+/// `current` minus the length of `nodes`.
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeQuota {
+    /// `None` = unlimited (a backend without plans, e.g. standalone).
+    pub limit: Option<i32>,
+    pub current: i32,
 }
 
 /// One entry of `GET /connectivity-groups/:id/registration-tokens`.
@@ -239,5 +253,30 @@ impl Client {
         let data: RegistrationTokenResponse =
             res.json().await.context("failed to parse response")?;
         Ok(data.token)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_detail_parses_node_quota() {
+        let detail: GroupDetail = serde_json::from_str(
+            r#"{"createdAt":"2026-07-30T00:00:00Z","nodes":[],"nodeQuota":{"limit":12,"current":3}}"#,
+        )
+        .unwrap();
+        let quota = detail.node_quota.unwrap();
+        assert_eq!(quota.limit, Some(12));
+        assert_eq!(quota.current, 3);
+
+        // Backends that predate the field omit it.
+        let old: GroupDetail =
+            serde_json::from_str(r#"{"createdAt":"2026-07-30T00:00:00Z"}"#).unwrap();
+        assert!(old.node_quota.is_none());
+
+        // `limit: null` = unlimited (standalone mode).
+        let unlimited: NodeQuota = serde_json::from_str(r#"{"limit":null,"current":3}"#).unwrap();
+        assert_eq!(unlimited.limit, None);
     }
 }
