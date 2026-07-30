@@ -94,6 +94,29 @@ pub enum DeleteNodeOutcome {
     AlreadyGone,
 }
 
+/// A quota rejection (HTTP 429 with a `quota exceeded` body). Callers
+/// downcast to this to render actionable messages. `Display` is the
+/// fallback rendering.
+#[derive(Debug, Clone)]
+pub struct QuotaExceeded {
+    /// Which quota, e.g. `nodes_per_group` or `groups_per_domain`.
+    pub quota: String,
+    pub limit: i32,
+    pub current: i32,
+}
+
+impl std::fmt::Display for QuotaExceeded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} quota exceeded ({} of {} used)",
+            self.quota, self.current, self.limit
+        )
+    }
+}
+
+impl std::error::Error for QuotaExceeded {}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupNode {
@@ -128,11 +151,7 @@ impl Client {
             .send()
             .await
             .context("failed to send request")?;
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            anyhow::bail!("server returned {status}: {body}");
-        }
+        let res = ok_or_error(res).await?;
         let data: AddGroupResponse = res.json().await.context("failed to parse response")?;
         Ok(data.id)
     }
@@ -146,11 +165,7 @@ impl Client {
             .send()
             .await
             .context("failed to send request")?;
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            anyhow::bail!("server returned {status}: {body}");
-        }
+        ok_or_error(res).await?;
         Ok(())
     }
 
@@ -163,11 +178,7 @@ impl Client {
             .send()
             .await
             .context("failed to send request")?;
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            anyhow::bail!("server returned {status}: {body}");
-        }
+        let res = ok_or_error(res).await?;
         res.json().await.context("failed to parse response")
     }
 
@@ -184,11 +195,7 @@ impl Client {
             .send()
             .await
             .context("failed to send request")?;
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            anyhow::bail!("server returned {status}: {body}");
-        }
+        let res = ok_or_error(res).await?;
         res.json().await.context("failed to parse response")
     }
 
@@ -210,11 +217,7 @@ impl Client {
         if res.status() == reqwest::StatusCode::NOT_FOUND {
             return Ok(DeleteNodeOutcome::AlreadyGone);
         }
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            anyhow::bail!("server returned {status}: {body}");
-        }
+        ok_or_error(res).await?;
         Ok(DeleteNodeOutcome::Deleted)
     }
 
@@ -245,15 +248,45 @@ impl Client {
             .send()
             .await
             .context("failed to send request")?;
-        if !res.status().is_success() {
-            let status = res.status();
-            let body = res.text().await.unwrap_or_default();
-            anyhow::bail!("server returned {status}: {body}");
-        }
+        let res = ok_or_error(res).await?;
         let data: RegistrationTokenResponse =
             res.json().await.context("failed to parse response")?;
         Ok(data.token)
     }
+}
+
+/// Passes success responses through, everything else becomes an error —
+/// quota 429s as a typed [`QuotaExceeded`], the rest as "server returned…".
+async fn ok_or_error(res: reqwest::Response) -> Result<reqwest::Response> {
+    if res.status().is_success() {
+        return Ok(res);
+    }
+    let status = res.status();
+    let body = res.text().await.unwrap_or_default();
+    Err(classify_error(status, &body))
+}
+
+/// The backend's rate limiter also answers 429, so quota detection matches
+/// on the body's `error` field, not the status alone.
+fn classify_error(status: reqwest::StatusCode, body: &str) -> anyhow::Error {
+    #[derive(Deserialize)]
+    struct QuotaBody {
+        error: String,
+        quota: String,
+        limit: i32,
+        current: i32,
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        && let Ok(q) = serde_json::from_str::<QuotaBody>(body)
+        && q.error == "quota exceeded"
+    {
+        return anyhow::Error::new(QuotaExceeded {
+            quota: q.quota,
+            limit: q.limit,
+            current: q.current,
+        });
+    }
+    anyhow::anyhow!("server returned {status}: {body}")
 }
 
 #[cfg(test)]
@@ -278,5 +311,33 @@ mod tests {
         // `limit: null` = unlimited (standalone mode).
         let unlimited: NodeQuota = serde_json::from_str(r#"{"limit":null,"current":3}"#).unwrap();
         assert_eq!(unlimited.limit, None);
+    }
+
+    #[test]
+    fn quota_429_classifies_as_typed_error() {
+        let e = classify_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"quota exceeded","quota":"nodes_per_group","limit":12,"current":12}"#,
+        );
+        let q = e.downcast_ref::<QuotaExceeded>().unwrap();
+        assert_eq!(
+            (q.quota.as_str(), q.limit, q.current),
+            ("nodes_per_group", 12, 12)
+        );
+        assert_eq!(
+            q.to_string(),
+            "nodes_per_group quota exceeded (12 of 12 used)"
+        );
+
+        // The rate limiter's 429 has a different body and stays generic.
+        let e = classify_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            r#"{"error":"rate limit exceeded","retryAfterSeconds":42}"#,
+        );
+        assert!(e.downcast_ref::<QuotaExceeded>().is_none());
+        assert!(e.to_string().contains("429"));
+
+        let e = classify_error(reqwest::StatusCode::INTERNAL_SERVER_ERROR, "boom");
+        assert!(e.to_string().contains("boom"));
     }
 }

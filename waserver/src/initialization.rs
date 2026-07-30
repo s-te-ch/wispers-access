@@ -23,7 +23,10 @@ pub async fn up(
 
     // Create a Wispers connectivity group for the app share.
     let wcbe_client = wcbe::Client::new(api_key, &wcbe::api_base(backend));
-    let cg_id = wcbe_client.add_connectivity_group(display_name).await?;
+    let cg_id = wcbe_client
+        .add_connectivity_group(display_name)
+        .await
+        .map_err(explain_group_quota)?;
 
     // Write the ShareConfig.
     let cfg = storage::ShareConfig::new(api_key, &cg_id, backend);
@@ -87,10 +90,53 @@ pub async fn down(share: &str) -> Result<()> {
     Ok(())
 }
 
+/// Group creation is where the plan's connectivity-group quota bites.
+/// Make the error actionable.
+fn explain_group_quota(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast_ref::<wcbe::QuotaExceeded>() {
+        Some(q) if q.quota == "groups_per_domain" => anyhow::anyhow!(
+            "cannot create a new share: your plan's connectivity-group quota \
+             is used up ({} of {}). Delete an unused share with `waserver \
+             deinit <share>` or upgrade your plan.",
+            q.current,
+            q.limit
+        ),
+        _ => e,
+    }
+}
+
 fn is_valid_share_name(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64  // pick your limit
         && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         && !(s.starts_with('-') || s.starts_with('_'))
         && !(s.ends_with('-') || s.ends_with('_'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_quota_error_names_the_way_out() {
+        let quota = anyhow::Error::new(wcbe::QuotaExceeded {
+            quota: "groups_per_domain".to_owned(),
+            limit: 7,
+            current: 7,
+        });
+        let msg = explain_group_quota(quota).to_string();
+        assert!(msg.contains("7 of 7"), "{msg}");
+        assert!(msg.contains("waserver deinit"), "{msg}");
+
+        // Other errors pass through unchanged, quota ones from other
+        // quotas included (a nodes_per_group 429 here would be a backend
+        // surprise; don't mistranslate it).
+        let other = anyhow::Error::new(wcbe::QuotaExceeded {
+            quota: "nodes_per_group".to_owned(),
+            limit: 12,
+            current: 12,
+        });
+        let msg = explain_group_quota(other).to_string();
+        assert_eq!(msg, "nodes_per_group quota exceeded (12 of 12 used)");
+    }
 }

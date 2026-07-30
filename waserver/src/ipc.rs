@@ -290,10 +290,7 @@ async fn handle_invite(
 ) -> Response {
     let token = match handle.get_registration_token(node_name, user_id).await {
         Ok(t) => t,
-        Err(e) => {
-            let e = format!("error generating registration token: {}", e);
-            return Response::error(e);
-        }
+        Err(e) => return Response::error(invite_error_message(&e)),
     };
     let code = match handle.get_activation_code().await {
         Ok(c) => c,
@@ -306,6 +303,19 @@ async fn handle_invite(
         registration_token: token,
         activation_code: code,
     }))
+}
+
+/// Explain a quota rejection after an `invite` if it happens.
+fn invite_error_message(e: &anyhow::Error) -> String {
+    match e.downcast_ref::<crate::wcbe::QuotaExceeded>() {
+        Some(q) if q.quota == "nodes_per_group" => format!(
+            "the share is full: {} of {} node quota used (members and pending \
+             invites). Revoke nodes with `waserver revoke` or wait for a pending
+             invite to expire. `waserver status <share>` shows the available quota.",
+            q.current, q.limit
+        ),
+        _ => format!("error generating registration token: {}", e),
+    }
 }
 
 async fn handle_shutdown(handle: &crate::serving::ServingHandle) -> Response {
@@ -406,4 +416,29 @@ fn parse_port_file(contents: &str) -> Option<(u16, &str)> {
     let port: u16 = contents[..colon].parse().ok()?;
     let password = &contents[colon + 1..];
     Some((port, password))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invite_quota_error_names_the_way_out() {
+        let quota = anyhow::Error::new(crate::wcbe::QuotaExceeded {
+            quota: "nodes_per_group".to_owned(),
+            limit: 12,
+            current: 12,
+        });
+        let msg = invite_error_message(&quota);
+        assert!(msg.contains("12 of 12 node quota used"), "{msg}");
+        assert!(msg.contains("waserver revoke"), "{msg}");
+
+        // Other errors keep the raw passthrough.
+        let other = anyhow::anyhow!("server returned 500: boom");
+        let msg = invite_error_message(&other);
+        assert_eq!(
+            msg,
+            "error generating registration token: server returned 500: boom"
+        );
+    }
 }
