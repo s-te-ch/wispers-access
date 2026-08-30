@@ -1,6 +1,6 @@
 [package]
 name = "waserver"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -25,7 +25,7 @@ thiserror = "2"
 tracing = "0.1"
 tracing-appender = "0.2"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-wispers-connect = "0.12.0"
+wispers-connect = "0.14.0"
 qrcode = "0.14"
 image = { version = "0.25", default-features = false, features = ["png"] }
 
