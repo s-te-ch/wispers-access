@@ -3206,6 +3206,7 @@ dependencies = [
  "image",
  "libc",
  "qrcode",
+ "rand 0.10.2",
  "reqwest",
  "rustls",
  "serde",

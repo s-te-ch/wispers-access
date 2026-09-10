@@ -13,10 +13,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::net::{UnixListener, UnixStream};
 
 #[cfg(unix)]
-pub type IpcStream = UnixStream;
-#[cfg(windows)]
-pub type IpcStream = TcpStream;
-#[cfg(unix)]
 type ReadHalf = tokio::net::unix::OwnedReadHalf;
 #[cfg(windows)]
 type ReadHalf = tokio::net::tcp::OwnedReadHalf;
@@ -68,7 +64,9 @@ impl Server {
                     continue;
                 }
             };
-            let shutdown = handle_request(stream, serving_handle.clone()).await;
+            let (reader, writer) = stream.into_split();
+            let reader = BufReader::new(reader);
+            let shutdown = handle_request(reader, writer, serving_handle.clone()).await;
             if shutdown {
                 break;
             }
@@ -87,7 +85,7 @@ pub struct Server {
 #[cfg(windows)]
 impl Server {
     pub async fn bind(share: &str) -> Result<Self> {
-        use rand::Rng;
+        use rand::distr::SampleString;
 
         let path = ipc_path(share);
 
@@ -99,9 +97,7 @@ impl Server {
             {
                 anyhow::bail!("daemon already running on port {}", port);
             }
-            fs::remove_file(&path)
-                .await
-                .context("failed to remove stale port file")?;
+            fs::remove_file(&path).context("failed to remove stale port file")?;
         }
 
         // Ensure the ports directory exists.
@@ -116,11 +112,7 @@ impl Server {
         let port = listener.local_addr()?.port();
 
         // Write a random password for IPC auth.
-        let password: String = rand::rng()
-            .sample_iter(rand::distr::Alphanumeric)
-            .take(32)
-            .map(char::from)
-            .collect();
+        let password = rand::distr::Alphanumeric.sample_string(&mut rand::rng(), 32);
         fs::write(&path, format!("{}:{}", port, password)).context("failed to write port file")?;
 
         Ok(Self {
@@ -138,15 +130,16 @@ impl Server {
                     continue;
                 }
             };
-            let mut buf_stream = BufReader::new(stream);
+            let (reader, writer) = stream.into_split();
+            let mut reader = BufReader::new(reader);
             let mut password_line = String::new();
-            if let Err(_) = buf_stream.read_line(&mut password_line).await {
+            if reader.read_line(&mut password_line).await.is_err() {
                 continue;
             }
             if password_line.trim() != self.windows_ipc_password {
                 continue; // Wrong password.
             }
-            let shutdown = handle_request(stream, serving_handle.clone()).await;
+            let shutdown = handle_request(reader, writer, serving_handle.clone()).await;
             if shutdown {
                 break;
             }
@@ -227,9 +220,11 @@ impl Response {
     }
 }
 
-async fn handle_request(stream: IpcStream, handle: crate::serving::ServingHandle) -> bool {
-    let (reader, writer) = stream.into_split();
-    let reader = BufReader::new(reader);
+async fn handle_request(
+    reader: BufReader<ReadHalf>,
+    writer: WriteHalf,
+    handle: crate::serving::ServingHandle,
+) -> bool {
     let mut shutdown = false;
     let response = match parse_request(reader).await {
         Ok(Request::Status) => handle_status(&handle).await,
@@ -364,7 +359,6 @@ impl Client {
     pub async fn connect(share: &str) -> Result<Self> {
         let path = ipc_path(share);
         let contents = fs::read_to_string(&path)
-            .await
             .with_context(|| format!("daemon not running (no port file {:?})", path))?;
         let (port, password) = parse_port_file(&contents).context("invalid daemon port file")?;
         let stream = TcpStream::connect(("127.0.0.1", port))
