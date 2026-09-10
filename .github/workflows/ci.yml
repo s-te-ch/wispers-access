@@ -1,5 +1,6 @@
 # Validation for every PR and push to main. This currently covers Rust (fmt,
-# clippy, tests) and the Android app (unit tests, debug build).
+# clippy, tests on Linux; cargo check on Windows) and the Android app (unit
+# tests, debug build).
 #
 # TODO: Figure out how to cover iOS without making CI take forever.
 #
@@ -51,6 +52,33 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+
+  # Windows is compile-checked only: nothing is released for it yet, but both
+  # crates carry cfg(windows) branches and this keeps them from rotting.
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # cmake, MSVC and LLVM (libclang for bindgen) are preinstalled. The
+      # BoringSSL and AWS-LC builds additionally need NASM for their assembly,
+      # and tonic/prost need protoc.
+      - name: Install native build deps
+        timeout-minutes: 5
+        run: |
+          choco install --no-progress -y nasm protoc
+          # choco drops NASM in its own directory and doesn't add it to PATH;
+          # neither BoringSSL's nor AWS-LC's cmake finds it without this.
+          echo 'C:\Program Files\NASM' >> $env:GITHUB_PATH
+
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (stable)
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - run: cargo check --workspace --all-targets --locked
 
   android:
     runs-on: ubuntu-24.04
