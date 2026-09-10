@@ -50,8 +50,9 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - run: cargo fmt --check
-      - run: cargo clippy --workspace --all-targets -- -D warnings
-      - run: cargo test --workspace
+      # --locked: a stale Cargo.lock must fail, not get silently rewritten.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --locked
 
   # Windows is compile-checked only: nothing is released for it yet, but both
   # crates carry cfg(windows) branches and this keeps them from rotting.
