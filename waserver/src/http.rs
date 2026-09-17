@@ -9,6 +9,7 @@ use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::sync::Arc;
+use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
 use tracing::{info, warn};
 
@@ -16,19 +17,40 @@ use tracing::{info, warn};
 /// either the upstream's streamed body or a locally-generated error body.
 type BoxedBody = BoxBody<Bytes, std::io::Error>;
 
-/// Serve HTTP/1 over a single QUIC stream, forwarding to the upstream address.
-/// `None` means the circle has no shares configured: every request gets a 503.
-pub async fn handle_quic_stream(
-    stream: wispers_connect::QuicStream,
-    upstream: Option<Arc<str>>,
-    user_id: Option<String>,
-) -> Result<()> {
-    let io = TokioIo::new(stream);
+/// Where an HTTP stream's requests go.
+#[derive(Clone)]
+pub enum Target {
+    Upstream(Arc<str>),
+    /// The circle has no shares configured.
+    NoShares,
+    /// The stream named a share the circle does not have (any more). The
+    /// hash lets the client skip a CIRCLE round trip if it already caught up.
+    UnknownShare {
+        config_hash: u64,
+    },
+}
+
+/// Names the reason for a locally generated error, so clients can tell it
+/// from an upstream's own 404 or 503.
+pub const ERROR_HEADER: &str = "x-wispers-access-error";
+/// The circle's current config hash, on errors that mean "your share list
+/// is stale".
+pub const CONFIG_HASH_HEADER: &str = "x-wispers-access-config-hash";
+
+/// Serve HTTP/1 over one stream, forwarding every request to the target.
+pub async fn serve<S>(io: S, target: Target, user_id: Option<String>) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let io = TokioIo::new(io);
     let service =
-        hyper::service::service_fn(move |req| forward(req, upstream.clone(), user_id.clone()));
+        hyper::service::service_fn(move |req| forward(req, target.clone(), user_id.clone()));
     http1_server::Builder::new()
+        // One request per stream: the client may FIN its side right after the
+        // request and wait for the response on the other half.
+        .half_close(true)
         .serve_connection(io, service)
-        // Allow a 101 to hand the QUIC stream over for raw relaying (WebSocket).
+        // Allow a 101 to hand the stream over for raw relaying (WebSocket).
         .with_upgrades()
         .await
         .context("HTTP/1 connection error")
@@ -38,15 +60,37 @@ pub async fn handle_quic_stream(
 /// are converted to 5xx responses rather than connection errors.
 async fn forward(
     req: hyper::Request<Incoming>,
-    upstream: Option<Arc<str>>,
+    target: Target,
     user_id: Option<String>,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
-    let Some(upstream) = upstream else {
-        warn!(uri = %req.uri(), "no share configured; rejecting");
-        return Ok(error_response(
-            hyper::StatusCode::SERVICE_UNAVAILABLE,
-            "no share configured on this server",
-        ));
+    let upstream = match target {
+        Target::Upstream(upstream) => upstream,
+        Target::NoShares => {
+            warn!(uri = %req.uri(), "no share configured; rejecting");
+            let mut resp = error_response(
+                hyper::StatusCode::SERVICE_UNAVAILABLE,
+                "no share configured on this server",
+            );
+            resp.headers_mut().insert(
+                ERROR_HEADER,
+                hyper::header::HeaderValue::from_static("no-shares"),
+            );
+            return Ok(resp);
+        }
+        Target::UnknownShare { config_hash } => {
+            let mut resp = error_response(hyper::StatusCode::NOT_FOUND, "share not found");
+            let headers = resp.headers_mut();
+            headers.insert(
+                ERROR_HEADER,
+                hyper::header::HeaderValue::from_static("share-not-found"),
+            );
+            headers.insert(
+                CONFIG_HASH_HEADER,
+                hyper::header::HeaderValue::from_str(&format!("{:016x}", config_hash))
+                    .expect("hex is a valid header value"),
+            );
+            return Ok(resp);
+        }
     };
     match try_forward(req, upstream, user_id).await {
         Ok(resp) => Ok(resp),
@@ -155,7 +199,7 @@ async fn splice_upgrade(peer: hyper::upgrade::OnUpgrade, upstream: hyper::upgrad
 
 /// Authoritative identity header injected on every forwarded request, naming the
 /// guest behind the connection.
-const IDENTITY_HEADER: &str = "x-wispers-access-user";
+pub const IDENTITY_HEADER: &str = "x-wispers-access-user";
 
 /// Set the identity header from the resolved peer identity. Always strips any
 /// incoming value first.

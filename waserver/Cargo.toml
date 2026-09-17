@@ -21,12 +21,14 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
 tabwriter = "1.4"
 tempfile = "3"
-tokio = { version = "1", features = ["io-util", "macros", "net", "signal", "time"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "signal", "sync", "time"] }
+tokio-stream = { version = "0.1", features = ["sync"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-appender = "0.2"
 toml = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wispers-access-wire = { path = "../wire" }
 wispers-connect = "0.14.0"
 qrcode = "0.14"
 image = { version = "0.25", default-features = false, features = ["png"] }

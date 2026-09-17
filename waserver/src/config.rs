@@ -3,7 +3,7 @@
 //! These files are generated once, then edited by the user. After this they're
 //! only read, at start and on `reload`.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::path::Path;
 
 pub const FILENAME: &str = "circle.toml";
@@ -86,27 +86,9 @@ pub struct ShareConfig {
     pub upstream: String,
 }
 
-/// What a share is: a generic web app, or one of the apps that integrating
-/// clients know how to talk to. A closed list: the values are a contract with
-/// those clients, so a typo in the file fails at load.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum ShareKind {
-    #[default]
-    Web,
-    Jellyfin,
-    Immich,
-}
-
-impl ShareKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            ShareKind::Web => "web",
-            ShareKind::Jellyfin => "jellyfin",
-            ShareKind::Immich => "immich",
-        }
-    }
-}
+/// The share kinds are the wire crate's: the config file and the messages
+/// guests receive use one vocabulary.
+pub use wispers_access_wire::ShareKind;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {

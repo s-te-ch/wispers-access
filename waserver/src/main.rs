@@ -1,8 +1,10 @@
 mod config;
+mod guest_api;
 mod http;
 mod initialization;
 mod ipc;
 mod logging;
+mod protocol;
 mod serving;
 mod status;
 mod storage;

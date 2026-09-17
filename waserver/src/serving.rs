@@ -1,15 +1,15 @@
 //! Serving logic - handles hub connection and incoming P2P connections.
 
 use crate::config::{CircleConfig, TransportConfig};
-use crate::http;
 use crate::ipc;
+use crate::protocol;
 use crate::storage;
 use crate::wcbe;
 use anyhow::{Context, Result};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, broadcast};
 use tracing::{error, info, warn};
 use wispers_connect as wc;
 
@@ -33,6 +33,9 @@ struct Inner {
     /// The config as last loaded. Swapped whole on `reload`. Streams take a
     /// snapshot when they start, so a reload applies from the next stream on.
     config: RwLock<Arc<CircleConfig>>,
+    /// Carries the new config hash on every reload that changed something,
+    /// to every guest holding an events stream open.
+    events: broadcast::Sender<u64>,
 }
 
 /// What `reload` reports back.
@@ -75,6 +78,7 @@ impl ServingHandle {
                 connectivity_group_id: cg_id.to_owned(),
                 dir,
                 config: RwLock::new(Arc::new(config)),
+                events: broadcast::channel(16).0,
             }),
         }
     }
@@ -84,18 +88,33 @@ impl ServingHandle {
         self.inner.config.read().await.clone()
     }
 
+    /// Context necessary for handling a stream.
+    pub async fn stream_context(&self) -> protocol::StreamContext {
+        protocol::StreamContext {
+            config: self.config().await,
+            events: self.inner.events.clone(),
+        }
+    }
+
     /// Re-reads `circle.toml`, but only replaces the running config if the
     /// file passes validation.
     pub async fn reload(&self) -> Result<ReloadOutcome> {
         let fresh = Arc::new(self.inner.dir.load_config()?);
-        let mut current = self.inner.config.write().await;
-        let changed = fresh.config_hash() != current.config_hash();
+        // Hold the write lock only for the swap; new streams read this lock.
+        let changed = {
+            let mut current = self.inner.config.write().await;
+            let changed = fresh.config_hash() != current.config_hash();
+            if changed {
+                *current = fresh.clone();
+            }
+            changed
+        };
         if changed {
             info!(
                 shares = ?fresh.shares.iter().map(|s| &s.id).collect::<Vec<_>>(),
                 "config reloaded"
             );
-            *current = fresh.clone();
+            let _ = self.inner.events.send(fresh.config_hash());
         }
         Ok(ReloadOutcome {
             changed,
@@ -321,15 +340,11 @@ async fn handle_quic_conn(
         match conn.accept_stream().await {
             Ok(stream) => {
                 let user_id = user_id.clone();
-                // TODO: Every stream is a raw HTTP request for the default share
-                // until the typed-stream framing lands.
-                let upstream: Option<Arc<str>> = serving_handle
-                    .config()
-                    .await
-                    .default_share()
-                    .map(|s| s.upstream.as_str().into());
+                // Each stream is served against the config as of now; a
+                // reload applies from the next stream on.
+                let ctx = serving_handle.stream_context().await;
                 tokio::spawn(async move {
-                    if let Err(e) = http::handle_quic_stream(stream, upstream, user_id).await {
+                    if let Err(e) = protocol::handle(stream, ctx, user_id).await {
                         error!(error = format!("{:#}", e), "QUIC stream handler error");
                     }
                 });
