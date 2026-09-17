@@ -94,7 +94,7 @@ pub use wispers_access_wire::ShareKind;
 pub enum Error {
     #[error("cannot read {0}: {1}")]
     Read(String, std::io::Error),
-    #[error("{0}")]
+    #[error(transparent)]
     Parse(#[from] toml::de::Error),
     #[error("circle name is empty")]
     EmptyName,

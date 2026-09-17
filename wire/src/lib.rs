@@ -39,7 +39,7 @@ impl From<u8> for FirstByte {
         match first {
             0x00 => FirstByte::Typed(StreamType::Data),
             0x01 => FirstByte::Typed(StreamType::Ctrl),
-            /// Every HTTP method starts with an ASCII letter.
+            // Every HTTP method starts with an ASCII letter.
             b'A'..=b'Z' | b'a'..=b'z' => FirstByte::LegacyHttp,
             other => FirstByte::Unknown(other),
         }
