@@ -1,9 +1,10 @@
 //! The `status` command.
 //!
-//! Overview with `waserver status`, per-share status with
-//! `waserver status <share>`. Both forms gather into the same serializable
+//! Overview with `waserver status`, per-circle status with
+//! `waserver status <circle>`. Both forms gather into the same serializable
 //! report, so `--json` and the human rendering never disagree.
 
+use crate::config::{CircleConfig, ShareKind, TransportConfig};
 use crate::ipc;
 use crate::storage;
 use crate::wcbe;
@@ -16,15 +17,15 @@ use tabwriter::TabWriter;
 
 const UPSTREAM_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub async fn run(share: Option<&str>, json: bool) -> Result<()> {
-    let report = match share {
-        Some(share) => {
-            let store = storage::ShareStateStore::new(share)?;
-            if store.load_share_config()?.is_none() {
-                anyhow::bail!("Share {} is not initialised", share);
+pub async fn run(circle: Option<&str>, json: bool) -> Result<()> {
+    let report = match circle {
+        Some(circle) => {
+            if !storage::CircleDir::new(circle)?.exists() {
+                anyhow::bail!("Circle {} is not initialised", circle);
             }
+            let loaded = load_circle(circle).map_err(|e| format!("{:#}", e));
             StatusReport {
-                shares: vec![gather_share(share).await],
+                circles: vec![gather_circle(circle, loaded).await],
                 groups_quota: None,
             }
         }
@@ -32,8 +33,8 @@ pub async fn run(share: Option<&str>, json: bool) -> Result<()> {
     };
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if share.is_some() {
-        print_share_details(&report.shares[0]);
+    } else if circle.is_some() {
+        print_circle_details(&report.circles[0]);
     } else {
         print_fleet(&report);
     }
@@ -45,9 +46,9 @@ pub async fn run(share: Option<&str>, json: bool) -> Result<()> {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct StatusReport {
-    shares: Vec<ShareStatus>,
+    circles: Vec<CircleStatus>,
     /// Domain-wide connectivity-group quota, one entry per distinct
-    /// backend + API key among the shares. Fleet view only; omitted when
+    /// backend + API key among the circles. Fleet view only; omitted when
     /// no stats query succeeded.
     #[serde(skip_serializing_if = "Option::is_none")]
     groups_quota: Option<Vec<GroupsQuota>>,
@@ -59,10 +60,10 @@ struct StatusReport {
 struct GroupsQuota {
     /// Custom backend URL, `null` for the managed backend.
     backend: Option<String>,
-    /// The local shares whose API key counts against this quota. Two shares
-    /// with different keys live in different domains — each gets its own
-    /// entry, even on the same backend.
-    shares: Vec<String>,
+    /// The local circles whose API key counts against this quota. Two
+    /// circles with different keys live in different domains — each gets its
+    /// own entry, even on the same backend.
+    circles: Vec<String>,
     /// The API key's public ID part (`wc_<env>_<id>`, everything before the
     /// dot — the secret half is never shown). Matches the key listing in the
     /// backend's console. `null` when the key doesn't have the expected shape.
@@ -75,14 +76,21 @@ struct GroupsQuota {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct ShareStatus {
+struct CircleStatus {
     name: String,
+    /// From `circle.toml`; `null` when the file failed to load (see
+    /// `configError`).
     display_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config_error: Option<String>,
+    transport: Option<&'static str>,
     /// Custom backend URL, `null` for the managed backend.
     backend: Option<String>,
     connectivity_group_id: Option<String>,
     group_created_at: Option<String>, // RFC 3339
     server: ServerStatus,
+    /// The shares: the running server's list while it runs, else the file's.
+    shares: Vec<ShareStatus>,
     /// `null` when the group query failed (see `membersError`).
     members: Option<Vec<Member>>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -105,14 +113,26 @@ struct ServerStatus {
     state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    upstream: Option<String>,
-    upstream_reachable: Option<bool>,
     hub_connected: Option<bool>,
     pid: Option<u32>,
     started_at: Option<String>,      // RFC 3339
     connected_since: Option<String>, // RFC 3339
     /// This server's own node number in the Members list.
     node_number: Option<i32>,
+    /// `circle.toml` on disk differs from what the server serves; run
+    /// `waserver reload`. `null` when the server is down or the file is broken.
+    reload_pending: Option<bool>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareStatus {
+    id: String,
+    name: String,
+    kind: ShareKind,
+    upstream: String,
+    /// A TCP connection to the upstream succeeded just now.
+    upstream_reachable: bool,
 }
 
 /// A recent invite. An invite showing `used` with no matching member means the
@@ -145,62 +165,75 @@ struct Member {
 //-- Gathering -----------------------------------------------------------------
 
 async fn gather_fleet() -> Result<StatusReport> {
-    let mut names = storage::list_shares()?;
+    let mut names = storage::list_circles()?;
     names.sort();
-    let (shares, groups_quota) = tokio::join!(gather_shares(&names), gather_groups_quota(&names));
+    // Load every circle once, up front; the two gathers below share the result.
+    let loaded: Vec<(String, Result<Loaded, String>)> = names
+        .into_iter()
+        .map(|name| {
+            let l = load_circle(&name).map_err(|e| format!("{:#}", e));
+            (name, l)
+        })
+        .collect();
+    let (circles, groups_quota) =
+        tokio::join!(gather_circles(&loaded), gather_groups_quota(&loaded));
     Ok(StatusReport {
-        shares: shares?,
+        circles: circles?,
         groups_quota,
     })
 }
 
-async fn gather_shares(names: &[String]) -> Result<Vec<ShareStatus>> {
-    // Query all shares concurrently.
+async fn gather_circles(loaded: &[(String, Result<Loaded, String>)]) -> Result<Vec<CircleStatus>> {
+    // Query all circles concurrently.
     let mut tasks = tokio::task::JoinSet::new();
-    for (i, name) in names.iter().enumerate() {
+    for (i, (name, l)) in loaded.iter().enumerate() {
         let name = name.clone();
-        tasks.spawn(async move { (i, gather_share(&name).await) });
+        let l = l.clone();
+        tasks.spawn(async move { (i, gather_circle(&name, l).await) });
     }
-    let mut shares: Vec<Option<ShareStatus>> = names.iter().map(|_| None).collect();
+    let mut circles: Vec<Option<CircleStatus>> = loaded.iter().map(|_| None).collect();
     while let Some(joined) = tasks.join_next().await {
-        let (i, share) = joined.context("status task failed")?;
-        shares[i] = Some(share);
+        let (i, circle) = joined.context("status task failed")?;
+        circles[i] = Some(circle);
     }
-    Ok(shares.into_iter().flatten().collect())
+    Ok(circles.into_iter().flatten().collect())
 }
 
 /// Queries `GET /stats` once per distinct backend + API key among the
-/// shares. The group count is domain-wide, so it can exceed the number of
-/// local shares (other machines and integrations mint into the same
+/// circles. The group count is domain-wide, so it can exceed the number of
+/// local circles (other machines and integrations mint into the same
 /// domain). `None` when no query succeeded (connectivity trouble already
-/// surfaces per share as `membersError`).
-async fn gather_groups_quota(names: &[String]) -> Option<Vec<GroupsQuota>> {
+/// surfaces per circle as `membersError`).
+async fn gather_groups_quota(
+    loaded: &[(String, Result<Loaded, String>)],
+) -> Option<Vec<GroupsQuota>> {
     struct Target {
         api_base: String,
         api_key: String,
         backend: Option<String>,
-        shares: Vec<String>,
+        circles: Vec<String>,
     }
     let mut targets: Vec<Target> = Vec::new();
-    for name in names {
-        let Some(cfg) = storage::ShareStateStore::new(name)
-            .ok()
-            .and_then(|s| s.load_share_config().ok())
-            .flatten()
+    for (name, l) in loaded {
+        let Ok(Loaded {
+            config,
+            wcs: Some(wcs),
+        }) = l
         else {
             continue;
         };
-        let api_base = wcbe::api_base(cfg.backend.as_deref());
+        let TransportConfig::WispersConnect { backend } = &config.transport;
+        let api_base = wcbe::api_base(backend.as_deref());
         match targets
             .iter_mut()
-            .find(|t| t.api_base == api_base && t.api_key == cfg.api_key)
+            .find(|t| t.api_base == api_base && t.api_key == wcs.api_key)
         {
-            Some(t) => t.shares.push(name.clone()),
+            Some(t) => t.circles.push(name.clone()),
             None => targets.push(Target {
                 api_base,
-                api_key: cfg.api_key,
-                backend: cfg.backend,
-                shares: vec![name.clone()],
+                api_key: wcs.api_key.clone(),
+                backend: backend.clone(),
+                circles: vec![name.clone()],
             }),
         }
     }
@@ -210,7 +243,7 @@ async fn gather_groups_quota(names: &[String]) -> Option<Vec<GroupsQuota>> {
         if let Ok(stats) = client.get_stats().await {
             quotas.push(GroupsQuota {
                 backend: t.backend,
-                shares: t.shares,
+                circles: t.circles,
                 key_id: wcbe::key_id(&t.api_key).map(str::to_owned),
                 count: stats.connectivity_groups.count,
                 max: stats.connectivity_groups.max,
@@ -220,17 +253,19 @@ async fn gather_groups_quota(names: &[String]) -> Option<Vec<GroupsQuota>> {
     (!quotas.is_empty()).then_some(quotas)
 }
 
-async fn gather_share(name: &str) -> ShareStatus {
-    let config = storage::ShareStateStore::new(name)
-        .ok()
-        .and_then(|s| s.load_share_config().ok())
-        .flatten();
+async fn gather_circle(name: &str, loaded: Result<Loaded, String>) -> CircleStatus {
+    let (loaded, config_error) = match loaded {
+        Ok(l) => (Some(l), None),
+        Err(e) => (None, Some(e)),
+    };
+    let config = loaded.as_ref().map(|l| &l.config);
+    let wcs = loaded.as_ref().and_then(|l| l.wcs.as_ref());
     let (server, group, invites) = tokio::join!(
-        query_server(name),
-        query_connectivity_group(config.as_ref()),
-        query_invites(config.as_ref())
+        query_server(name, config),
+        query_connectivity_group(config, wcs),
+        query_invites(config, wcs)
     );
-    let (server, live_peers) = server;
+    let (server, live_peers, served_shares) = server;
     let (group, members_error) = match group {
         Ok(g) => (Some(g), None),
         Err(e) => (None, Some(e)),
@@ -250,19 +285,60 @@ async fn gather_share(name: &str) -> ShareStatus {
         }
         _ => {}
     }
-    ShareStatus {
+    // The running server's share list wins; a stopped server shows the file's.
+    let shares = match (served_shares, config) {
+        (Some(shares), _) => shares,
+        (None, Some(cfg)) => cfg
+            .shares
+            .iter()
+            .map(|s| ipc::ShareData {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                kind: s.kind,
+                upstream: s.upstream.clone(),
+            })
+            .collect(),
+        (None, None) => Vec::new(),
+    };
+    let shares = probe_shares(shares).await;
+    CircleStatus {
         name: name.to_owned(),
-        display_name: group.as_ref().and_then(|g| g.name.clone()),
-        backend: config.as_ref().and_then(|c| c.backend.clone()),
-        connectivity_group_id: config.map(|c| c.connectivity_group_id),
+        display_name: config.map(|c| c.name.clone()),
+        config_error,
+        transport: config.map(|c| c.transport.kind().as_str()),
+        backend: config.and_then(|c| {
+            let TransportConfig::WispersConnect { backend } = &c.transport;
+            backend.clone()
+        }),
+        connectivity_group_id: wcs.map(|h| h.connectivity_group_id.clone()),
         group_created_at: group.as_ref().map(|g| g.created_at.clone()),
         server,
+        shares,
         members,
         members_error,
         invites,
         invites_error,
         node_quota: group.as_ref().and_then(|g| g.node_quota),
     }
+}
+
+#[derive(Clone)]
+struct Loaded {
+    config: CircleConfig,
+    wcs: Option<storage::WispersConnectState>,
+}
+
+/// A config that fails to load is an error; a missing `state.db` (an `init`
+/// that did not complete) only leaves `wcs` empty, so the shares still show.
+fn load_circle(name: &str) -> Result<Loaded> {
+    let dir = storage::CircleDir::new(name)?;
+    let config = dir.load_config()?;
+    let wcs = match dir.open_state() {
+        Ok(state) => state.wispers_connect_state()?,
+        Err(storage::Error::NotInitialised(_)) => None,
+        Err(e) => return Err(e.into()),
+    };
+    Ok(Loaded { config, wcs })
 }
 
 /// Overlay the server's live view onto the backend's member list: while the
@@ -286,18 +362,24 @@ fn apply_live_connections(
     }
 }
 
-/// Queries the daemon; the second element is its live-peer list (`None` when
-/// the daemon is down or predates peer tracking).
-async fn query_server(share: &str) -> (ServerStatus, Option<Vec<ipc::PeerData>>) {
-    let Ok(mut client) = ipc::Client::connect(share).await else {
-        return (ServerStatus::offline(), None);
+/// Queries the daemon. The second element is its live-peer list, the third
+/// the share list it serves (both `None` when the daemon is down).
+async fn query_server(
+    circle: &str,
+    config: Option<&CircleConfig>,
+) -> (
+    ServerStatus,
+    Option<Vec<ipc::PeerData>>,
+    Option<Vec<ipc::ShareData>>,
+) {
+    let Ok(mut client) = ipc::Client::connect(circle).await else {
+        return (ServerStatus::offline(), None, None);
     };
     match client.request(&ipc::Request::Status).await {
         Ok(ipc::Response::Success {
             data: ipc::ResponseData::Status(s),
             ..
         }) => {
-            let upstream_reachable = probe_upstream(&s.upstream).await;
             let status = ServerStatus {
                 state: if s.connected_to_hub {
                     "serving"
@@ -305,22 +387,23 @@ async fn query_server(share: &str) -> (ServerStatus, Option<Vec<ipc::PeerData>>)
                     "connecting"
                 },
                 error: None,
-                upstream: Some(s.upstream),
-                upstream_reachable: Some(upstream_reachable),
                 hub_connected: Some(s.connected_to_hub),
                 pid: s.pid,
                 started_at: s.started_at,
                 connected_since: s.connected_since,
                 node_number: s.node_number,
+                reload_pending: config.map(|c| c.config_hash() != s.config_hash),
             };
-            (status, s.connected_peers)
+            (status, s.connected_peers, Some(s.shares))
         }
-        Ok(ipc::Response::Success { .. }) => {
-            (ServerStatus::error("unexpected response from server"), None)
-        }
-        Ok(ipc::Response::Error { error, .. }) => (ServerStatus::error(error), None),
+        Ok(ipc::Response::Success { .. }) => (
+            ServerStatus::error("unexpected response from server"),
+            None,
+            None,
+        ),
+        Ok(ipc::Response::Error { error, .. }) => (ServerStatus::error(error), None, None),
         // Probably went down just now.
-        Err(_) => (ServerStatus::offline(), None),
+        Err(_) => (ServerStatus::offline(), None, None),
     }
 }
 
@@ -329,13 +412,12 @@ impl ServerStatus {
         Self {
             state: "offline",
             error: None,
-            upstream: None,
-            upstream_reachable: None,
             hub_connected: None,
             pid: None,
             started_at: None,
             connected_since: None,
             node_number: None,
+            reload_pending: None,
         }
     }
 
@@ -346,6 +428,30 @@ impl ServerStatus {
             ..Self::offline()
         }
     }
+}
+
+/// Probes every share's upstream concurrently.
+async fn probe_shares(shares: Vec<ipc::ShareData>) -> Vec<ShareStatus> {
+    let mut probes = tokio::task::JoinSet::new();
+    for (i, s) in shares.iter().enumerate() {
+        let upstream = s.upstream.clone();
+        probes.spawn(async move { (i, probe_upstream(&upstream).await) });
+    }
+    let mut reachable = vec![false; shares.len()];
+    while let Some(Ok((i, r))) = probes.join_next().await {
+        reachable[i] = r;
+    }
+    shares
+        .into_iter()
+        .zip(reachable)
+        .map(|(s, upstream_reachable)| ShareStatus {
+            id: s.id,
+            name: s.name,
+            kind: s.kind,
+            upstream: s.upstream,
+            upstream_reachable,
+        })
+        .collect()
 }
 
 /// True if a TCP connection to the upstream succeeds.
@@ -360,30 +466,38 @@ async fn probe_upstream(upstream: &str) -> bool {
 }
 
 async fn query_connectivity_group(
-    config: Option<&storage::ShareConfig>,
+    config: Option<&CircleConfig>,
+    wcs: Option<&storage::WispersConnectState>,
 ) -> Result<wcbe::GroupDetail, String> {
-    let Some(cfg) = config else {
-        return Err("share is not initialised".to_owned());
+    let (Some(cfg), Some(wcs)) = (config, wcs) else {
+        return Err(NOT_INITIALISED.to_owned());
     };
-    let client = wcbe::Client::new(&cfg.api_key, &wcbe::api_base(cfg.backend.as_deref()));
+    let TransportConfig::WispersConnect { backend } = &cfg.transport;
+    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref()));
     client
-        .get_connectivity_group(&cfg.connectivity_group_id)
+        .get_connectivity_group(&wcs.connectivity_group_id)
         .await
         .map_err(|e| format!("{:#}", e))
 }
 
 async fn query_invites(
-    config: Option<&storage::ShareConfig>,
+    config: Option<&CircleConfig>,
+    wcs: Option<&storage::WispersConnectState>,
 ) -> Result<Vec<wcbe::RegistrationToken>, String> {
-    let Some(cfg) = config else {
-        return Err("share is not initialised".to_owned());
+    let (Some(cfg), Some(wcs)) = (config, wcs) else {
+        return Err(NOT_INITIALISED.to_owned());
     };
-    let client = wcbe::Client::new(&cfg.api_key, &wcbe::api_base(cfg.backend.as_deref()));
+    let TransportConfig::WispersConnect { backend } = &cfg.transport;
+    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref()));
     client
-        .list_registration_tokens(&cfg.connectivity_group_id)
+        .list_registration_tokens(&wcs.connectivity_group_id)
         .await
         .map_err(|e| format!("{:#}", e))
 }
+
+/// The circle has a config but no usable state: an `init` that did not
+/// complete, or a broken config file (reported separately as `configError`).
+const NOT_INITIALISED: &str = "circle has no Wispers Connect credentials (init incomplete?)";
 
 fn to_invite(token: &wcbe::RegistrationToken) -> Invite {
     Invite {
@@ -432,20 +546,28 @@ fn parse_user_id(metadata: &str) -> Option<String> {
 //-- Human rendering -----------------------------------------------------------
 
 fn print_fleet(report: &StatusReport) {
-    if report.shares.is_empty() {
-        println!("No app shares found");
+    if report.circles.is_empty() {
+        println!("No circles found");
         return;
     }
     let mut tw = TabWriter::new(std::io::stdout().lock()).padding(2);
-    writeln!(&mut tw, "SHARE\tSTATE\tHUB\tUPSTREAM\tNODES").unwrap();
-    for s in &report.shares {
-        let hub = match s.server.hub_connected {
+    writeln!(&mut tw, "CIRCLE\tSTATE\tHUB\tSHARES\tNODES").unwrap();
+    for c in &report.circles {
+        let hub = match c.server.hub_connected {
             Some(true) => "connected",
             Some(false) => "not connected",
             None => "-",
         };
-        let upstream = s.server.upstream.as_deref().unwrap_or("-");
-        let nodes = match &s.members {
+        let shares = if c.shares.is_empty() {
+            "-".to_owned()
+        } else {
+            c.shares
+                .iter()
+                .map(|s| s.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let nodes = match &c.members {
             // Live server view: connected guests / total guests.
             Some(m) if m.iter().any(|m| m.connected_to_server.is_some()) => {
                 let connected = m
@@ -458,17 +580,21 @@ fn print_fleet(report: &StatusReport) {
             Some(m) => format!("{} members", m.len()),
             None => "?".to_owned(),
         };
+        let state = match (c.server.state, c.server.reload_pending) {
+            (s, Some(true)) => format!("{} (reload pending)", s),
+            (s, _) => s.to_owned(),
+        };
         writeln!(
             &mut tw,
             "{}\t{}\t{}\t{}\t{}",
-            s.name, s.server.state, hub, upstream, nodes
+            c.name, state, hub, shares, nodes
         )
         .unwrap();
     }
     tw.flush().unwrap();
 
     if let Some(quotas) = &report.groups_quota {
-        println!("\nShare usage per API key");
+        println!("\nCircle usage per API key");
         for q in quotas {
             let limit = match q.max {
                 Some(max) => max.to_string(),
@@ -477,7 +603,7 @@ fn print_fleet(report: &StatusReport) {
             println!(
                 "   {} ({}): {} of {}",
                 q.key_id.as_deref().unwrap_or("unknown key"),
-                q.shares.join(", "),
+                q.circles.join(", "),
                 q.count,
                 limit
             );
@@ -485,37 +611,41 @@ fn print_fleet(report: &StatusReport) {
     }
 }
 
-fn print_share_details(s: &ShareStatus) {
+fn print_circle_details(c: &CircleStatus) {
     let mut tw = TabWriter::new(std::io::stdout().lock()).padding(2);
 
-    writeln!(&mut tw, "Share").unwrap();
-    let name = match &s.display_name {
-        Some(dn) => format!("{} ({})", s.name, dn),
-        None => s.name.clone(),
+    writeln!(&mut tw, "Circle").unwrap();
+    let name = match &c.display_name {
+        Some(dn) => format!("{} ({})", c.name, dn),
+        None => c.name.clone(),
     };
     writeln!(&mut tw, "  Name\t{}", name).unwrap();
+    if let Some(e) = &c.config_error {
+        writeln!(&mut tw, "  Config\tERROR: {}", e).unwrap();
+    }
+    writeln!(&mut tw, "  Transport\t{}", c.transport.unwrap_or("-")).unwrap();
     writeln!(
         &mut tw,
         "  Backend\t{}",
-        backend_label(s.backend.as_deref())
+        backend_label(c.backend.as_deref())
     )
     .unwrap();
     writeln!(
         &mut tw,
         "  Connectivity group\t{}",
-        s.connectivity_group_id.as_deref().unwrap_or("-")
+        c.connectivity_group_id.as_deref().unwrap_or("-")
     )
     .unwrap();
-    if let Some(created) = &s.group_created_at {
+    if let Some(created) = &c.group_created_at {
         writeln!(&mut tw, "  Created\t{}", fmt_utc(created)).unwrap();
     }
-    if let Some(quota) = &s.node_quota {
-        let members = s.members.as_ref().map(|m| m.len()).unwrap_or(0);
+    if let Some(quota) = &c.node_quota {
+        let members = c.members.as_ref().map(|m| m.len()).unwrap_or(0);
         writeln!(&mut tw, "  Quota\t{}", fmt_quota(quota, members)).unwrap();
     }
 
     writeln!(&mut tw, "\nServer").unwrap();
-    let server = &s.server;
+    let server = &c.server;
     let mut state = server.state.to_owned();
     if let (Some(pid), Some(started)) = (server.pid, server.started_at.as_deref()) {
         state = format!("{} (pid {}, up {})", state, pid, fmt_age(started));
@@ -524,14 +654,6 @@ fn print_share_details(s: &ShareStatus) {
         state = format!("{}: {}", state, e);
     }
     writeln!(&mut tw, "  State\t{}", state).unwrap();
-    if let Some(upstream) = &server.upstream {
-        let reachable = match server.upstream_reachable {
-            Some(true) => " (reachable)",
-            Some(false) => " (unreachable!)",
-            None => "",
-        };
-        writeln!(&mut tw, "  Upstream\t{}{}", upstream, reachable).unwrap();
-    }
     if let Some(connected) = server.hub_connected {
         let hub = match (connected, server.connected_since.as_deref()) {
             (true, Some(since)) => format!("connected (for {})", fmt_age(since)),
@@ -540,15 +662,47 @@ fn print_share_details(s: &ShareStatus) {
         };
         writeln!(&mut tw, "  Hub\t{}", hub).unwrap();
     }
+    if server.reload_pending == Some(true) {
+        writeln!(
+            &mut tw,
+            "  Config\tchanged on disk; run `waserver reload {}`",
+            c.name
+        )
+        .unwrap();
+    }
+
+    writeln!(&mut tw, "\nShares").unwrap();
+    if c.shares.is_empty() {
+        writeln!(&mut tw, "  (none configured)").unwrap();
+    } else {
+        writeln!(&mut tw, "  ID\tNAME\tUPSTREAM\tKIND").unwrap();
+        for s in &c.shares {
+            let reachable = if s.upstream_reachable {
+                " (reachable)"
+            } else {
+                " (unreachable!)"
+            };
+            writeln!(
+                &mut tw,
+                "  {}\t{}\t{}{}\t{}",
+                s.id,
+                s.name,
+                s.upstream,
+                reachable,
+                s.kind.as_str()
+            )
+            .unwrap();
+        }
+    }
 
     writeln!(&mut tw, "\nMembers").unwrap();
-    match (&s.members, &s.members_error) {
+    match (&c.members, &c.members_error) {
         (Some(members), _) => {
             writeln!(&mut tw, "  #\tNAME\tUSER\tLAST SEEN\tSTATUS").unwrap();
             for m in members {
-                let is_self = s.server.node_number == Some(m.node_number);
+                let is_self = c.server.node_number == Some(m.node_number);
                 let live_now = m.connected_to_server == Some(true)
-                    || (is_self && s.server.hub_connected == Some(true));
+                    || (is_self && c.server.hub_connected == Some(true));
                 let last_seen = if live_now {
                     "now".to_owned()
                 } else {
@@ -586,7 +740,7 @@ fn print_share_details(s: &ShareStatus) {
     }
 
     writeln!(&mut tw, "\nInvites").unwrap();
-    match (&s.invites, &s.invites_error) {
+    match (&c.invites, &c.invites_error) {
         (Some(invites), _) if invites.is_empty() => {
             writeln!(&mut tw, "  (none in the last 7 days)").unwrap()
         }
@@ -742,13 +896,22 @@ mod tests {
     #[test]
     fn json_report_shape() {
         let report = StatusReport {
-            shares: vec![ShareStatus {
-                name: "myapp".to_owned(),
-                display_name: Some("My App".to_owned()),
+            circles: vec![CircleStatus {
+                name: "family".to_owned(),
+                display_name: Some("Family".to_owned()),
+                config_error: None,
+                transport: Some("wispers-connect"),
                 backend: None,
                 connectivity_group_id: Some("cg-1".to_owned()),
                 group_created_at: None,
                 server: ServerStatus::offline(),
+                shares: vec![ShareStatus {
+                    id: "jellyfin".to_owned(),
+                    name: "Jellyfin".to_owned(),
+                    kind: ShareKind::Web,
+                    upstream: "localhost:8096".to_owned(),
+                    upstream_reachable: false,
+                }],
                 members: None,
                 members_error: None,
                 invites: Some(vec![Invite {
@@ -768,37 +931,44 @@ mod tests {
             groups_quota: None,
         };
         let json = serde_json::to_value(&report).unwrap();
-        let share = &json["shares"][0];
-        assert_eq!(share["name"], "myapp");
-        assert_eq!(share["displayName"], "My App");
-        assert_eq!(share["backend"], serde_json::Value::Null);
-        assert_eq!(share["connectivityGroupId"], "cg-1");
-        assert_eq!(share["server"]["state"], "offline");
-        assert_eq!(share["server"]["hubConnected"], serde_json::Value::Null);
-        assert_eq!(share["server"]["nodeNumber"], serde_json::Value::Null);
-        assert_eq!(share["members"], serde_json::Value::Null);
-        let invite = &share["invites"][0];
+        let circle = &json["circles"][0];
+        assert_eq!(circle["name"], "family");
+        assert_eq!(circle["displayName"], "Family");
+        assert_eq!(circle["transport"], "wispers-connect");
+        assert_eq!(circle["backend"], serde_json::Value::Null);
+        assert_eq!(circle["connectivityGroupId"], "cg-1");
+        assert_eq!(circle["server"]["state"], "offline");
+        assert_eq!(circle["server"]["hubConnected"], serde_json::Value::Null);
+        assert_eq!(circle["server"]["nodeNumber"], serde_json::Value::Null);
+        assert_eq!(circle["server"]["reloadPending"], serde_json::Value::Null);
+        assert_eq!(circle["shares"][0]["id"], "jellyfin");
+        assert_eq!(circle["shares"][0]["upstream"], "localhost:8096");
+        assert_eq!(circle["shares"][0]["upstreamReachable"], false);
+        assert_eq!(circle["shares"][0]["kind"], "web");
+        assert_eq!(circle["members"], serde_json::Value::Null);
+        let invite = &circle["invites"][0];
         assert_eq!(invite["nodeName"], "Nick's iPhone");
         assert_eq!(invite["userId"], "nick@example.com");
         assert_eq!(invite["usedAt"], serde_json::Value::Null);
         assert_eq!(invite["status"], "pending");
         // Errors are omitted, not null, when absent.
-        assert!(share["server"].get("error").is_none());
-        assert!(share.get("membersError").is_none());
-        assert!(share.get("invitesError").is_none());
-        assert_eq!(share["nodeQuota"]["limit"], 12);
-        assert_eq!(share["nodeQuota"]["current"], 11);
-        // Single-share reports have no fleet-level groups quota; omitted.
+        assert!(circle["server"].get("error").is_none());
+        assert!(circle.get("configError").is_none());
+        assert!(circle.get("membersError").is_none());
+        assert!(circle.get("invitesError").is_none());
+        assert_eq!(circle["nodeQuota"]["limit"], 12);
+        assert_eq!(circle["nodeQuota"]["current"], 11);
+        // Single-circle reports have no fleet-level groups quota; omitted.
         assert!(json.get("groupsQuota").is_none());
     }
 
     #[test]
     fn groups_quota_json_shape() {
         let report = StatusReport {
-            shares: vec![],
+            circles: vec![],
             groups_quota: Some(vec![GroupsQuota {
                 backend: None,
-                shares: vec!["myapp".to_owned()],
+                circles: vec!["family".to_owned()],
                 key_id: Some("wc_prod_1a2B3c4D5e6F7g8H9".to_owned()),
                 count: 5,
                 max: Some(7),
@@ -807,7 +977,7 @@ mod tests {
         let json = serde_json::to_value(&report).unwrap();
         let quota = &json["groupsQuota"][0];
         assert_eq!(quota["backend"], serde_json::Value::Null);
-        assert_eq!(quota["shares"][0], "myapp");
+        assert_eq!(quota["circles"][0], "family");
         assert_eq!(quota["keyId"], "wc_prod_1a2B3c4D5e6F7g8H9");
         assert_eq!(quota["count"], 5);
         assert_eq!(quota["max"], 7);

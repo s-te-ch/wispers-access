@@ -60,8 +60,6 @@ pub struct NodeMetadata {
 pub struct GroupDetail {
     pub created_at: String, // RFC 3339
     #[serde(default)]
-    pub name: Option<String>,
-    #[serde(default)]
     pub nodes: Vec<GroupNode>,
     /// `None` on backends that predate the field.
     #[serde(default)]

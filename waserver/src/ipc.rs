@@ -28,8 +28,8 @@ pub struct Server {
 
 #[cfg(unix)]
 impl Server {
-    pub async fn bind(share: &str) -> Result<Self> {
-        let path = ipc_path(share);
+    pub async fn bind(circle: &str) -> Result<Self> {
+        let path = ipc_path(circle);
 
         // Check for a stale socket.
         if path.exists() {
@@ -84,10 +84,10 @@ pub struct Server {
 
 #[cfg(windows)]
 impl Server {
-    pub async fn bind(share: &str) -> Result<Self> {
+    pub async fn bind(circle: &str) -> Result<Self> {
         use rand::distr::SampleString;
 
-        let path = ipc_path(share);
+        let path = ipc_path(circle);
 
         // Check for a stale socket.
         if path.exists() {
@@ -153,6 +153,7 @@ impl Server {
 pub enum Request {
     Status,
     GetInvite { node_name: String, user_id: String },
+    Reload,
     Shutdown,
 }
 
@@ -170,13 +171,18 @@ pub enum Response {
 pub enum ResponseData {
     Status(StatusData),
     Invite(InviteData),
+    Reload(ReloadData),
     Empty,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusData {
     pub connected_to_hub: bool,
-    pub upstream: String,
+    /// The shares as currently served, in config order.
+    pub shares: Vec<ShareData>,
+    /// Hash of the served share list. Differs from the file's when a
+    /// `reload` is pending.
+    pub config_hash: u64,
     // TODO: This is optional for backewards compat. Remove with the next version.
     #[serde(default)]
     pub pid: Option<u32>,
@@ -202,9 +208,24 @@ pub struct PeerData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct ShareData {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub kind: crate::config::ShareKind,
+    pub upstream: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct InviteData {
     pub registration_token: String,
     pub activation_code: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ReloadData {
+    pub changed: bool,
+    pub shares: Vec<ShareData>,
 }
 
 impl Response {
@@ -231,6 +252,7 @@ async fn handle_request(
         Ok(Request::GetInvite { node_name, user_id }) => {
             handle_invite(&handle, &node_name, &user_id).await
         }
+        Ok(Request::Reload) => handle_reload(&handle).await,
         Ok(Request::Shutdown) => {
             shutdown = true;
             handle_shutdown(&handle).await
@@ -263,15 +285,30 @@ async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
             connected_since: Some(fmt_rfc3339(p.connected_since)),
         })
         .collect();
+    let config = handle.config().await;
     Response::success(ResponseData::Status(StatusData {
         connected_to_hub: handle.connected_to_hub().await,
-        upstream: handle.upstream().to_string(),
+        shares: share_data(&config),
+        config_hash: config.config_hash(),
         pid: Some(std::process::id()),
         started_at: Some(fmt_rfc3339(handle.started_at())),
         connected_since: handle.connected_since().await.map(fmt_rfc3339),
         node_number: handle.own_node_number(),
         connected_peers: Some(peers),
     }))
+}
+
+fn share_data(config: &crate::config::CircleConfig) -> Vec<ShareData> {
+    config
+        .shares
+        .iter()
+        .map(|s| ShareData {
+            id: s.id.clone(),
+            name: s.name.clone(),
+            kind: s.kind,
+            upstream: s.upstream.clone(),
+        })
+        .collect()
 }
 
 fn fmt_rfc3339(t: chrono::DateTime<chrono::Utc>) -> String {
@@ -304,12 +341,22 @@ async fn handle_invite(
 fn invite_error_message(e: &anyhow::Error) -> String {
     match e.downcast_ref::<crate::wcbe::QuotaExceeded>() {
         Some(q) if q.quota == "nodes_per_group" => format!(
-            "the share is full: {} of {} node quota used (members and pending \
+            "the circle is full: {} of {} node quota used (members and pending \
              invites). Revoke nodes with `waserver revoke` or wait for a pending
-             invite to expire. `waserver status <share>` shows the available quota.",
+             invite to expire. `waserver status <circle>` shows the available quota.",
             q.current, q.limit
         ),
         _ => format!("error generating registration token: {}", e),
+    }
+}
+
+async fn handle_reload(handle: &crate::serving::ServingHandle) -> Response {
+    match handle.reload().await {
+        Ok(outcome) => Response::success(ResponseData::Reload(ReloadData {
+            changed: outcome.changed,
+            shares: share_data(&outcome.config),
+        })),
+        Err(e) => Response::error(format!("{:#}", e)),
     }
 }
 
@@ -343,8 +390,8 @@ pub struct Client {
 
 impl Client {
     #[cfg(unix)]
-    pub async fn connect(share: &str) -> Result<Self> {
-        let path = ipc_path(share);
+    pub async fn connect(circle: &str) -> Result<Self> {
+        let path = ipc_path(circle);
         let stream = UnixStream::connect(&path).await.with_context(|| {
             format!("failed to connect to server at {:?} (is it running?)", path)
         })?;
@@ -356,8 +403,8 @@ impl Client {
     }
 
     #[cfg(windows)]
-    pub async fn connect(share: &str) -> Result<Self> {
-        let path = ipc_path(share);
+    pub async fn connect(circle: &str) -> Result<Self> {
+        let path = ipc_path(circle);
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("daemon not running (no port file {:?})", path))?;
         let (port, password) = parse_port_file(&contents).context("invalid daemon port file")?;
@@ -390,17 +437,17 @@ impl Client {
 }
 
 #[cfg(unix)]
-fn ipc_path(share: &str) -> PathBuf {
+fn ipc_path(circle: &str) -> PathBuf {
     let base = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
     let dir = base.join(".waserver").join("sockets");
-    dir.join(format!("{}.sock", share))
+    dir.join(format!("{}.sock", circle))
 }
 
 #[cfg(windows)]
-fn ipc_path(share: &str) -> PathBuf {
+fn ipc_path(circle: &str) -> PathBuf {
     let base = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
     let dir = base.join(".waserver").join("ports");
-    return dir.join(format!("{}.port", share));
+    return dir.join(format!("{}.port", circle));
 }
 
 #[cfg(windows)]

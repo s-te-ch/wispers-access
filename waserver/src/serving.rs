@@ -1,5 +1,6 @@
 //! Serving logic - handles hub connection and incoming P2P connections.
 
+use crate::config::{CircleConfig, TransportConfig};
 use crate::http;
 use crate::ipc;
 use crate::storage;
@@ -28,7 +29,16 @@ struct Inner {
     own_node_number: Option<i32>,
     wcbe_client: wcbe::Client,
     connectivity_group_id: String,
-    upstream: Arc<str>,
+    dir: storage::CircleDir,
+    /// The config as last loaded. Swapped whole on `reload`. Streams take a
+    /// snapshot when they start, so a reload applies from the next stream on.
+    config: RwLock<Arc<CircleConfig>>,
+}
+
+/// What `reload` reports back.
+pub struct ReloadOutcome {
+    pub changed: bool,
+    pub config: Arc<CircleConfig>,
 }
 
 struct PeerConnection {
@@ -46,7 +56,8 @@ pub struct PeerSnapshot {
 
 impl ServingHandle {
     pub fn new(
-        upstream: Arc<str>,
+        dir: storage::CircleDir,
+        config: CircleConfig,
         api_key: &str,
         cg_id: &str,
         api_base: &str,
@@ -62,14 +73,34 @@ impl ServingHandle {
                 own_node_number,
                 wcbe_client: wcbe::Client::new(api_key, api_base),
                 connectivity_group_id: cg_id.to_owned(),
-                upstream,
+                dir,
+                config: RwLock::new(Arc::new(config)),
             }),
         }
     }
 
-    /// The upstream address (`host:port`) this server proxies to.
-    pub fn upstream(&self) -> &str {
-        &self.inner.upstream
+    /// The config as currently served.
+    pub async fn config(&self) -> Arc<CircleConfig> {
+        self.inner.config.read().await.clone()
+    }
+
+    /// Re-reads `circle.toml`, but only replaces the running config if the
+    /// file passes validation.
+    pub async fn reload(&self) -> Result<ReloadOutcome> {
+        let fresh = Arc::new(self.inner.dir.load_config()?);
+        let mut current = self.inner.config.write().await;
+        let changed = fresh.config_hash() != current.config_hash();
+        if changed {
+            info!(
+                shares = ?fresh.shares.iter().map(|s| &s.id).collect::<Vec<_>>(),
+                "config reloaded"
+            );
+            *current = fresh.clone();
+        }
+        Ok(ReloadOutcome {
+            changed,
+            config: fresh,
+        })
     }
 
     pub async fn connected_to_hub(&self) -> bool {
@@ -173,14 +204,21 @@ impl ServingHandle {
     }
 }
 
-pub async fn serve(share: &str, upstream: String) -> Result<()> {
-    let upstream: Arc<str> = upstream.into();
-    let store = storage::ShareStateStore::new(share)?;
-    let Some(cfg) = store.load_share_config()? else {
-        anyhow::bail!("Share {} is not initialised", share);
+pub async fn serve(circle: &str) -> Result<()> {
+    let dir = storage::CircleDir::new(circle)?;
+    let cfg = dir.load_config()?;
+    let TransportConfig::WispersConnect { backend } = &cfg.transport;
+    let backend = backend.clone();
+    match cfg.default_share() {
+        Some(s) => info!(share = %s.id, upstream = %s.upstream, "default share"),
+        None => warn!("no shares configured; guests get 503 until `waserver reload`"),
+    }
+    let state = dir.open_state()?;
+    let Some(wcs) = state.wispers_connect_state()? else {
+        anyhow::bail!("Circle {} has no Wispers Connect credentials", circle);
     };
-    let node_storage = wc::NodeStorage::new(store);
-    if let Some(backend) = cfg.backend.as_deref() {
+    let node_storage = wc::NodeStorage::new(state);
+    if let Some(backend) = backend.as_deref() {
         node_storage.override_hub_addr(backend);
     }
     let node = Arc::new(node_storage.restore_or_init_node().await?);
@@ -195,14 +233,16 @@ pub async fn serve(share: &str, upstream: String) -> Result<()> {
             anyhow::bail!("server node not registered");
         }
     };
+    let api_base = wcbe::api_base(backend.as_deref());
     let serving_handle = ServingHandle::new(
-        upstream.clone(),
-        &cfg.api_key,
+        dir,
+        cfg,
+        &wcs.api_key,
         &cg_id,
-        &wcbe::api_base(cfg.backend.as_deref()),
+        &api_base,
         node.node_number(),
     );
-    let ipc_server = ipc::Server::bind(share).await?;
+    let ipc_server = ipc::Server::bind(circle).await?;
     tokio::spawn(ipc_server.run(serving_handle.clone()));
 
     // Connect to the hub.
@@ -228,7 +268,6 @@ pub async fn serve(share: &str, upstream: String) -> Result<()> {
             Some(result) = incoming.quic.recv() => {
                 tokio::spawn(handle_quic_conn(
                     result,
-                    upstream.clone(),
                     node.clone(),
                     serving_handle.clone(),
                 ));
@@ -252,7 +291,6 @@ pub async fn serve(share: &str, upstream: String) -> Result<()> {
 
 async fn handle_quic_conn(
     r: Result<wc::QuicConnection, wc::P2pError>,
-    upstream: Arc<str>,
     node: Arc<wc::Node>,
     serving_handle: ServingHandle,
 ) {
@@ -283,7 +321,13 @@ async fn handle_quic_conn(
         match conn.accept_stream().await {
             Ok(stream) => {
                 let user_id = user_id.clone();
-                let upstream = upstream.clone();
+                // TODO: Every stream is a raw HTTP request for the default share
+                // until the typed-stream framing lands.
+                let upstream: Option<Arc<str>> = serving_handle
+                    .config()
+                    .await
+                    .default_share()
+                    .map(|s| s.upstream.as_str().into());
                 tokio::spawn(async move {
                     if let Err(e) = http::handle_quic_stream(stream, upstream, user_id).await {
                         error!(error = format!("{:#}", e), "QUIC stream handler error");

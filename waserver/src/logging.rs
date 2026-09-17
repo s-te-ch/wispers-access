@@ -1,4 +1,4 @@
-//! Per-share tracing setup. Foreground mode writes to stderr and a daily-
+//! Per-circle tracing setup. Foreground mode writes to stderr and a daily-
 //! rotated file; the daemonized mode writes only to the file. In daemon mode
 //! we install a panic hook that funnels panic messages through tracing.
 
@@ -20,8 +20,8 @@ pub struct LoggingHandle {
 
 /// Log to stderr (pretty/colorised) and to a daily-rotated file in
 /// [`log_dir`]. Reads `RUST_LOG` for filtering; defaults to `info`.
-pub fn init_foreground(share: &str) -> Result<LoggingHandle> {
-    let (writer, file_guard) = file_writer(share)?;
+pub fn init_foreground(circle: &str) -> Result<LoggingHandle> {
+    let (writer, file_guard) = file_writer(circle)?;
 
     let file_layer = fmt::layer()
         .with_ansi(false)
@@ -46,8 +46,8 @@ pub fn init_foreground(share: &str) -> Result<LoggingHandle> {
 /// Daemon mode: log only to the daily-rotated file. Panics are caught by a
 /// hook that routes them through tracing, since the daemon's real stderr is
 /// detached.
-pub fn init_background(share: &str) -> Result<LoggingHandle> {
-    let (writer, file_guard) = file_writer(share)?;
+pub fn init_background(circle: &str) -> Result<LoggingHandle> {
+    let (writer, file_guard) = file_writer(circle)?;
 
     let file_layer = fmt::layer()
         .with_ansi(false)
@@ -63,8 +63,8 @@ pub fn init_background(share: &str) -> Result<LoggingHandle> {
     Ok(LoggingHandle { file_guard })
 }
 
-fn file_writer(share: &str) -> Result<(NonBlocking, WorkerGuard)> {
-    let dir = log_dir(share)?;
+fn file_writer(circle: &str) -> Result<(NonBlocking, WorkerGuard)> {
+    let dir = log_dir(circle)?;
     std::fs::create_dir_all(&dir).with_context(|| format!("creating log dir {}", dir.display()))?;
     let appender = tracing_appender::rolling::daily(&dir, "waserver.log");
     Ok(tracing_appender::non_blocking(appender))
@@ -99,12 +99,12 @@ fn env_filter() -> EnvFilter {
 
 const LOG_FILE_PREFIX: &str = "waserver.log.";
 
-/// List existing log files for a share, sorted oldest-first. The daily
+/// List existing log files for a circle, sorted oldest-first. The daily
 /// appender writes `waserver.log.YYYY-MM-DD`, which sorts lexicographically
 /// in chronological order. Returns an empty vec if the log dir doesn't
 /// exist yet.
-pub fn list_log_files(share: &str) -> Result<Vec<PathBuf>> {
-    let dir = log_dir(share)?;
+pub fn list_log_files(circle: &str) -> Result<Vec<PathBuf>> {
+    let dir = log_dir(circle)?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -122,13 +122,13 @@ pub fn list_log_files(share: &str) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// Platform-appropriate log directory for a given share.
+/// Platform-appropriate log directory for a given circle.
 ///
-/// - macOS:   `~/Library/Logs/waserver/<share>/`
-/// - Windows: `%LOCALAPPDATA%\waserver\Logs\<share>\`
-/// - Linux:   `$XDG_STATE_HOME/waserver/<share>/` (defaults to
-///   `~/.local/state/waserver/<share>/`)
-pub fn log_dir(share: &str) -> Result<PathBuf> {
+/// - macOS:   `~/Library/Logs/waserver/<circle>/`
+/// - Windows: `%LOCALAPPDATA%\waserver\Logs\<circle>\`
+/// - Linux:   `$XDG_STATE_HOME/waserver/<circle>/` (defaults to
+///   `~/.local/state/waserver/<circle>/`)
+pub fn log_dir(circle: &str) -> Result<PathBuf> {
     let base = if cfg!(target_os = "macos") {
         dirs::home_dir()
             .context("could not determine home directory")?
@@ -142,5 +142,5 @@ pub fn log_dir(share: &str) -> Result<PathBuf> {
             .context("could not determine XDG state directory")?
             .join("waserver")
     };
-    Ok(base.join(share))
+    Ok(base.join(circle))
 }

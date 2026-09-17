@@ -17,9 +17,10 @@ use tracing::{info, warn};
 type BoxedBody = BoxBody<Bytes, std::io::Error>;
 
 /// Serve HTTP/1 over a single QUIC stream, forwarding to the upstream address.
+/// `None` means the circle has no shares configured: every request gets a 503.
 pub async fn handle_quic_stream(
     stream: wispers_connect::QuicStream,
-    upstream: Arc<str>,
+    upstream: Option<Arc<str>>,
     user_id: Option<String>,
 ) -> Result<()> {
     let io = TokioIo::new(stream);
@@ -37,9 +38,16 @@ pub async fn handle_quic_stream(
 /// are converted to 5xx responses rather than connection errors.
 async fn forward(
     req: hyper::Request<Incoming>,
-    upstream: Arc<str>,
+    upstream: Option<Arc<str>>,
     user_id: Option<String>,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
+    let Some(upstream) = upstream else {
+        warn!(uri = %req.uri(), "no share configured; rejecting");
+        return Ok(error_response(
+            hyper::StatusCode::SERVICE_UNAVAILABLE,
+            "no share configured on this server",
+        ));
+    };
     match try_forward(req, upstream, user_id).await {
         Ok(resp) => Ok(resp),
         Err(e) => {

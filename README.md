@@ -1,8 +1,8 @@
 <center>
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/access-logo-txt-dark.svg">
-    <img src="assets/access-logo-txt.svg"
-         width="256" alt="Wispers Access logo"/>
+	<source media="(prefers-color-scheme: dark)" srcset="assets/access-logo-txt-dark.svg">
+	<img src="assets/access-logo-txt.svg"
+		 width="256" alt="Wispers Access logo"/>
   </picture>
 </center>
 
@@ -13,9 +13,9 @@ without having to publish it to the internet.
 
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="assets/invite-composite-dark.png">
-    <img src="assets/invite-composite.png" width="820"
-         alt="A terminal minting a Wispers Access invite, and a phone showing the shared app it unlocks"/>
+	<source media="(prefers-color-scheme: dark)" srcset="assets/invite-composite-dark.png">
+	<img src="assets/invite-composite.png" width="820"
+		 alt="A terminal minting a Wispers Access invite, and a phone showing the shared app it unlocks"/>
   </picture>
 </p>
 
@@ -84,10 +84,27 @@ Then prefix the commands in step 4 with `docker exec waserver`.
 Say the app you want to share is listening on port 3000. Then,
 
 ```sh
-export WC_API_KEY=…            # the key from step 1
-waserver init myapp "My App"
-waserver serve myapp 3000      # `waserver start` runs it in the background instead
+export WC_API_KEY=…  # the key from step 1
+waserver init team "Awesome Team"
 ```
+
+This creates a *circle* (a group of people you share with) for your team and
+prints the path of its `circle.toml`. Add the app there as a *share*:
+
+```toml
+[[share]]
+id = "myapp"
+name = "My App"
+upstream = ":3000"  # host:port, or :port for localhost
+```
+
+Then serve the circle (`waserver start` runs it in the background instead):
+
+```sh
+waserver serve team
+```
+
+Later edits to `circle.toml` apply with `waserver reload team`.
 
 ### 4. Invite a device
 
@@ -95,7 +112,7 @@ Invites are minted by the running server from step 3, so run this in a second
 terminal (or use `waserver start`):
 
 ```sh
-waserver invite myapp "Alice's phone" alice@example.com --png invite.png
+waserver invite team "Alice's phone" alice@example.com --png invite.png
 ```
 
 This produces the invite in three different formats: a `wax_…` invite code to
@@ -128,7 +145,7 @@ your normal browser.
 
 ---
 
-**Self-hosting:** Shares use the managed Wispers Connect backend by default. To
+**Self-hosting:** Circles use the managed Wispers Connect backend by default. To
 be fully cloud-independent, [run your own hub](https://github.com/s-te-ch/wispers-hub)
 and pass `--backend https://hub.example.com` to `waserver init`. Invite codes
 contain the backend, so guests land on the right hub automatically.
