@@ -563,7 +563,7 @@ impl CloseCode {
             1 => Some(CloseCode::Unknown),
             2 => Some(CloseCode::Revoked),
             3 => Some(CloseCode::ActivationFailed),
-            _ => None,  // Unknown, treat as [`CloseCode::Closing`].
+            _ => None, // Unknown, treat as [`CloseCode::Closing`].
         }
     }
 }

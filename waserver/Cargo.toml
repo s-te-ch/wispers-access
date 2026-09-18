@@ -18,6 +18,7 @@ rusqlite_migration = "2.5.0"
 rustls = "0.23"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
 tabwriter = "1.4"
 tempfile = "3"
 tokio = { version = "1", features = ["io-util", "macros", "net", "signal", "sync", "time"] }
