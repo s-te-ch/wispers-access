@@ -133,15 +133,15 @@ profile, no open port on the internet.
 
 ### … or on a desktop
 
-`waclient` (same releases page) serves every share you've joined on localhost:
+`waclient` (same releases page) serves every circle you've joined on localhost:
 
 ```sh
 waclient join wax_…            # the invite code from step 4
 waclient serve 8000
 ```
 
-It prints each share's URL, e.g. `http://my-app.localhost:8000` — open it in
-your normal browser.
+It prints each share's URL, e.g. `http://myapp.team.localhost:8000` — open it
+in your normal browser.
 
 ---
 
