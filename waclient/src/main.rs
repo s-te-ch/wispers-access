@@ -1,7 +1,10 @@
+mod circles;
 mod storage;
+mod transports;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use circles::{Circle, CircleRegistry, Lookup};
 use clap::{Parser, Subcommand};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::StatusCode;
@@ -9,11 +12,11 @@ use hyper::body::Incoming;
 use hyper::client::conn::http1 as http1_client;
 use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
-use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{Mutex, OnceCell};
+use transports::{TerminalState, TransportError, WispersConnect};
+use wispers_access_wire as wire;
 use wispers_connect as wc;
 
 /// Body type used in responses we send back to the peer. Boxed so we can return
@@ -30,20 +33,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Join a Wispers Access share.
+    /// Join a Wispers Access circle.
     Join {
-        /// Invite code for the share (`wax_…`), produced by `waserver invite`.
+        /// Invite code for the circle (`wax_…`), produced by `waserver invite`.
         invite_code: String,
     },
-    Serve {
-        port: u16,
-    },
-    /// Show all joined shares and their state.
+    /// Serve every joined circle's shares on localhost, as
+    /// `http://<share>.<circle>.localhost:<port>`.
+    Serve { port: u16 },
+    /// Show all joined circles, their shares and their state.
     List,
-    /// Remove a share from this device, deregistering from its hub when possible.
+    /// Remove a circle from this device, deregistering from its hub when possible.
     Remove {
-        /// The share's hostname, as shown by `waclient list`.
-        share: String,
+        /// The circle's label, as shown by `waclient list`.
+        circle: String,
     },
 }
 
@@ -71,7 +74,7 @@ async fn async_main(command: Command) -> Result<()> {
         Command::Join { invite_code } => join(&invite_code).await,
         Command::Serve { port } => serve(port).await,
         Command::List => list().await,
-        Command::Remove { share } => remove(&share).await,
+        Command::Remove { circle } => remove(&circle).await,
     }
 }
 
@@ -108,8 +111,9 @@ async fn join(invite_code: &str) -> Result<()> {
     Ok(())
 }
 
-/// The steps of `join` after registration: activation and local bookkeeping.
-/// Any failure here makes `join` roll the registration back.
+/// The steps of `join` after registration: activation, asking the server
+/// what the circle is, and local bookkeeping. Any failure here makes `join`
+/// roll the registration back.
 async fn finish_join(
     node: &mut wc::Node,
     row: &storage::Row,
@@ -119,12 +123,32 @@ async fn finish_join(
     println!("Activating Wispers node...");
     node.activate(activation_code).await?;
 
+    println!("Fetching the circle from the server...");
+    let cg_id = node
+        .connectivity_group_id()
+        .context("activated node has no connectivity group")?
+        .to_string();
+    let node_number = node.node_number().unwrap();
+    // Straight on the node rather than through a transport: `join` is
+    // Wispers Connect specific anyway, and keeps the node for a rollback.
+    let conn = node
+        .connect_quic(1)
+        .await
+        .context("connecting to the Wispers Access server")?;
+    let stream = conn.open_stream().await.context("opening a stream")?;
+    let info = circles::fetch_info(Box::new(stream), None)
+        .await?
+        .context("server answered 304 to an unconditional request")?;
+
     // Determine display & host names, deduping the host name if necessary.
-    let group_info = node.group_info().await?;
-    let cg_id = group_info.id.to_string();
     row.write_connectivity_group_id(&cg_id)?;
     row.write_backend(backend)?;
-    let display_name = group_info.name.unwrap_or_else(|| cg_id.clone());
+    row.write_circle_info(&info)?;
+    let display_name = if info.name.is_empty() {
+        cg_id.clone()
+    } else {
+        info.name.clone()
+    };
     row.write_display_name(&display_name)?;
     let hostname = host_slug(&display_name).unwrap_or_else(|| cg_id.clone());
     let hostname = row.write_deduped_hostname(&hostname, &cg_id)?;
@@ -133,13 +157,31 @@ async fn finish_join(
     row.mark_complete()?;
 
     println!(
-        "Joined share: {}\n  Hostname: {}\n  Connectivity group: {}\n  Node: {}\n",
+        "Joined circle: {}\n  Label: {}\n  Shares: {}\n  Connectivity group: {}\n  Node: {}\n",
         display_name,
         hostname,
-        node.connectivity_group_id().unwrap(),
-        node.node_number().unwrap(),
+        describe_shares(&info.shares),
+        cg_id,
+        node_number,
     );
     Ok(())
+}
+
+fn describe_shares(shares: &[wire::Share]) -> String {
+    if shares.is_empty() {
+        return "none yet".to_owned();
+    }
+    shares
+        .iter()
+        .map(|s| {
+            if s.name == s.id {
+                s.id.clone()
+            } else {
+                format!("{} ({})", s.id, s.name)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 async fn list() -> Result<()> {
@@ -149,11 +191,11 @@ async fn list() -> Result<()> {
     let db = storage::DB::new()?;
     let rows = db.get_all_rows()?;
     if rows.is_empty() {
-        println!("No shares joined. Use 'waclient join <invite_code>'.");
+        println!("No circles joined. Use 'waclient join <invite_code>'.");
         return Ok(());
     }
     let mut tw = TabWriter::new(std::io::stdout().lock()).padding(2);
-    writeln!(&mut tw, "Hostname\tName\tStatus")?;
+    writeln!(&mut tw, "Circle\tName\tShares\tStatus")?;
     for row in rows {
         let (_, display_name, hostname) = row.read_names()?;
         let state = match row
@@ -164,20 +206,34 @@ async fn list() -> Result<()> {
             Some(state) => state.describe(),
             None => "ok",
         };
-        writeln!(&mut tw, "{}\t{}\t{}", hostname, display_name, state)?;
+        let shares = row
+            .read_shares()?
+            .iter()
+            .map(|s| s.id.clone())
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(
+            &mut tw,
+            "{}\t{}\t{}\t{}",
+            hostname,
+            display_name,
+            if shares.is_empty() { "-" } else { &shares },
+            state
+        )?;
     }
     tw.flush()?;
     Ok(())
 }
 
-async fn remove(share: &str) -> Result<()> {
+async fn remove(circle: &str) -> Result<()> {
     let db = storage::DB::new()?;
     let row = db
-        .find_row(share)?
-        .with_context(|| format!("no share '{}' (see 'waclient list')", share))?;
+        .find_row(circle)?
+        .with_context(|| format!("no circle '{}' (see 'waclient list')", circle))?;
 
-    // Deregistering is best-effort: for a removed share the hub already rejects
-    // us, and for a revoked one logout cleanly retires the zombie registration.
+    // Deregistering is best-effort: for a removed circle the hub already
+    // rejects us, and for a revoked one logout cleanly retires the zombie
+    // registration.
     let backend = row.read_backend()?;
     let ns = wc::NodeStorage::new(row.clone());
     if let Some(backend) = backend.as_deref() {
@@ -191,7 +247,7 @@ async fn remove(share: &str) -> Result<()> {
         Err(e) => println!("Could not restore the node ({e}); removing locally anyway."),
     }
     row.delete_row()?;
-    println!("Share '{}' removed from this device.", share);
+    println!("Circle '{}' removed from this device.", circle);
     Ok(())
 }
 
@@ -240,58 +296,70 @@ fn host_slug(name: &str) -> Option<String> {
 }
 
 async fn serve(port: u16) -> Result<()> {
-    // Start a stream factory for all known shares. One dead or unreachable
-    // share must not take the others down: it's reported and skipped, and a
-    // terminal rejection is persisted so the share is never dialed again.
+    // Load every known circle. One dead or unreachable circle must not take
+    // the others down: it's reported and skipped, and a terminal rejection
+    // is persisted so the circle is never dialed again.
     let db = storage::DB::new()?;
-    let rows = db.get_all_rows()?;
-    let mut nodes = Vec::new();
-    let mut hostname_map: HashMap<String, String> = HashMap::new();
-    let mut dead: HashMap<String, TerminalState> = HashMap::new();
-    println!("Available shares:");
-    for row in rows {
-        let (cg_id, display_name, hostname) = row.read_names()?;
-        hostname_map.insert(hostname.clone(), cg_id.clone());
+    let mut registry = CircleRegistry::default();
+    println!("Available shares (as last seen; refreshed in the background):");
+    for row in db.get_all_rows()? {
+        let (cg_id, display_name, label) = row.read_names()?;
         if let Some(state) = row
             .read_terminal_state()?
             .as_deref()
             .and_then(TerminalState::parse)
         {
-            report_dead_share(&display_name, &hostname, state);
-            dead.insert(cg_id, state);
+            report_dead_circle(&display_name, &label, state);
+            registry.insert_dead(label, cg_id, state);
             continue;
         }
         let backend = row.read_backend()?;
-        let ns = wc::NodeStorage::new(row.clone());
-        if let Some(backend) = backend.as_deref() {
-            ns.override_hub_addr(backend);
-        }
-        match ns.restore_or_init_node().await {
-            Ok(node) if matches!(node.state(), wc::NodeState::Revoked) => {
-                let state = TerminalState::Revoked;
+        match WispersConnect::restore(row.clone(), backend.as_deref()).await {
+            Ok(transport) => {
+                let circle = Circle::new(label, cg_id, display_name, row, Box::new(transport));
+                print_share_urls(
+                    circle.display_name(),
+                    circle.label(),
+                    &circle.shares()?,
+                    port,
+                );
+                registry.insert(circle);
+            }
+            Err(TransportError::Terminal(state)) => {
                 let _ = row.write_terminal_state(state.as_str());
-                report_dead_share(&display_name, &hostname, state);
-                dead.insert(cg_id, state);
+                report_dead_circle(&display_name, &label, state);
+                registry.insert_dead(label, cg_id, state);
             }
-            Ok(node) => {
-                println!("  http://{}.localhost:{}", hostname, port);
-                nodes.push((cg_id, ShareNode { node, row }));
-            }
-            Err(e) => {
-                if let Some(state) = terminal_from_node_err(&e) {
-                    let _ = row.write_terminal_state(state.as_str());
-                    report_dead_share(&display_name, &hostname, state);
-                    dead.insert(cg_id, state);
-                } else {
-                    eprintln!(
-                        "  {} — temporarily unavailable ({e}), not serving it this run",
-                        hostname
-                    );
-                }
+            Err(TransportError::Transient(e)) => {
+                eprintln!(
+                    "  {} — temporarily unavailable ({e:#}), not serving it this run",
+                    label
+                );
             }
         }
     }
-    let stream_factory = Arc::new(StreamFactory::new(nodes, hostname_map, dead));
+    let registry = Arc::new(registry);
+
+    // Ask every live circle's server whether the share list changed since the
+    // last run. Best effort and off the startup path: an unreachable server
+    // just leaves the stored list in place.
+    for circle in registry.iter() {
+        let circle = circle.clone();
+        tokio::spawn(async move {
+            match circle.refresh().await {
+                Ok(Some(info)) => {
+                    println!("Updated share list for {}:", circle.label());
+                    print_share_urls(&info.name, circle.label(), &info.shares, port);
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!(
+                    "[{}] could not refresh the share list: {:#}",
+                    circle.label(),
+                    e
+                ),
+            }
+        });
+    }
 
     // Bind to local port.
     let bind_addr = format!("localhost:{}", port);
@@ -305,9 +373,9 @@ async fn serve(port: u16) -> Result<()> {
     loop {
         match listener.accept().await {
             Ok((tcp_stream, _)) => {
-                let stream_factory = stream_factory.clone();
+                let registry = registry.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(tcp_stream, stream_factory).await {
+                    if let Err(e) = handle_connection(tcp_stream, registry).await {
                         eprintln!("Connection error: {:#}", e);
                     }
                 });
@@ -319,12 +387,32 @@ async fn serve(port: u16) -> Result<()> {
     }
 }
 
-async fn handle_connection(
-    tcp_stream: TcpStream,
-    stream_factory: Arc<StreamFactory>,
-) -> Result<()> {
+fn print_share_urls(display_name: &str, hostname: &str, shares: &[wire::Share], port: u16) {
+    println!("  {} ({}):", display_name, hostname);
+    if shares.is_empty() {
+        println!("    (no shares yet)");
+    }
+    for share in shares {
+        println!(
+            "    {:<16} http://{}.{}.localhost:{}",
+            share.name, share.id, hostname, port
+        );
+    }
+}
+
+fn report_dead_circle(display_name: &str, label: &str, state: TerminalState) {
+    eprintln!(
+        "  {} ('{}') is no longer available — {}.",
+        label,
+        display_name,
+        state.describe()
+    );
+    eprintln!("    Run 'waclient remove {}' to clean it up.", label);
+}
+
+async fn handle_connection(tcp_stream: TcpStream, registry: Arc<CircleRegistry>) -> Result<()> {
     let tcp_stream = TokioIo::new(tcp_stream);
-    let service = hyper::service::service_fn(move |req| forward(req, stream_factory.clone()));
+    let service = hyper::service::service_fn(move |req| forward(req, registry.clone()));
     http1_server::Builder::new()
         .serve_connection(tcp_stream, service)
         // Allow a 101 to hand the browser socket over for raw relaying (WebSocket).
@@ -335,35 +423,36 @@ async fn handle_connection(
 
 async fn forward(
     mut req: hyper::Request<Incoming>,
-    stream_factory: Arc<StreamFactory>,
+    registry: Arc<CircleRegistry>,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
-    // Determine upstream server...
+    // Determine the circle and share...
     let Ok(host) = extract_host(&req) else {
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
             "missing host header",
         ));
     };
-    let Ok(share) = extract_share(&host) else {
-        return Ok(error_response(StatusCode::NOT_FOUND, "unknown host"));
+    let (share, circle) = match extract_target(&host) {
+        Ok(target) => target,
+        Err(e) => return Ok(error_response(StatusCode::NOT_FOUND, &e.to_string())),
     };
-
-    // ... and open a stream to it.
-    let fwd_stream = match stream_factory.open_stream(&share).await {
-        Ok(s) => s,
-        Err(OpenError::Terminal(state)) => {
-            // Terminal is deliberate, not an outage: 410 tells the reader that
-            // retrying won't help, unlike the 502 below.
+    let circle = match registry.get(&circle) {
+        Lookup::Live(circle) => circle,
+        Lookup::Dead(state) => return Ok(gone(state)),
+        Lookup::Unknown => {
             return Ok(error_response(
-                StatusCode::GONE,
-                &format!(
-                    "This app is no longer available on this device — {}.",
-                    state.describe()
-                ),
+                StatusCode::NOT_FOUND,
+                &format!("unknown circle '{}' (see 'waclient list')", circle),
             ));
         }
-        Err(OpenError::Other(e)) => {
-            eprintln!("[{}] open_stream failed: {:#}", share, e);
+    };
+
+    // ... and open a DATA stream to it, naming the share.
+    let fwd_stream = match circle.open_data_stream(&share).await {
+        Ok(s) => s,
+        Err(TransportError::Terminal(state)) => return Ok(gone(state)),
+        Err(TransportError::Transient(e)) => {
+            eprintln!("[{}] open_stream failed: {:#}", circle.label(), e);
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Wispers Access server unavailable",
@@ -374,7 +463,7 @@ async fn forward(
     let (mut sender, conn) = match http1_client::handshake(fwd_io).await {
         Ok(hs) => hs,
         Err(e) => {
-            eprintln!("[{}] client handshake failed: {:#}", share, e);
+            eprintln!("[{}] client handshake failed: {:#}", circle.label(), e);
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Wispers Access server unavailable",
@@ -414,13 +503,38 @@ async fn forward(
     let mut resp = match sender.send_request(rewritten).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[{}] send_request failed: {:#}", share, e);
+            eprintln!("[{}] send_request failed: {:#}", circle.label(), e);
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Wispers Access server unavailable",
             ));
         }
     };
+
+    // The server no longer has this share: our list is stale. Refresh it in
+    // the background and pass the 404 on as it is.
+    if resp.status() == StatusCode::NOT_FOUND
+        && resp
+            .headers()
+            .get(ERROR_HEADER)
+            .is_some_and(|v| v == "share-not-found")
+    {
+        eprintln!(
+            "[{}] share '{}' is gone; refreshing the share list",
+            circle.label(),
+            share
+        );
+        let circle = circle.clone();
+        tokio::spawn(async move {
+            if let Err(e) = circle.refresh().await {
+                eprintln!(
+                    "[{}] could not refresh the share list: {:#}",
+                    circle.label(),
+                    e
+                );
+            }
+        });
+    }
 
     // Successful upgrade: hand both raw byte streams to a relay task and return
     // the 101 to the browser with its handshake headers intact.
@@ -430,7 +544,10 @@ async fn forward(
                 let upstream_upgrade = hyper::upgrade::on(&mut resp);
                 tokio::spawn(splice_upgrade(peer_upgrade, upstream_upgrade));
             }
-            None => eprintln!("[{}] server returned 101 without an upgrade request", share),
+            None => eprintln!(
+                "[{}] server returned 101 without an upgrade request",
+                circle.label()
+            ),
         }
         let (mut parts, _body) = resp.into_parts();
         strip_hop_by_hop_headers(&mut parts.headers, true);
@@ -479,15 +596,27 @@ fn extract_host(req: &hyper::Request<Incoming>) -> Result<String> {
     Ok(host.to_owned())
 }
 
-fn extract_share(host: &str) -> Result<String> {
-    if let Some((share, rest)) = host.split_once('.')
-        && rest.starts_with("localhost")
-    {
-        Ok(share.to_owned())
-    } else if host.starts_with("localhost") {
-        Ok("".to_string())
-    } else {
-        anyhow::bail!("unknown host");
+/// The header waserver sets on errors it generated itself, so a 404 from
+/// the proxy can be told from one the app sent.
+const ERROR_HEADER: &str = "x-wispers-access-error";
+
+/// `<share>.<circle>.localhost[:port]` → (share, circle).
+fn extract_target(host: &str) -> Result<(String, String)> {
+    let host = host.rsplit_once(':').map_or(host, |(h, port)| {
+        if port.chars().all(|c| c.is_ascii_digit()) {
+            h
+        } else {
+            host
+        }
+    });
+    match host.split('.').collect::<Vec<_>>().as_slice() {
+        [share, circle, "localhost"] if !share.is_empty() && !circle.is_empty() => {
+            Ok(((*share).to_owned(), (*circle).to_owned()))
+        }
+        _ => anyhow::bail!(
+            "unknown host {}: shares are served at http://<share>.<circle>.localhost:<port> (see 'waclient list')",
+            host
+        ),
     }
 }
 
@@ -537,6 +666,18 @@ fn empty_body() -> BoxedBody {
         .boxed()
 }
 
+/// Terminal is deliberate, not an outage: 410 tells the reader that retrying
+/// won't help, unlike a 502.
+fn gone(state: TerminalState) -> hyper::Response<BoxedBody> {
+    error_response(
+        StatusCode::GONE,
+        &format!(
+            "This app is no longer available on this device — {}.",
+            state.describe()
+        ),
+    )
+}
+
 fn error_response(status: hyper::StatusCode, msg: &str) -> hyper::Response<BoxedBody> {
     let body: BoxedBody = Full::new(Bytes::copy_from_slice(msg.as_bytes()))
         .map_err(|never: Infallible| match never {})
@@ -551,193 +692,45 @@ fn error_response(status: hyper::StatusCode, msg: &str) -> hyper::Response<Boxed
 /// Why a share is permanently unusable. `Removed` = the hub rejected our
 /// credentials outright (share deleted server-side); `Revoked` = this device
 /// was revoked from the share's roster.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum TerminalState {
-    Removed,
-    Revoked,
-}
-
-impl TerminalState {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Removed => "removed",
-            Self::Revoked => "revoked",
-        }
-    }
-
-    fn parse(s: &str) -> Option<Self> {
-        match s {
-            "removed" => Some(Self::Removed),
-            "revoked" => Some(Self::Revoked),
-            _ => None,
-        }
-    }
-
-    fn describe(self) -> &'static str {
-        match self {
-            Self::Removed => "the share was removed on the server side",
-            Self::Revoked => "this device's access was revoked",
-        }
-    }
-}
-
-fn terminal_from_node_err(e: &wc::NodeStateError) -> Option<TerminalState> {
-    if e.is_unauthenticated() || e.is_not_found() {
-        return Some(TerminalState::Removed);
-    }
-    if e.is_revoked() {
-        return Some(TerminalState::Revoked);
-    }
-    None
-}
-
-fn terminal_from_p2p_err(e: &wc::P2pError) -> Option<TerminalState> {
-    match e {
-        wc::P2pError::Revoked => Some(TerminalState::Revoked),
-        wc::P2pError::Hub(h) if h.is_unauthenticated() || h.is_not_found() => {
-            Some(TerminalState::Removed)
-        }
-        _ => None,
-    }
-}
-
-fn report_dead_share(display_name: &str, hostname: &str, state: TerminalState) {
-    eprintln!(
-        "  {} ('{}') is no longer available — {}.",
-        hostname,
-        display_name,
-        state.describe()
-    );
-    eprintln!("    Run 'waclient remove {}' to clean it up.", hostname);
-}
-
-enum OpenError {
-    Terminal(TerminalState),
-    Other(anyhow::Error),
-}
-
-struct ShareNode {
-    node: wc::Node,
-    row: storage::Row,
-}
-
-struct StreamFactory {
-    nodes: HashMap<String /* connectivity_group_id */, ShareNode>,
-    hostname_map: HashMap<String /* hostname */, String /* connectivity_group_id */>,
-    // Shares the hub has terminally rejected (at startup or mid-session): they
-    // answer 410 instead of being dialed.
-    dead: Mutex<HashMap<String /* connectivity_group_id */, TerminalState>>,
-    pool: Mutex<HashMap<String, PoolEntry>>,
-}
-
-impl StreamFactory {
-    fn new(
-        nodes: Vec<(String, ShareNode)>,
-        hostname_map: HashMap<String, String>,
-        dead: HashMap<String, TerminalState>,
-    ) -> Self {
-        Self {
-            nodes: nodes.into_iter().collect(),
-            hostname_map,
-            dead: Mutex::new(dead),
-            pool: Mutex::new(HashMap::new()),
-        }
-    }
-
-    async fn open_stream(&self, host: &str) -> Result<wc::QuicStream, OpenError> {
-        let mut cg_id = host;
-        if let Some(mapped) = self.hostname_map.get(host) {
-            cg_id = mapped;
-        }
-        if let Some(state) = self.dead.lock().await.get(cg_id) {
-            return Err(OpenError::Terminal(*state));
-        }
-        let Some(share) = self.nodes.get(cg_id) else {
-            return Err(OpenError::Other(anyhow::anyhow!("Unknown host {}", host)));
-        };
-        // Open a stream with a single retry. This covers the case when the
-        // connection has died and needed reestablishing. A terminal rejection
-        // is not retried — it can only repeat.
-        match self.try_open_stream(cg_id, share).await {
-            Ok(s) => Ok(s),
-            Err(OpenError::Other(e)) => {
-                eprintln!(
-                    "[{}] open_stream attempt 1 failed, retrying once: {:#}",
-                    cg_id, e
-                );
-                self.try_open_stream(cg_id, share).await
-            }
-            Err(terminal) => Err(terminal),
-        }
-    }
-
-    async fn try_open_stream(
-        &self,
-        cg_id: &str,
-        share: &ShareNode,
-    ) -> Result<wc::QuicStream, OpenError> {
-        // Get the cell under lock.
-        let cell = {
-            let mut pool = self.pool.lock().await;
-            let pool_entry = pool.entry(cg_id.to_owned()).or_insert_with(|| PoolEntry {
-                cell: Arc::new(OnceCell::new()),
-            });
-            pool_entry.cell.clone()
-        };
-        // Get or establish the connection.
-        let conn = match cell
-            .get_or_try_init(|| async {
-                eprintln!("[{}] establishing QUIC connection", cg_id);
-                share.node.connect_quic(1).await.map(Arc::new)
-            })
-            .await
-        {
-            Ok(conn) => conn.clone(),
-            Err(e) => {
-                // A mid-session revocation/removal is forever: persist it and
-                // remember it so later requests 410 without dialing.
-                if let Some(state) = terminal_from_p2p_err(&e) {
-                    eprintln!(
-                        "[{}] share is no longer available — {}",
-                        cg_id,
-                        state.describe()
-                    );
-                    let _ = share.row.write_terminal_state(state.as_str());
-                    self.dead.lock().await.insert(cg_id.to_owned(), state);
-                    return Err(OpenError::Terminal(state));
-                }
-                return Err(OpenError::Other(e.into()));
-            }
-        };
-        // Open a stream. If this fails, the underlying connection has broken
-        // and we should remove it from the pool. There could be several threads
-        // trying this, so make sure the cell hasn't changed.
-        match conn.open_stream().await {
-            Ok(stream) => Ok(stream),
-            Err(e) => {
-                eprintln!(
-                    "[{}] conn.open_stream failed, evicting connection: {:#}",
-                    cg_id, e
-                );
-                let mut pool = self.pool.lock().await;
-                if let Some(entry) = pool.get(cg_id)
-                    && Arc::ptr_eq(&entry.cell, &cell)
-                {
-                    pool.remove(cg_id);
-                }
-                Err(OpenError::Other(e.into()))
-            }
-        }
-    }
-}
-
-struct PoolEntry {
-    cell: Arc<OnceCell<Arc<wc::QuicConnection>>>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn targets_are_share_dot_circle() {
+        assert_eq!(
+            extract_target("echo.round-trip.localhost:8000").unwrap(),
+            ("echo".to_owned(), "round-trip".to_owned())
+        );
+        assert_eq!(
+            extract_target("echo.round-trip.localhost").unwrap(),
+            ("echo".to_owned(), "round-trip".to_owned())
+        );
+        // One label is not enough, and neither is a foreign host.
+        assert!(extract_target("round-trip.localhost:8000").is_err());
+        assert!(extract_target("localhost:8000").is_err());
+        assert!(extract_target("echo.round-trip.example.com").is_err());
+        assert!(extract_target(".round-trip.localhost").is_err());
+        assert!(extract_target("a.b.c.localhost").is_err());
+    }
+
+    #[test]
+    fn share_descriptions_skip_redundant_names() {
+        let shares = vec![
+            wire::Share {
+                id: "echo".into(),
+                name: "echo".into(),
+                kind: wire::ShareKind::Web,
+            },
+            wire::Share {
+                id: "jf".into(),
+                name: "Jellyfin".into(),
+                kind: wire::ShareKind::Jellyfin,
+            },
+        ];
+        assert_eq!(describe_shares(&shares), "echo, jf (Jellyfin)");
+        assert_eq!(describe_shares(&[]), "none yet");
+    }
 
     #[test]
     fn parses_wax_code() {

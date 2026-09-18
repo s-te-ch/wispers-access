@@ -193,6 +193,28 @@ pub async fn write_stream_type<W: AsyncWrite + Unpin>(
     w.write_all(&[t as u8]).await
 }
 
+/// Opens a DATA stream on the guest side: the type byte and the preamble
+/// naming the share. The raw HTTP request follows on the same stream.
+pub async fn open_data_stream<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    share_id: &str,
+) -> std::io::Result<()> {
+    write_stream_type(w, StreamType::Data).await?;
+    write_message(
+        w,
+        &HttpPreamble {
+            share_id: share_id.to_owned(),
+        },
+    )
+    .await
+}
+
+/// Opens a CTRL stream on the guest side. The HTTP request to the guest API
+/// follows on the same stream.
+pub async fn open_ctrl_stream<W: AsyncWrite + Unpin>(w: &mut W) -> std::io::Result<()> {
+    write_stream_type(w, StreamType::Ctrl).await
+}
+
 /// Writes one message: big-endian u32 length, then the JSON bytes.
 pub async fn write_message<W: AsyncWrite + Unpin, M: Serialize>(
     w: &mut W,
@@ -280,13 +302,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn preamble_round_trips() {
+    async fn guest_side_openers_match_the_server_side_readers() {
         let (mut a, mut b) = tokio::io::duplex(1024);
-        let preamble = HttpPreamble {
-            share_id: "jf".into(),
-        };
-        write_stream_type(&mut a, StreamType::Data).await.unwrap();
-        write_message(&mut a, &preamble).await.unwrap();
+        open_data_stream(&mut a, "jf").await.unwrap();
+        a.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
 
         let mut first = [0u8; 1];
         b.read_exact(&mut first).await.unwrap();
@@ -295,7 +314,18 @@ mod tests {
             FirstByte::Typed(StreamType::Data)
         );
         let back: HttpPreamble = read_message(&mut b).await.unwrap();
-        assert_eq!(back, preamble);
+        assert_eq!(back.share_id, "jf");
+        let mut rest = [0u8; 16];
+        b.read_exact(&mut rest).await.unwrap();
+        assert_eq!(&rest, b"GET / HTTP/1.1\r\n");
+
+        let (mut a, mut b) = tokio::io::duplex(1024);
+        open_ctrl_stream(&mut a).await.unwrap();
+        b.read_exact(&mut first).await.unwrap();
+        assert_eq!(
+            FirstByte::from(first[0]),
+            FirstByte::Typed(StreamType::Ctrl)
+        );
     }
 
     #[tokio::test]
