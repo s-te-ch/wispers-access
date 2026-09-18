@@ -124,11 +124,6 @@ async fn finish_join(
     node.activate(activation_code).await?;
 
     println!("Fetching the circle from the server...");
-    let cg_id = node
-        .connectivity_group_id()
-        .context("activated node has no connectivity group")?
-        .to_string();
-    let node_number = node.node_number().unwrap();
     // Straight on the node rather than through a transport: `join` is
     // Wispers Connect specific anyway, and keeps the node for a rollback.
     let conn = node
@@ -141,28 +136,27 @@ async fn finish_join(
         .context("server answered 304 to an unconditional request")?;
 
     // Determine display & host names, deduping the host name if necessary.
-    row.write_connectivity_group_id(&cg_id)?;
+    let circle_id = row.circle_id()?;
     row.write_backend(backend)?;
     row.write_circle_info(&info)?;
     let display_name = if info.name.is_empty() {
-        cg_id.clone()
+        circle_id.to_string()
     } else {
         info.name.clone()
     };
     row.write_display_name(&display_name)?;
-    let hostname = host_slug(&display_name).unwrap_or_else(|| cg_id.clone());
-    let hostname = row.write_deduped_hostname(&hostname, &cg_id)?;
+    let hostname = host_slug(&display_name).unwrap_or_else(|| circle_id.to_string());
+    let hostname = row.write_deduped_hostname(&hostname)?;
 
     // Mark the row complete, so it doesn't get cleaned up at next start.
     row.mark_complete()?;
 
     println!(
-        "Joined circle: {}\n  Label: {}\n  Shares: {}\n  Connectivity group: {}\n  Node: {}\n",
+        "Joined circle: {}\n  Label: {}\n  Shares: {}\n  Circle id: {}\n",
         display_name,
         hostname,
         describe_shares(&info.shares),
-        cg_id,
-        node_number,
+        circle_id,
     );
     Ok(())
 }
@@ -303,32 +297,33 @@ async fn serve(port: u16) -> Result<()> {
     let mut registry = CircleRegistry::default();
     println!("Available shares (as last seen; refreshed in the background):");
     for row in db.get_all_rows()? {
-        let (cg_id, display_name, label) = row.read_names()?;
+        let (circle_id, display_name, label) = row.read_names()?;
         if let Some(state) = row
             .read_terminal_state()?
             .as_deref()
             .and_then(TerminalState::parse)
         {
             report_dead_circle(&display_name, &label, state);
-            registry.insert_dead(label, cg_id, state);
+            registry.insert_dead(label, circle_id, state);
             continue;
         }
         let backend = row.read_backend()?;
         match WispersConnect::restore(row.clone(), backend.as_deref()).await {
             Ok(transport) => {
-                let circle = Circle::new(label, cg_id, display_name, row, Box::new(transport));
-                print_share_urls(
+                let circle = Circle::new(label, circle_id, display_name, row, Box::new(transport));
+                println!(
+                    "  {} ({}) via {}:",
                     circle.display_name(),
                     circle.label(),
-                    &circle.shares()?,
-                    port,
+                    circle.describe_transport()
                 );
+                print_share_urls(circle.label(), &circle.shares()?, port);
                 registry.insert(circle);
             }
             Err(TransportError::Terminal(state)) => {
                 let _ = row.write_terminal_state(state.as_str());
                 report_dead_circle(&display_name, &label, state);
-                registry.insert_dead(label, cg_id, state);
+                registry.insert_dead(label, circle_id, state);
             }
             Err(TransportError::Transient(e)) => {
                 eprintln!(
@@ -348,8 +343,8 @@ async fn serve(port: u16) -> Result<()> {
         tokio::spawn(async move {
             match circle.refresh().await {
                 Ok(Some(info)) => {
-                    println!("Updated share list for {}:", circle.label());
-                    print_share_urls(&info.name, circle.label(), &info.shares, port);
+                    println!("Updated share list for {} ({}):", info.name, circle.label());
+                    print_share_urls(circle.label(), &info.shares, port);
                 }
                 Ok(None) => {}
                 Err(e) => eprintln!(
@@ -387,8 +382,7 @@ async fn serve(port: u16) -> Result<()> {
     }
 }
 
-fn print_share_urls(display_name: &str, hostname: &str, shares: &[wire::Share], port: u16) {
-    println!("  {} ({}):", display_name, hostname);
+fn print_share_urls(hostname: &str, shares: &[wire::Share], port: u16) {
     if shares.is_empty() {
         println!("    (no shares yet)");
     }

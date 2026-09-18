@@ -26,6 +26,9 @@ pub trait Transport: Send + Sync {
     /// Opens a fresh stream, connecting or reconnecting as needed. A passing
     /// failure is retried once; a final one is reported as such.
     fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>>;
+
+    /// How this transport identifies the server, for humans.
+    fn describe(&self) -> String;
 }
 
 pub enum TransportError {
@@ -145,6 +148,20 @@ impl WispersConnect {
 }
 
 impl Transport for WispersConnect {
+    fn describe(&self) -> String {
+        format!(
+            "Wispers Connect group {}, node {}",
+            self.node
+                .connectivity_group_id()
+                .map(|id| id.to_string())
+                .unwrap_or_else(|| "?".to_owned()),
+            self.node
+                .node_number()
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".to_owned())
+        )
+    }
+
     fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>> {
         Box::pin(async {
             // One retry covers a connection that died and had to be

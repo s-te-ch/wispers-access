@@ -13,6 +13,26 @@ pub struct DB {
     conn: Mutex<rusqlite::Connection>,
 }
 
+/// Device-local ID of a circle.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CircleId(String);
+
+impl CircleId {
+    fn mint() -> Self {
+        CircleId(uuid::Uuid::new_v4().to_string())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for CircleId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl DB {
     pub fn new() -> Result<Arc<Self>> {
         let conn = open_db()?;
@@ -27,7 +47,10 @@ impl DB {
         let id: i64;
         {
             let conn = self.conn.lock().expect("unpoisoned db lock");
-            conn.execute("INSERT INTO circles (created_at) VALUES (?1)", [t])?;
+            conn.execute(
+                "INSERT INTO circles (circle_id, created_at) VALUES (?1, ?2)",
+                rusqlite::params![CircleId::mint().as_str(), t],
+            )?;
             id = conn.last_insert_rowid();
         }
         Ok(Row {
@@ -36,14 +59,14 @@ impl DB {
         })
     }
 
-    /// Looks a circle up by its hostname label (or connectivity group id).
+    /// Looks a circle up by its hostname label (or circle id).
     pub fn find_row(self: &Arc<Self>, key: &str) -> Result<Option<Row>> {
         use rusqlite::OptionalExtension;
         let conn = self.conn.lock().expect("unpoisoned db lock");
         let id = conn
             .query_row(
                 "SELECT id FROM circles
-                 WHERE complete = TRUE AND (hostname = ?1 OR connectivity_group_id = ?1)",
+                 WHERE complete = TRUE AND (hostname = ?1 OR circle_id = ?1)",
                 [key],
                 |r| r.get::<_, i64>(0),
             )
@@ -77,13 +100,14 @@ pub struct Row {
 }
 
 impl Row {
-    pub fn write_connectivity_group_id(&self, cg_id: &str) -> Result<()> {
+    pub fn circle_id(&self) -> Result<CircleId> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
-        conn.execute(
-            "UPDATE circles SET connectivity_group_id = ?1 WHERE id = ?2",
-            rusqlite::params![cg_id, self.id],
+        let id = conn.query_row(
+            "SELECT circle_id FROM circles WHERE id = ?1",
+            [self.id],
+            |r| r.get::<_, String>(0),
         )?;
-        Ok(())
+        Ok(CircleId(id))
     }
 
     pub fn write_display_name(&self, name: &str) -> Result<()> {
@@ -96,8 +120,9 @@ impl Row {
     }
 
     /// Claims `hostname` as this circle's label, or `hostname-2`, `-3`, … if
-    /// taken; falls back to the connectivity group id.
-    pub fn write_deduped_hostname(&self, hostname: &str, cg_id: &str) -> Result<String> {
+    /// taken; falls back to the circle id.
+    pub fn write_deduped_hostname(&self, hostname: &str) -> Result<String> {
+        let circle_id = self.circle_id()?;
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
         for n in 1.. {
             let candidate: String = if n == 1 {
@@ -118,25 +143,25 @@ impl Row {
                 Err(e) => return Err(e.into()),
             }
         }
-        // Normal deduping has failed. Just use the connectivity group ID.
+        // Normal deduping has failed. Just use the circle id.
         conn.execute(
             "UPDATE circles SET hostname = ?1 WHERE id = ?2",
-            rusqlite::params![cg_id, self.id],
+            rusqlite::params![circle_id.as_str(), self.id],
         )?;
-        Ok(cg_id.to_owned())
+        Ok(circle_id.to_string())
     }
 
-    /// (connectivity group id, display name, hostname label)
-    pub fn read_names(&self) -> Result<(String, String, String)> {
+    /// (circle id, display name, hostname label)
+    pub fn read_names(&self) -> Result<(CircleId, String, String)> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
         let row = conn.query_row(
-            "SELECT connectivity_group_id, display_name, hostname
+            "SELECT circle_id, display_name, hostname
                  FROM circles
                  WHERE id = ?1",
             [self.id],
             |row| {
                 Ok((
-                    row.get::<_, Option<String>>(0)?.unwrap_or("".to_owned()),
+                    CircleId(row.get::<_, String>(0)?),
                     row.get::<_, Option<String>>(1)?.unwrap_or("".to_owned()),
                     row.get::<_, Option<String>>(2)?.unwrap_or("".to_owned()),
                 ))
@@ -391,7 +416,7 @@ fn migrations() -> Migrations<'static> {
         M::up(
             "CREATE TABLE circles (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
-                 connectivity_group_id TEXT,
+                 circle_id TEXT NOT NULL UNIQUE,
                  display_name TEXT,
                  hostname TEXT UNIQUE,
                  backend TEXT,
@@ -483,7 +508,7 @@ mod tests {
         assert_eq!(row.read_shares().unwrap(), later.shares);
 
         // Deleting the circle takes its shares with it.
-        row.write_deduped_hostname("family", "cg").unwrap();
+        row.write_deduped_hostname("family").unwrap();
         row.mark_complete().unwrap();
         assert!(db.find_row("family").unwrap().is_some());
         row.delete_row().unwrap();
@@ -502,13 +527,13 @@ mod tests {
         let db = in_memory();
         let a = db.new_row().unwrap();
         let b = db.new_row().unwrap();
-        assert_eq!(
-            a.write_deduped_hostname("family", "cg-a").unwrap(),
-            "family"
-        );
-        assert_eq!(
-            b.write_deduped_hostname("family", "cg-b").unwrap(),
-            "family-2"
-        );
+        assert_ne!(a.circle_id().unwrap(), b.circle_id().unwrap());
+        assert_eq!(a.write_deduped_hostname("family").unwrap(), "family");
+        assert_eq!(b.write_deduped_hostname("family").unwrap(), "family-2");
+        // Lookup by circle id, once the row is complete.
+        let id = a.circle_id().unwrap();
+        assert!(db.find_row(id.as_str()).unwrap().is_none());
+        a.mark_complete().unwrap();
+        assert!(db.find_row(id.as_str()).unwrap().is_some());
     }
 }

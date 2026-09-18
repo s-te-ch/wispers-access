@@ -1,6 +1,6 @@
 //! Circle management logic.
 
-use crate::storage;
+use crate::storage::{self, CircleId};
 use crate::transports::{Stream, TerminalState, Transport, TransportError};
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Empty};
@@ -18,7 +18,7 @@ use wispers_access_wire as wire;
 pub struct Circle {
     /// The `<circle>` label in `<share>.<circle>.localhost`.
     label: String,
-    id: String,
+    id: CircleId,
     display_name: String,
     row: storage::Row,
     transport: Box<dyn Transport>,
@@ -30,7 +30,7 @@ pub struct Circle {
 impl Circle {
     pub fn new(
         label: String,
-        id: String,
+        id: CircleId,
         display_name: String,
         row: storage::Row,
         transport: Box<dyn Transport>,
@@ -51,6 +51,11 @@ impl Circle {
 
     pub fn display_name(&self) -> &str {
         &self.display_name
+    }
+
+    /// The server as the transport identifies it, for humans.
+    pub fn describe_transport(&self) -> String {
+        self.transport.describe()
     }
 
     /// The shares as last fetched from the server.
@@ -167,16 +172,17 @@ pub enum Lookup {
 
 impl CircleRegistry {
     pub fn insert(&mut self, circle: Circle) {
-        self.by_id.insert(circle.id.clone(), circle.label.clone());
+        self.by_id
+            .insert(circle.id.to_string(), circle.label.clone());
         self.live.insert(circle.label.clone(), Arc::new(circle));
     }
 
-    pub fn insert_dead(&mut self, label: String, id: String, state: TerminalState) {
-        self.by_id.insert(id, label.clone());
+    pub fn insert_dead(&mut self, label: String, id: CircleId, state: TerminalState) {
+        self.by_id.insert(id.to_string(), label.clone());
         self.dead.insert(label, state);
     }
 
-    /// By label, or by connectivity group id.
+    /// By label, or by circle id.
     pub fn get(&self, key: &str) -> Lookup {
         let label = self.by_id.get(key).map(String::as_str).unwrap_or(key);
         if let Some(circle) = self.live.get(label) {
