@@ -1,7 +1,10 @@
+mod config;
+mod guest_api;
 mod http;
 mod initialization;
 mod ipc;
 mod logging;
+mod protocol;
 mod serving;
 mod status;
 mod storage;
@@ -20,56 +23,59 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Initialise a new application share
+    /// Initialise a new circle: a group of guests and the shares they see.
+    /// Writes its `circle.toml`, creates its identity and registers it with
+    /// the backend.
     Init {
         /// Wispers Connect API key (can also be set via WC_API_KEY env var).
         #[arg(long, env = "WC_API_KEY", hide_env_values = true)]
         api_key: String,
         /// Base URL of a custom Wispers Connect backend (e.g.
         /// `https://myhub.example.com`). Omit to use the managed backend. Must
-        /// be https. Pinned into the share and carried in its invite codes.
+        /// be https. Pinned into the circle and carried in its invite codes.
         #[arg(long, env = "WC_BACKEND")]
         backend: Option<String>,
-        /// Name of the application share.
-        share: String,
-        /// Display name of the application share.
+        /// Transport every member of this circle uses.
+        #[arg(long, default_value = "wispers-connect")]
+        transport: config::TransportKind,
+        /// Name of the circle (letters, digits, '-' or '_').
+        circle: String,
+        /// Display name of the circle, shown to guests.
         display_name: String,
     },
-    /// De-initialise an existing application share.
+    /// Destroy a circle: removes its backend group (and with it every
+    /// member's access) and its local state. Irreversible.
     Deinit {
-        /// Name of the application share.
-        share: String,
+        /// Name of the circle.
+        circle: String,
     },
-    /// Runs the server proxying <name> in the foreground.
+    /// Runs the server for a circle in the foreground. What it serves comes
+    /// from the circle's `circle.toml`.
     Serve {
-        /// Name of the application share.
-        share: String,
-        /// Upstream to proxy: `host:port`, or a bare `port` (host defaults to
-        /// localhost). E.g. `3000`, `127.0.0.1:8080`, or `app:3000` (a Docker
-        /// compose service name).
-        #[arg(value_parser = parse_upstream)]
-        upstream: String,
+        /// Name of the circle.
+        circle: String,
     },
-    /// Runs the server in the background.
+    /// Runs the server for a circle in the background.
     Start {
-        /// Name of the application share.
-        share: String,
-        /// Upstream to proxy: `host:port`, or a bare `port` (host defaults to
-        /// localhost). E.g. `3000`, `127.0.0.1:8080`, or `app:3000` (a Docker
-        /// compose service name).
-        #[arg(value_parser = parse_upstream)]
-        upstream: String,
+        /// Name of the circle.
+        circle: String,
     },
     /// Stops a server that is running in the background.
     Stop {
-        /// Name of the application share.
-        share: String,
+        /// Name of the circle.
+        circle: String,
     },
-    /// Shows the status of all shares, or a detailed view of one share.
+    /// Re-reads a running server's `circle.toml`. A broken file leaves the
+    /// running config in place.
+    Reload {
+        /// Name of the circle.
+        circle: String,
+    },
+    /// Shows the status of all circles, or a detailed view of one circle.
     Status {
-        /// Name of an application share to show in detail. Omit for a
-        /// one-line-per-share fleet overview.
-        share: Option<String>,
+        /// Name of a circle to show in detail. Omit for a one-line-per-circle
+        /// fleet overview.
+        circle: Option<String>,
         /// Output a JSON document instead of the human-readable rendering.
         /// The JSON shape is the stable interface.
         #[arg(long)]
@@ -80,12 +86,12 @@ enum Command {
         /// Don't stop at EOF. Instead, wait for more logs to be written.
         #[arg(short = 'f', long)]
         follow: bool,
-        share: String,
+        circle: String,
     },
-    /// Generates an guest device invite code.
+    /// Generates a guest device invite code.
     Invite {
-        /// Name of the application share.
-        share: String,
+        /// Name of the circle.
+        circle: String,
         /// Name of the new node.
         node_name: String,
         /// User identification (e.g. email address) of the user.
@@ -96,8 +102,8 @@ enum Command {
     },
     /// Revoke access.
     Revoke {
-        /// Name of the application share.
-        share: String,
+        /// Name of the circle.
+        circle: String,
         /// Node number whose access to revoke.
         node_number: i32,
     },
@@ -139,31 +145,40 @@ async fn async_main(command: Command) -> Result<()> {
         Command::Init {
             api_key,
             backend,
-            share,
+            transport,
+            circle,
             display_name,
         } => {
-            let backend = normalize_backend(backend.as_deref())?;
-            initialization::up(&api_key, &share, &display_name, backend.as_deref()).await
+            let transport = match transport {
+                config::TransportKind::WispersConnect => config::TransportConfig::WispersConnect {
+                    backend: normalize_backend(backend.as_deref())?,
+                },
+            };
+            initialization::up(&api_key, &circle, &display_name, &transport).await
         }
-        Command::Deinit { share } => initialization::down(&share).await,
-        Command::Serve { share, upstream } => {
-            let _log = logging::init_foreground(&share)?;
-            serving::serve(&share, upstream).await
+        Command::Deinit { circle } => initialization::down(&circle).await,
+        Command::Serve { circle } => {
+            let _log = logging::init_foreground(&circle)?;
+            serving::serve(&circle).await
         }
-        Command::Start { share, upstream } => {
-            let _log = logging::init_background(&share)?;
-            serving::serve(&share, upstream).await
+        Command::Start { circle } => {
+            let _log = logging::init_background(&circle)?;
+            serving::serve(&circle).await
         }
-        Command::Stop { share } => stop(&share).await,
-        Command::Status { share, json } => status::run(share.as_deref(), json).await,
-        Command::Logs { follow, share } => logs(follow, &share),
+        Command::Stop { circle } => stop(&circle).await,
+        Command::Reload { circle } => reload(&circle).await,
+        Command::Status { circle, json } => status::run(circle.as_deref(), json).await,
+        Command::Logs { follow, circle } => logs(follow, &circle),
         Command::Invite {
-            share,
+            circle,
             node_name,
             user_id,
             png,
-        } => invite(&share, &node_name, &user_id, png.as_deref()).await,
-        Command::Revoke { share, node_number } => revoke(&share, node_number).await,
+        } => invite(&circle, &node_name, &user_id, png.as_deref()).await,
+        Command::Revoke {
+            circle,
+            node_number,
+        } => revoke(&circle, node_number).await,
     }
 }
 
@@ -199,9 +214,9 @@ fn start_daemon() -> Result<()> {
     std::process::exit(0);
 }
 
-async fn stop(share: &str) -> Result<()> {
-    let Ok(mut client) = ipc::Client::connect(share).await else {
-        anyhow::bail!("cannot connect to server for share {}", share);
+async fn stop(circle: &str) -> Result<()> {
+    let Ok(mut client) = ipc::Client::connect(circle).await else {
+        anyhow::bail!("cannot connect to server for circle {}", circle);
     };
     match client.request(&ipc::Request::Shutdown).await {
         Ok(ipc::Response::Success { .. }) => {
@@ -217,15 +232,52 @@ async fn stop(share: &str) -> Result<()> {
     Ok(())
 }
 
-fn logs(follow: bool, share: &str) -> Result<()> {
+async fn reload(circle: &str) -> Result<()> {
+    let Ok(mut client) = ipc::Client::connect(circle).await else {
+        anyhow::bail!("cannot connect to server for circle {}", circle);
+    };
+    match client.request(&ipc::Request::Reload).await {
+        Ok(ipc::Response::Success {
+            data: ipc::ResponseData::Reload(r),
+            ..
+        }) => {
+            let ids: Vec<&str> = r.shares.iter().map(|s| s.id.as_str()).collect();
+            if r.changed {
+                println!(
+                    "Reloaded. Serving {} share(s): {}",
+                    ids.len(),
+                    ids.join(", ")
+                );
+            } else {
+                println!(
+                    "No change. Serving {} share(s): {}",
+                    ids.len(),
+                    ids.join(", ")
+                );
+            }
+        }
+        Ok(ipc::Response::Success { .. }) => {
+            anyhow::bail!("unexpected response from server");
+        }
+        Ok(ipc::Response::Error { error, .. }) => {
+            anyhow::bail!("reload failed, running config kept: {}", error);
+        }
+        Err(e) => {
+            anyhow::bail!("error sending command to server: {}", e);
+        }
+    }
+    Ok(())
+}
+
+fn logs(follow: bool, circle: &str) -> Result<()> {
     use std::collections::VecDeque;
     use std::io::{self, Read, Write};
 
     let mut stdout = io::stdout().lock();
-    let paths = logging::list_log_files(share)?;
+    let paths = logging::list_log_files(circle)?;
     let mut paths = VecDeque::from(paths);
     let Some(mut path) = paths.pop_front() else {
-        eprintln!("No logs for share {}", share);
+        eprintln!("No logs for circle {}", circle);
         return Ok(());
     };
     let mut file =
@@ -263,7 +315,7 @@ fn logs(follow: bool, share: &str) -> Result<()> {
         }
 
         // Check for newer log files due to log rotation.
-        for new_path in logging::list_log_files(share)? {
+        for new_path in logging::list_log_files(circle)? {
             if new_path > path {
                 paths.push_back(new_path);
             }
@@ -282,19 +334,18 @@ fn logs(follow: bool, share: &str) -> Result<()> {
 }
 
 async fn invite(
-    share: &str,
+    circle: &str,
     node_name: &str,
     user_id: &str,
     png: Option<&std::path::Path>,
 ) -> Result<()> {
-    let Ok(mut client) = ipc::Client::connect(share).await else {
-        anyhow::bail!("cannot connect to server for share {}", share);
+    let Ok(mut client) = ipc::Client::connect(circle).await else {
+        anyhow::bail!("cannot connect to server for circle {}", circle);
     };
-    // The share's pinned backend (if any) gets baked into the invite so the
+    // The circle's pinned backend (if any) gets baked into the invite so the
     // guest client knows which hub to join.
-    let backend = storage::ShareStateStore::new(share)?
-        .load_share_config()?
-        .and_then(|c| c.backend);
+    let config::TransportConfig::WispersConnect { backend } =
+        storage::CircleDir::new(circle)?.load_config()?.transport;
     let req = ipc::Request::GetInvite {
         node_name: node_name.to_owned(),
         user_id: user_id.to_owned(),
@@ -422,7 +473,7 @@ fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
     Ok(Some(trimmed.to_owned()))
 }
 
-async fn revoke(share: &str, node_number: i32) -> Result<()> {
+async fn revoke(circle: &str, node_number: i32) -> Result<()> {
     use wispers_connect as wc;
 
     if node_number == 1 {
@@ -430,12 +481,15 @@ async fn revoke(share: &str, node_number: i32) -> Result<()> {
     }
 
     // Restore the node.
-    let store = storage::ShareStateStore::new(share)?;
-    let Some(cfg) = store.load_share_config()? else {
-        anyhow::bail!("Share {} is not initialised", share);
+    let dir = storage::CircleDir::new(circle)?;
+    let cfg = dir.load_config()?;
+    let state = dir.open_state()?;
+    let Some(wcs) = state.wispers_connect_state()? else {
+        anyhow::bail!("Circle {} has no Wispers Connect credentials", circle);
     };
-    let node_storage = wc::NodeStorage::new(store);
-    if let Some(backend) = cfg.backend.as_deref() {
+    let config::TransportConfig::WispersConnect { backend } = &cfg.transport;
+    let node_storage = wc::NodeStorage::new(state);
+    if let Some(backend) = backend.as_deref() {
         node_storage.override_hub_addr(backend);
     }
     let node = node_storage.restore_or_init_node().await?;
@@ -461,37 +515,12 @@ async fn revoke(share: &str, node_number: i32) -> Result<()> {
 
     // At this point we can be sure the node is revoked, so we proceed to
     // deregistering it.
-    let client = wcbe::Client::new(&cfg.api_key, &wcbe::api_base(cfg.backend.as_deref()));
+    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref()));
     client
-        .delete_node(&cfg.connectivity_group_id, node_number)
+        .delete_node(&wcs.connectivity_group_id, node_number)
         .await?;
     println!("Node {node_number} is now revoked and deregistered");
     Ok(())
-}
-
-/// Parse an upstream dial target in `[host:]port` form into a normalized
-/// `host:port` string. A bare port (no colon) uses host `localhost`; an empty
-/// host (e.g. `:3000`) defaults the same way. `localhost` rather than
-/// `127.0.0.1` so the dial tries both address families — modern Node dev
-/// servers (e.g. Vite) often listen on `::1` only. A non-numeric or
-/// out-of-range port is rejected. IPv6 literals would need bracket form
-/// (`[::1]:3000`) and aren't handled here.
-fn parse_upstream(s: &str) -> std::result::Result<String, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("upstream is empty".to_string());
-    }
-    // No colon ⇒ the whole thing is a port; otherwise split off the port after
-    // the last colon so the host may itself be a name like `app`.
-    let (host, port_str) = s.rsplit_once(':').unwrap_or(("", s));
-    let port: u16 = port_str
-        .parse()
-        .map_err(|_| format!("invalid port '{}' (expected 1–65535)", port_str))?;
-    if port == 0 {
-        return Err("port 0 is not a valid upstream".to_string());
-    }
-    let host = if host.is_empty() { "localhost" } else { host };
-    Ok(format!("{}:{}", host, port))
 }
 
 #[cfg(test)]
@@ -536,21 +565,48 @@ mod tests {
     }
 
     #[test]
-    fn parses_upstream_forms() {
-        assert_eq!(parse_upstream("8080").unwrap(), "localhost:8080");
-        assert_eq!(parse_upstream("app:3000").unwrap(), "app:3000");
-        assert_eq!(parse_upstream("127.0.0.1:8080").unwrap(), "127.0.0.1:8080");
-        assert_eq!(parse_upstream(":3000").unwrap(), "localhost:3000");
-        assert_eq!(parse_upstream("  app:3000\n").unwrap(), "app:3000");
-    }
-
-    #[test]
-    fn rejects_bad_upstream() {
-        assert!(parse_upstream("").is_err());
-        assert!(parse_upstream("app").is_err()); // no port
-        assert!(parse_upstream("app:").is_err()); // empty port
-        assert!(parse_upstream("app:abc").is_err()); // non-numeric port
-        assert!(parse_upstream("app:0").is_err()); // port 0
-        assert!(parse_upstream("app:99999").is_err()); // out of range
+    fn cli_parses_circle_init() {
+        let cli =
+            Cli::try_parse_from(["waserver", "init", "--api-key", "k", "team", "Awesome Team"])
+                .unwrap();
+        match cli.command {
+            Command::Init {
+                circle,
+                display_name,
+                transport,
+                ..
+            } => {
+                assert_eq!(circle, "team");
+                assert_eq!(display_name, "Awesome Team");
+                assert_eq!(transport, config::TransportKind::WispersConnect);
+            }
+            _ => panic!("parsed the wrong command"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "waserver",
+                "init",
+                "--api-key",
+                "k",
+                "--transport",
+                "iroh",
+                "f",
+                "F"
+            ])
+            .is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "waserver",
+                "init",
+                "--api-key",
+                "k",
+                "--transport",
+                "wispers-connect",
+                "f",
+                "F"
+            ])
+            .is_ok()
+        );
     }
 }

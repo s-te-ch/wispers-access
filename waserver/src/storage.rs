@@ -1,131 +1,105 @@
-use anyhow::Result;
-use serde::{Deserialize, Serialize};
+//! Per-circle on-disk storage.
+//!
+//! `~/.config/waserver/circles/<circle>/` holds two files with two owners:
+//! `circle.toml` (the user's; see `config`) and `state.db` (the daemon's:
+//! node key material, registration, backend credentials).
+
+use crate::config::{self, CircleConfig};
+use rusqlite_migration::{M, Migrations};
 use std::fs;
-use std::io;
-use std::io::Write; // For .write_all()
+use std::io::{self, Write};
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 use wispers_connect as wc;
 
-//-- ShareConfig format --------------------------------------------------------
-
-const SHARE_CONFIG_FILENAME: &str = "share_config.json";
-const CURRENT_VERSION: u32 = 1;
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub struct ShareConfig {
-    /// Schema version. Doesn't need to be set until we actually have a breaking
-    /// change and need version 2.
-    #[serde(default = "default_version")]
-    version: u32,
-
-    /// API key for the Wispers domain, used to create new node registrations.
-    pub api_key: String,
-
-    /// ID of the Wispers connectivity group that corresponds to this share.
-    pub connectivity_group_id: String,
-
-    /// Base URL of the Wispers Connect backend this share lives on. Must be
-    /// HTTPS. Defaults to the managed backend.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backend: Option<String>,
-}
-
-impl ShareConfig {
-    pub fn new(api_key: &str, connectivity_group_id: &str, backend: Option<&str>) -> Self {
-        Self {
-            version: default_version(),
-            api_key: api_key.to_owned(),
-            connectivity_group_id: connectivity_group_id.to_owned(),
-            backend: backend.map(str::to_owned),
-        }
-    }
-}
-
-fn default_version() -> u32 {
-    1
-}
-
-// Custom debug implementation so we don't leak API key.
-impl std::fmt::Debug for ShareConfig {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ShareConfig")
-            .field("version", &self.version)
-            .field("api_key", &"[redacted]")
-            .finish()
-    }
-}
-
-//-- Error type ----------------------------------------------------------------
+const STATE_DB_FILENAME: &str = "state.db";
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     #[error("io error: {0}")]
     Io(#[from] io::Error),
-
-    #[error("parse error at {}: {}", .0.path(), .0.inner())]
-    Parse(#[from] serde_path_to_error::Error<serde_json::Error>),
-
-    #[error("failed to serialize config: {0}")]
-    Serialize(#[from] serde_json::Error),
-
-    #[error("unsupported config version {0} (supporting ≤ {CURRENT_VERSION})")]
-    UnsupportedVersion(u32),
-
+    #[error(transparent)]
+    Config(#[from] config::Error),
+    #[error("state database: {0}")]
+    Db(rusqlite::Error),
+    #[error("state database migration: {0}")]
+    Migration(rusqlite_migration::Error),
+    #[error("invalid circle name '{0}' (use letters, digits, '-' or '_')")]
+    InvalidName(String),
+    #[error("circle {0} is not initialised")]
+    NotInitialised(String),
+    #[error("circle {0} already exists")]
+    AlreadyExists(String),
     #[error("could not determine the OS config directory")]
     NoConfigDir,
 }
 
-//-- Global functions ----------------------------------------------------------
-
-pub fn list_shares() -> Result<Vec<String>, Error> {
-    let path = base_dir()?;
-    let shares: Vec<String> = if !path.exists() {
-        Vec::new()
-    } else {
-        fs::read_dir(path)?
-            .filter_map(|e| e.ok())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect()
-    };
-    Ok(shares)
+/// Names of the initialised circles, unsorted.
+pub fn list_circles() -> Result<Vec<String>, Error> {
+    let dir = circles_dir()?;
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    Ok(fs::read_dir(dir)?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join(config::FILENAME).is_file())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect())
 }
 
-//-- Share state store ---------------------------------------------------------
+//-- Circle directory ----------------------------------------------------------
 
 #[derive(Clone)]
-pub struct ShareStateStore {
+pub struct CircleDir {
+    name: String,
     dir: PathBuf,
 }
 
-impl ShareStateStore {
-    pub fn new(share: &str) -> Result<Self, Error> {
+impl CircleDir {
+    /// Validates the name and computes the path, but touches nothing on disk.
+    pub fn new(name: &str) -> Result<Self, Error> {
+        if !config::is_valid_id(name) {
+            return Err(Error::InvalidName(name.to_owned()));
+        }
         Ok(Self {
-            dir: config_dir(share)?,
+            name: name.to_owned(),
+            dir: circles_dir()?.join(name),
         })
     }
 
-    pub fn load_share_config(&self) -> Result<Option<ShareConfig>, Error> {
-        let path = self.dir.join(SHARE_CONFIG_FILENAME);
-        let bytes = match fs::read(&path) {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(e) => return Err(e.into()),
-        };
-        let de = &mut serde_json::Deserializer::from_slice(&bytes);
-        let cfg: ShareConfig = serde_path_to_error::deserialize(de)?;
-        if cfg.version > CURRENT_VERSION {
-            return Err(Error::UnsupportedVersion(cfg.version));
-        }
-        Ok(Some(cfg))
+    pub fn config_path(&self) -> PathBuf {
+        self.dir.join(config::FILENAME)
     }
 
-    pub fn save_share_config(&self, cfg: &ShareConfig) -> Result<(), Error> {
-        let bytes = serde_json::to_vec_pretty(cfg)?;
+    pub fn exists(&self) -> bool {
+        self.config_path().is_file()
+    }
+
+    pub fn load_config(&self) -> Result<CircleConfig, Error> {
+        if !self.exists() {
+            return Err(Error::NotInitialised(self.name.clone()));
+        }
+        Ok(CircleConfig::load(&self.config_path())?)
+    }
+
+    /// Creates the directory, writes `circle.toml` and creates an empty `state.db`.
+    pub fn create(&self, config_text: &str) -> Result<StateDb, Error> {
+        if self.dir.exists() {
+            return Err(Error::AlreadyExists(self.name.clone()));
+        }
         ensure_dir_exists(&self.dir)?;
-        write_atomically(&self.dir, SHARE_CONFIG_FILENAME, &bytes)?;
-        Ok(())
+        write_atomically(&self.dir, config::FILENAME, config_text.as_bytes())?;
+        StateDb::open(self.dir.join(STATE_DB_FILENAME))
+    }
+
+    /// Opens the existing `state.db`.
+    pub fn open_state(&self) -> Result<StateDb, Error> {
+        let path = self.dir.join(STATE_DB_FILENAME);
+        if !self.exists() || !path.is_file() {
+            return Err(Error::NotInitialised(self.name.clone()));
+        }
+        StateDb::open(path)
     }
 
     pub fn delete(&self) -> Result<(), Error> {
@@ -137,34 +111,117 @@ impl ShareStateStore {
     }
 }
 
-const ROOT_KEY_FILENAME: &str = "root_key.bin";
-const REGISTRATION_FILENAME: &str = "registration.pb";
+//-- State database ------------------------------------------------------------
 
-impl wc::NodeStateStore for ShareStateStore {
-    fn load(&self) -> Result<Option<wc::PersistedNodeState>, wc::StorageError> {
-        let root_key_path = self.dir.join(ROOT_KEY_FILENAME);
-        let registration_path = self.dir.join(REGISTRATION_FILENAME);
+/// The daemon-owned SQLite file. Cheap to clone. Clones share one connection.
+#[derive(Clone)]
+pub struct StateDb {
+    conn: Arc<Mutex<rusqlite::Connection>>,
+}
 
-        // Load root key
-        if !root_key_path.exists() {
+/// What the Wispers Connect transport needs to talk to its backend.
+#[derive(Clone)]
+pub struct WispersConnectState {
+    pub api_key: String,
+    pub connectivity_group_id: String,
+}
+
+const KEY_API_KEY: &str = "api_key";
+const KEY_CONNECTIVITY_GROUP_ID: &str = "connectivity_group_id";
+const KEY_ROOT_KEY: &str = "root_key";
+const KEY_REGISTRATION: &str = "registration";
+
+impl StateDb {
+    fn open(path: PathBuf) -> Result<Self, Error> {
+        let mut conn = rusqlite::Connection::open(&path).map_err(Error::Db)?;
+        // The daemon and the CLI (or two CLI tasks) may open the file at the
+        // same time; wait for a short lock instead of failing.
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(Error::Db)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+        }
+        conn.pragma_update(None, "journal_mode", "WAL")
+            .map_err(Error::Db)?;
+        conn.pragma_update(None, "foreign_keys", "ON")
+            .map_err(Error::Db)?;
+        migrations()
+            .to_latest(&mut conn)
+            .map_err(Error::Migration)?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
+    }
+
+    pub fn wispers_connect_state(&self) -> Result<Option<WispersConnectState>, Error> {
+        let (Some(api_key), Some(cg_id)) = (
+            self.get_string(KEY_API_KEY)?,
+            self.get_string(KEY_CONNECTIVITY_GROUP_ID)?,
+        ) else {
             return Ok(None);
-        }
-        let root_key_bytes = fs::read(&root_key_path)?;
-        if root_key_bytes.len() != wc::ROOT_KEY_LEN {
-            return Err(wc::StorageError::InvalidRootKey);
-        }
-        let mut key_array = [0u8; wc::ROOT_KEY_LEN];
-        key_array.copy_from_slice(&root_key_bytes);
-
-        // Load registration if present
-        let registration = if registration_path.exists() {
-            let bytes = fs::read(&registration_path)?;
-            let reg = wc::deserialize_registration(&bytes)?;
-            Some(reg)
-        } else {
-            None
         };
+        Ok(Some(WispersConnectState {
+            api_key,
+            connectivity_group_id: cg_id,
+        }))
+    }
 
+    pub fn set_wispers_connect_state(&self, state: &WispersConnectState) -> Result<(), Error> {
+        self.set(KEY_API_KEY, state.api_key.as_bytes())?;
+        self.set(
+            KEY_CONNECTIVITY_GROUP_ID,
+            state.connectivity_group_id.as_bytes(),
+        )
+    }
+
+    fn get_string(&self, key: &str) -> Result<Option<String>, Error> {
+        Ok(self
+            .get(key)?
+            .map(|v| String::from_utf8_lossy(&v).into_owned()))
+    }
+
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>, Error> {
+        use rusqlite::OptionalExtension;
+        let conn = self.conn.lock().expect("unpoisoned db lock");
+        conn.query_row("SELECT value FROM kv WHERE key = ?1", [key], |r| r.get(0))
+            .optional()
+            .map_err(Error::Db)
+    }
+
+    fn set(&self, key: &str, value: &[u8]) -> Result<(), Error> {
+        let conn = self.conn.lock().expect("unpoisoned db lock");
+        conn.execute(
+            "INSERT INTO kv (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            rusqlite::params![key, value],
+        )
+        .map_err(Error::Db)?;
+        Ok(())
+    }
+
+    fn remove(&self, key: &str) -> Result<(), Error> {
+        let conn = self.conn.lock().expect("unpoisoned db lock");
+        conn.execute("DELETE FROM kv WHERE key = ?1", [key])
+            .map_err(Error::Db)?;
+        Ok(())
+    }
+}
+
+/// wispers-connect keeps the node's root key and registration here.
+impl wc::NodeStateStore for StateDb {
+    fn load(&self) -> Result<Option<wc::PersistedNodeState>, wc::StorageError> {
+        let Some(root_key) = self.get(KEY_ROOT_KEY).map_err(store_error)? else {
+            return Ok(None);
+        };
+        let key_array: [u8; wc::ROOT_KEY_LEN] = root_key
+            .try_into()
+            .map_err(|_| wc::StorageError::InvalidRootKey)?;
+        let registration = match self.get(KEY_REGISTRATION).map_err(store_error)? {
+            Some(bytes) => Some(wc::deserialize_registration(&bytes)?),
+            None => None,
+        };
         Ok(Some(wc::PersistedNodeState::from_stored(
             key_array,
             registration,
@@ -172,36 +229,38 @@ impl wc::NodeStateStore for ShareStateStore {
     }
 
     fn save(&self, state: &wc::PersistedNodeState) -> Result<(), wc::StorageError> {
-        ensure_dir_exists(&self.dir)?;
-        write_atomically(&self.dir, ROOT_KEY_FILENAME, state.root_key_bytes())?;
-        if let Some(reg) = state.registration() {
-            let bytes = wc::serialize_registration(reg);
-            write_atomically(&self.dir, REGISTRATION_FILENAME, &bytes)?;
-        } else {
-            let path = self.dir.join(REGISTRATION_FILENAME);
-            if path.exists() {
-                fs::remove_file(&path)?;
-            }
+        self.set(KEY_ROOT_KEY, state.root_key_bytes())
+            .map_err(store_error)?;
+        match state.registration() {
+            Some(reg) => self
+                .set(KEY_REGISTRATION, &wc::serialize_registration(reg))
+                .map_err(store_error),
+            None => self.remove(KEY_REGISTRATION).map_err(store_error),
         }
-        Ok(())
     }
 
     fn delete(&self) -> Result<(), wc::StorageError> {
-        let root_key_path = self.dir.join(ROOT_KEY_FILENAME);
-        let registration_path = self.dir.join(REGISTRATION_FILENAME);
-        if root_key_path.exists() {
-            fs::remove_file(&root_key_path)?;
-        }
-        if registration_path.exists() {
-            fs::remove_file(&registration_path)?;
-        }
-        Ok(())
+        self.remove(KEY_ROOT_KEY).map_err(store_error)?;
+        self.remove(KEY_REGISTRATION).map_err(store_error)
     }
 }
 
-fn config_dir(share: &str) -> Result<PathBuf, Error> {
-    let dir = base_dir()?.join(share);
-    Ok(dir)
+fn store_error(e: Error) -> wc::StorageError {
+    wc::StorageError::Io(io::Error::other(e))
+}
+
+fn migrations() -> Migrations<'static> {
+    Migrations::new(vec![
+        // v1 — daemon-owned blobs: node key material, registration, backend
+        // credentials.
+        M::up("CREATE TABLE kv (key TEXT PRIMARY KEY, value BLOB NOT NULL) STRICT;"),
+    ])
+}
+
+//-- Paths and file helpers ----------------------------------------------------
+
+fn circles_dir() -> Result<PathBuf, Error> {
+    Ok(base_dir()?.join("circles"))
 }
 
 fn base_dir() -> Result<PathBuf, Error> {
@@ -211,7 +270,7 @@ fn base_dir() -> Result<PathBuf, Error> {
     Ok(dir)
 }
 
-fn ensure_dir_exists(dir: &PathBuf) -> Result<(), std::io::Error> {
+fn ensure_dir_exists(dir: &PathBuf) -> Result<(), io::Error> {
     if !dir.exists() {
         fs::create_dir_all(dir)?;
         #[cfg(unix)]
@@ -223,7 +282,7 @@ fn ensure_dir_exists(dir: &PathBuf) -> Result<(), std::io::Error> {
     Ok(())
 }
 
-fn write_atomically(dir: &PathBuf, name: &str, data: &[u8]) -> Result<(), std::io::Error> {
+fn write_atomically(dir: &PathBuf, name: &str, data: &[u8]) -> Result<(), io::Error> {
     let path = dir.join(name);
     let mut tmp = NamedTempFile::new_in(dir)?;
     tmp.write_all(data)?;
@@ -236,4 +295,48 @@ fn write_atomically(dir: &PathBuf, name: &str, data: &[u8]) -> Result<(), std::i
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wc::NodeStateStore;
+
+    #[test]
+    fn migrations_are_valid() {
+        assert!(migrations().validate().is_ok());
+    }
+
+    #[test]
+    fn state_db_round_trips() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = StateDb::open(tmp.path().join("state.db")).unwrap();
+        assert!(db.wispers_connect_state().unwrap().is_none());
+        assert!(db.load().unwrap().is_none());
+
+        db.set_wispers_connect_state(&WispersConnectState {
+            api_key: "wc_test_k.secret".to_owned(),
+            connectivity_group_id: "cg-1".to_owned(),
+        })
+        .unwrap();
+        let wcs = db.wispers_connect_state().unwrap().unwrap();
+        assert_eq!(wcs.api_key, "wc_test_k.secret");
+        assert_eq!(wcs.connectivity_group_id, "cg-1");
+
+        let state = wc::PersistedNodeState::from_stored([7u8; wc::ROOT_KEY_LEN], None);
+        db.save(&state).unwrap();
+        let loaded = db.load().unwrap().unwrap();
+        assert_eq!(loaded.root_key_bytes(), &[7u8; wc::ROOT_KEY_LEN]);
+        assert!(loaded.registration().is_none());
+
+        db.delete().unwrap();
+        assert!(db.load().unwrap().is_none());
+        // Backend credentials survive a node reset.
+        assert!(db.wispers_connect_state().unwrap().is_some());
+
+        // Reopening runs no migration twice and sees the data.
+        drop(db);
+        let db = StateDb::open(tmp.path().join("state.db")).unwrap();
+        assert!(db.wispers_connect_state().unwrap().is_some());
+    }
 }

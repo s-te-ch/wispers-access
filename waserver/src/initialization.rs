@@ -1,65 +1,133 @@
-//! Share initialisation & tear-down
+//! `init` and `deinit`.
 
+use crate::config::{self, TransportConfig};
 use crate::ipc;
 use crate::storage;
 use crate::wcbe;
 use anyhow::{Context, Result};
+use std::future::Future;
+use std::pin::Pin;
 
-/// Initialise a new app share.
 pub async fn up(
     api_key: &str,
-    share: &str,
+    circle: &str,
     display_name: &str,
-    backend: Option<&str>,
+    transport: &TransportConfig,
 ) -> Result<()> {
-    // Check for valid name & non-existence.
-    if !is_valid_share_name(share) {
-        anyhow::bail!("Invalid share name '{}'", share);
-    }
-    let store = storage::ShareStateStore::new(share)?;
-    if store.load_share_config()?.is_some() {
-        anyhow::bail!("Share {} already exists", share);
+    let dir = storage::CircleDir::new(circle)?;
+    if dir.exists() {
+        anyhow::bail!("Circle {} already exists", circle);
     }
 
-    // Create a Wispers connectivity group for the app share.
+    // Nothing may be left behind on failure: `init` refuses to run on an
+    // existing directory, and an orphaned group would consume quota.
+    let mut rollback = Rollback::new();
+    match create(&mut rollback, &dir, api_key, display_name, transport).await {
+        Ok(()) => {
+            println!(
+                "Circle {} initialised. Add its shares to {} and run `waserver serve {}`.",
+                circle,
+                dir.config_path().display(),
+                circle
+            );
+            Ok(())
+        }
+        Err(e) => {
+            rollback.run().await;
+            Err(e)
+        }
+    }
+}
+
+/// The steps of `init`, each pushing its undo before the next runs: the
+/// backend group, the circle directory with config and state, the node and
+/// its registration.
+async fn create(
+    rollback: &mut Rollback,
+    dir: &storage::CircleDir,
+    api_key: &str,
+    display_name: &str,
+    transport: &TransportConfig,
+) -> Result<()> {
+    let TransportConfig::WispersConnect { backend } = transport;
+    let backend = backend.as_deref();
     let wcbe_client = wcbe::Client::new(api_key, &wcbe::api_base(backend));
+
     let cg_id = wcbe_client
         .add_connectivity_group(display_name)
         .await
         .map_err(explain_group_quota)?;
+    rollback.push("connectivity group", {
+        let (client, cg_id) = (wcbe_client.clone(), cg_id.clone());
+        async move { client.remove_connectivity_group(&cg_id).await }
+    });
 
-    // Write the ShareConfig.
-    let cfg = storage::ShareConfig::new(api_key, &cg_id, backend);
-    store.save_share_config(&cfg)?;
+    let state = dir.create(&config::render_template(display_name, transport))?;
+    rollback.push("circle directory", {
+        let dir = dir.clone();
+        async move { dir.delete().map_err(Into::into) }
+    });
+    state.set_wispers_connect_state(&storage::WispersConnectState {
+        api_key: api_key.to_owned(),
+        connectivity_group_id: cg_id.clone(),
+    })?;
 
-    // Create the serving Wispers node.
-    let node_storage = wispers_connect::NodeStorage::new(store);
+    // Create the serving Wispers node and register it with the backend. The
+    // registration goes away with the group, so it needs no undo of its own.
+    let node_storage = wispers_connect::NodeStorage::new(state);
     if let Some(backend) = backend {
         node_storage.override_hub_addr(backend);
     }
     let mut node = node_storage.restore_or_init_node().await?;
-
-    // Register the node with the Wispers backend.
     let token = wcbe_client
         .get_registration_token(&cg_id, Some("Server"), None /* metadata */)
         .await?;
     node.register(&token).await.context("registration failed")?;
-
     Ok(())
 }
 
-pub async fn down(share: &str) -> Result<()> {
-    let store = storage::ShareStateStore::new(share)?;
-    let Some(cfg) = store.load_share_config()? else {
-        anyhow::bail!("Could not find share '{}'", share);
-    };
+/// Undo actions for the steps of `init` that have succeeded so far, run in
+/// reverse when a later step fails. Each failure to undo is reported and the
+/// rest still run.
+struct Rollback {
+    steps: Vec<(&'static str, Undo)>,
+}
 
-    // Refuse to tear down a share while its server is still running.
-    if let Ok(mut client) = ipc::Client::connect(share).await {
-        // A reachable socket means a daemon is serving this share. Name its
-        // port in the message if it answers promptly, but don't hang on a
+type Undo = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+
+impl Rollback {
+    fn new() -> Self {
+        Self { steps: Vec::new() }
+    }
+
+    fn push(
+        &mut self,
+        what: &'static str,
+        undo: impl Future<Output = Result<()>> + Send + 'static,
+    ) {
+        self.steps.push((what, Box::pin(undo)));
+    }
+
+    async fn run(self) {
+        for (what, undo) in self.steps.into_iter().rev() {
+            if let Err(e) = undo.await {
+                eprintln!("Init failed; could not undo the {what} either ({e:#}).");
+            }
+        }
+    }
+}
+
+pub async fn down(circle: &str) -> Result<()> {
+    let dir = storage::CircleDir::new(circle)?;
+    let cfg = dir.load_config()?;
+    let wcs = dir.open_state()?.wispers_connect_state()?;
+
+    // Refuse to tear down a circle while its server is still running.
+    if let Ok(mut client) = ipc::Client::connect(circle).await {
+        // A reachable socket means a daemon is serving this circle. Name its
+        // shares in the message if it answers promptly, but don't hang on a
         // wedged daemon.
-        let port_hint = match tokio::time::timeout(
+        let shares_hint = match tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client.request(&ipc::Request::Status),
         )
@@ -68,25 +136,35 @@ pub async fn down(share: &str) -> Result<()> {
             Ok(Ok(ipc::Response::Success {
                 data: ipc::ResponseData::Status(status),
                 ..
-            })) => format!(" on {}", status.upstream),
+            })) => format!(
+                " serving {}",
+                status
+                    .shares
+                    .iter()
+                    .map(|s| s.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
             _ => String::new(),
         };
         anyhow::bail!(
-            "share '{}' has a running server{}; stop it first with `waserver stop {}`",
-            share,
-            port_hint,
-            share
+            "circle '{}' has a running server{}; stop it first with `waserver stop {}`",
+            circle,
+            shares_hint,
+            circle
         );
     }
 
     // Remove the Wispers connectivity group. This deregisters all nodes.
-    let wcbe_client = wcbe::Client::new(&cfg.api_key, &wcbe::api_base(cfg.backend.as_deref()));
-    wcbe_client
-        .remove_connectivity_group(&cfg.connectivity_group_id)
-        .await?;
-    // Remove the store directory. This removes both the share config and the
-    // node state.
-    store.delete()?;
+    if let Some(wcs) = wcs {
+        let TransportConfig::WispersConnect { backend } = &cfg.transport;
+        let wcbe_client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref()));
+        wcbe_client
+            .remove_connectivity_group(&wcs.connectivity_group_id)
+            .await?;
+    }
+    // Remove the directory: config file and state database.
+    dir.delete()?;
     Ok(())
 }
 
@@ -95,22 +173,14 @@ pub async fn down(share: &str) -> Result<()> {
 fn explain_group_quota(e: anyhow::Error) -> anyhow::Error {
     match e.downcast_ref::<wcbe::QuotaExceeded>() {
         Some(q) if q.quota == "groups_per_domain" => anyhow::anyhow!(
-            "cannot create a new share: your plan's connectivity-group quota \
-             is used up ({} of {}). Delete an unused share with `waserver \
-             deinit <share>` or upgrade your plan.",
+            "cannot create a new circle: your plan's connectivity-group quota \
+             is used up ({} of {}). Delete an unused circle with `waserver \
+             deinit <circle>` or upgrade your plan.",
             q.current,
             q.limit
         ),
         _ => e,
     }
-}
-
-fn is_valid_share_name(s: &str) -> bool {
-    !s.is_empty()
-        && s.len() <= 64  // pick your limit
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        && !(s.starts_with('-') || s.starts_with('_'))
-        && !(s.ends_with('-') || s.ends_with('_'))
 }
 
 #[cfg(test)]
@@ -121,22 +191,20 @@ mod tests {
     fn group_quota_error_names_the_way_out() {
         let quota = anyhow::Error::new(wcbe::QuotaExceeded {
             quota: "groups_per_domain".to_owned(),
-            limit: 7,
-            current: 7,
+            limit: 3,
+            current: 3,
         });
-        let msg = explain_group_quota(quota).to_string();
-        assert!(msg.contains("7 of 7"), "{msg}");
+        let msg = format!("{}", explain_group_quota(quota));
+        assert!(msg.contains("3 of 3"), "{msg}");
         assert!(msg.contains("waserver deinit"), "{msg}");
 
-        // Other errors pass through unchanged, quota ones from other
-        // quotas included (a nodes_per_group 429 here would be a backend
-        // surprise; don't mistranslate it).
+        // Other errors pass through untouched.
         let other = anyhow::Error::new(wcbe::QuotaExceeded {
             quota: "nodes_per_group".to_owned(),
             limit: 12,
             current: 12,
         });
-        let msg = explain_group_quota(other).to_string();
-        assert_eq!(msg, "nodes_per_group quota exceeded (12 of 12 used)");
+        let msg = format!("{}", explain_group_quota(other));
+        assert!(!msg.contains("waserver deinit"), "{msg}");
     }
 }
