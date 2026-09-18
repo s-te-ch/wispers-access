@@ -12,6 +12,7 @@ mod wcbe;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use wispers_access_wire as wire;
 
 #[derive(Parser)]
 #[command(name = "waserver", version)]
@@ -355,11 +356,12 @@ async fn invite(
             data: ipc::ResponseData::Invite(invite),
             ..
         }) => {
-            let code = compose_wax_code(
-                &invite.registration_token,
-                &invite.activation_code,
-                backend.as_deref(),
-            );
+            let code = wire::Invite::WispersConnect {
+                registration_token: invite.registration_token,
+                activation_code: invite.activation_code,
+                backend,
+            }
+            .to_code();
             let qr = qrcode::QrCode::new(code.as_bytes()).context("cannot build QR code")?;
             println!("Invite code (valid for 24 hours):\n\n  {}\n", code);
             println!("{}", render_qr_ansi(&qr));
@@ -427,31 +429,6 @@ fn render_qr_ansi(qr: &qrcode::QrCode) -> String {
         y += 2;
     }
     out
-}
-
-/// Composes the user-facing invite code from its raw parts. The activation
-/// code keeps its native `<node>-<secret>` form so the endorsing node stays
-/// encoded; the `wax_` prefix makes codes recognizable and greppable.
-///
-/// If there's a custom backend, appends it as an additional, base32-encoded
-/// field.
-fn compose_wax_code(
-    registration_token: &str,
-    activation_code: &str,
-    backend: Option<&str>,
-) -> String {
-    let base = format!("wax_{}_{}", registration_token, activation_code);
-    match backend {
-        Some(backend) => format!("{}_{}", base, encode_backend(backend)),
-        None => base,
-    }
-}
-
-/// base32 of a backend URL, lowercase, unpadded.
-fn encode_backend(backend: &str) -> String {
-    data_encoding::BASE32_NOPAD
-        .encode(backend.as_bytes())
-        .to_lowercase()
 }
 
 /// Validate and normalize `--backend`
@@ -526,28 +503,6 @@ async fn revoke(circle: &str, node_number: i32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn wax_code_keeps_activation_code_verbatim() {
-        assert_eq!(
-            compose_wax_code("ab12cd", "1-xyz789", None),
-            "wax_ab12cd_1-xyz789"
-        );
-    }
-
-    #[test]
-    fn wax_code_appends_encoded_backend() {
-        let code = compose_wax_code("ab12cd", "1-xyz789", Some("https://myhub.example.com"));
-        let expected_backend = encode_backend("https://myhub.example.com");
-        assert_eq!(code, format!("wax_ab12cd_1-xyz789_{}", expected_backend));
-        // The backend field must not reintroduce the '_' delimiter.
-        assert!(!expected_backend.contains('_'));
-        // Round-trips back to the original URL.
-        let decoded = data_encoding::BASE32_NOPAD
-            .decode(expected_backend.to_uppercase().as_bytes())
-            .unwrap();
-        assert_eq!(decoded, b"https://myhub.example.com");
-    }
 
     #[test]
     fn normalize_backend_requires_https_and_trims() {

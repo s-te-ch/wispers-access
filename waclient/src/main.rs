@@ -79,8 +79,18 @@ async fn async_main(command: Command) -> Result<()> {
 }
 
 async fn join(invite_code: &str) -> Result<()> {
-    // Parse the invite code.
-    let (registration_token, activation_code, backend) = parse_wax_code(invite_code)?;
+    let invite = wire::Invite::parse(invite_code)?;
+    let wire::Invite::WispersConnect {
+        registration_token,
+        activation_code,
+        backend,
+    } = invite
+    else {
+        anyhow::bail!(
+            "{} invites are not supported by this waclient yet",
+            invite.transport().as_str()
+        );
+    };
 
     // Create a new DB row.
     let db = storage::DB::new()?;
@@ -95,12 +105,12 @@ async fn join(invite_code: &str) -> Result<()> {
     }
     let mut node = ns.restore_or_init_node().await?;
     println!("Registering Wispers node...");
-    node.register(registration_token).await?;
+    node.register(&registration_token).await?;
 
     // From here on the hub holds a registration that consumes quota, so
     // a failed join must log the node out again (revoke + deregister) rather
     // than orphan the registration. This is best-effort.
-    if let Err(e) = finish_join(&mut node, &row, activation_code, backend.as_deref()).await {
+    if let Err(e) = finish_join(&mut node, &row, &activation_code, backend.as_deref()).await {
         match node.logout().await {
             Ok(()) => eprintln!("Join failed; deregistered from the hub again."),
             Err(le) => eprintln!("Join failed; could not deregister from the hub either ({le})."),
@@ -243,38 +253,6 @@ async fn remove(circle: &str) -> Result<()> {
     row.delete_row()?;
     println!("Circle '{}' removed from this device.", circle);
     Ok(())
-}
-
-/// Parses a `wax_<token>_<activation_code>[_<backend>]` invite code into its
-/// (registration_token, activation_code, backend) parts. The optional backend
-/// part is a base32-encoded URL.
-fn parse_wax_code(code: &str) -> Result<(&str, &str, Option<String>)> {
-    let rest = code
-        .trim()
-        .strip_prefix("wax_")
-        .context("invalid invite code (expected wax_<token>_<code>)")?;
-    let mut parts = rest.splitn(3, '_');
-    let token = parts.next().unwrap_or("");
-    let activation = parts.next().unwrap_or("");
-    if token.is_empty() || activation.is_empty() {
-        anyhow::bail!("invalid invite code (expected wax_<token>_<code>)");
-    }
-    let backend = parts.next().map(decode_backend).transpose()?;
-    Ok((token, activation, backend))
-}
-
-/// Decodes the invite's base32 backend field back to its URL, erroring when
-/// the field is present but unusable. Only an `https://` URL is accepted. A
-/// plaintext or bogus hub is refused outright.
-fn decode_backend(encoded: &str) -> Result<String> {
-    let bytes = data_encoding::BASE32_NOPAD
-        .decode(encoded.to_uppercase().as_bytes())
-        .context("invite's backend field is not valid base32")?;
-    let url = String::from_utf8(bytes).context("invite's backend URL is not valid UTF-8")?;
-    if !url.starts_with("https://") {
-        anyhow::bail!("invite's backend URL must be https:// (got {url:?})");
-    }
-    Ok(url)
 }
 
 /// Free-form name -> DNS-label-safe slug, or None if nothing usable remains.
@@ -724,54 +702,5 @@ mod tests {
         ];
         assert_eq!(describe_shares(&shares), "echo, jf (Jellyfin)");
         assert_eq!(describe_shares(&[]), "none yet");
-    }
-
-    #[test]
-    fn parses_wax_code() {
-        assert_eq!(
-            parse_wax_code("wax_ab12cd_1-xyz789").unwrap(),
-            ("ab12cd", "1-xyz789", None)
-        );
-    }
-
-    #[test]
-    fn tolerates_pasted_whitespace() {
-        assert_eq!(
-            parse_wax_code("  wax_ab12cd_1-xyz789\n").unwrap(),
-            ("ab12cd", "1-xyz789", None)
-        );
-    }
-
-    #[test]
-    fn parses_wax_code_with_backend() {
-        let url = "https://myhub.example.com";
-        let enc = data_encoding::BASE32_NOPAD
-            .encode(url.as_bytes())
-            .to_lowercase();
-        assert_eq!(
-            parse_wax_code(&format!("wax_ab12cd_1-xyz789_{}", enc)).unwrap(),
-            ("ab12cd", "1-xyz789", Some(url.to_owned()))
-        );
-    }
-
-    #[test]
-    fn rejects_malformed_codes() {
-        assert!(parse_wax_code("ab12cd/1-xyz789").is_err()); // old test format
-        assert!(parse_wax_code("wax_ab12cd").is_err()); // missing activation code
-        assert!(parse_wax_code("wax__1-xyz789").is_err()); // empty token
-        assert!(parse_wax_code("wax_ab12cd_").is_err()); // empty activation code
-        assert!(parse_wax_code("").is_err());
-    }
-
-    #[test]
-    fn rejects_code_with_bad_backend_field() {
-        // A present-but-undecodable / non-https backend fails the whole code
-        // shut, rather than falling back to the managed hub — and says why.
-        let http = data_encoding::BASE32_NOPAD
-            .encode(b"http://evil.example.com")
-            .to_lowercase();
-        let err = parse_wax_code(&format!("wax_ab12cd_1-xyz789_{}", http)).unwrap_err();
-        assert!(err.to_string().contains("https"), "got: {err}");
-        assert!(parse_wax_code("wax_ab12cd_1-xyz789_!!notbase32").is_err());
     }
 }

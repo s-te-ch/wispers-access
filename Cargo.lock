@@ -3206,7 +3206,6 @@ dependencies = [
  "anyhow",
  "bytes",
  "clap",
- "data-encoding",
  "dirs",
  "http-body-util",
  "hyper",
@@ -3252,7 +3251,6 @@ dependencies = [
  "chrono",
  "clap",
  "daemonize",
- "data-encoding",
  "dirs",
  "http-body-util",
  "hyper",
@@ -3785,6 +3783,7 @@ dependencies = [
 name = "wispers-access-wire"
 version = "0.1.0"
 dependencies = [
+ "data-encoding",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
