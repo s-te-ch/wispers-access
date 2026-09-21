@@ -284,16 +284,16 @@ async fn gather_circle(name: &str, loaded: Result<Loaded, String>) -> CircleStat
     };
     let config = loaded.as_ref().map(|l| &l.config);
     let wcs = loaded.as_ref().and_then(|l| l.wcs.as_ref());
-    let (server, roster) = tokio::join!(
+    let (server, report) = tokio::join!(
         query_server(name, config),
-        query_roster(config, wcs, loaded.as_ref().and_then(|l| l.state.as_ref()))
+        query_transport(config, wcs, loaded.as_ref().and_then(|l| l.state.as_ref()))
     );
     let (server, live_guests, served_shares) = server;
-    let (mut guests, guests_error) = match roster.guests {
+    let (mut guests, guests_error) = match report.guests {
         Ok(g) => (Some(g), None),
         Err(e) => (None, Some(e)),
     };
-    let (invites, invites_error) = match roster.invites {
+    let (invites, invites_error) = match report.invites {
         Ok(i) => (Some(i), None),
         Err(e) => (None, Some(e)),
     };
@@ -327,7 +327,7 @@ async fn gather_circle(name: &str, loaded: Result<Loaded, String>) -> CircleStat
         name: name.to_owned(),
         display_name: config.map(|c| c.name.clone()),
         config_error,
-        transport: roster.transport,
+        transport: report.transport,
         server,
         shares,
         guests,
@@ -337,27 +337,26 @@ async fn gather_circle(name: &str, loaded: Result<Loaded, String>) -> CircleStat
     }
 }
 
-/// Members and invitees of the circle, and the transport's own facts;
-/// each transport module fills one from its own sources.
-pub(crate) struct Roster {
+/// The transport's part of the status report.
+pub(crate) struct TransportReport {
     pub(crate) guests: Result<Vec<GuestStatus>, String>,
     pub(crate) invites: Result<Vec<InviteStatus>, String>,
     pub(crate) transport: Option<TransportStatus>,
 }
 
-async fn query_roster(
+async fn query_transport(
     config: Option<&CircleConfig>,
     wcs: Option<&storage::WispersConnectState>,
     state: Option<&storage::StateDb>,
-) -> Roster {
+) -> TransportReport {
     match config.map(|c| &c.transport) {
         Some(TransportConfig::WispersConnect { backend }) => {
-            wispers_connect_transport::roster(backend.as_deref(), wcs).await
+            wispers_connect_transport::report(backend.as_deref(), wcs).await
         }
-        Some(TransportConfig::Iroh {}) => iroh_transport::roster(state),
+        Some(TransportConfig::Iroh {}) => iroh_transport::report(state),
         None => {
             let err = "circle config failed to load";
-            Roster {
+            TransportReport {
                 guests: Err(err.to_owned()),
                 invites: Err(err.to_owned()),
                 transport: None,

@@ -3,7 +3,7 @@
 use crate::initialization::Rollback;
 use crate::protocol::{self, Peer};
 use crate::serving::{BoxFuture, ExitReason, Server, ServingHandle, shutdown_signal};
-use crate::status::{GuestStatus, InviteStatus, Roster, TransportStatus, invite_status};
+use crate::status::{GuestStatus, InviteStatus, TransportReport, TransportStatus, invite_status};
 use crate::storage;
 use crate::wcbe;
 use anyhow::{Context, Result};
@@ -382,9 +382,11 @@ pub async fn revoke(
 
 //-- Status --------------------------------------------------------------------
 
-/// The circle's roster for `waserver status`, from the hub: the group's
-/// nodes minus this server, and its recent registration tokens.
-pub async fn roster(backend: Option<&str>, wcs: Option<&storage::WispersConnectState>) -> Roster {
+/// Fills in the TransportReport, for status reporting.
+pub async fn report(
+    backend: Option<&str>,
+    wcs: Option<&storage::WispersConnectState>,
+) -> TransportReport {
     let transport = |connectivity_group_id, group: Option<&wcbe::GroupDetail>| {
         TransportStatus::WispersConnect {
             backend: backend.map(str::to_owned),
@@ -394,7 +396,7 @@ pub async fn roster(backend: Option<&str>, wcs: Option<&storage::WispersConnectS
         }
     };
     let Some(wcs) = wcs else {
-        return Roster {
+        return TransportReport {
             guests: Err(NOT_INITIALISED.to_owned()),
             invites: Err(NOT_INITIALISED.to_owned()),
             transport: Some(transport(None, None)),
@@ -406,7 +408,7 @@ pub async fn roster(backend: Option<&str>, wcs: Option<&storage::WispersConnectS
         client.list_registration_tokens(&wcs.connectivity_group_id)
     );
     let group = group.map_err(|e| format!("{:#}", e));
-    Roster {
+    TransportReport {
         transport: Some(transport(
             Some(wcs.connectivity_group_id.clone()),
             group.as_ref().ok(),

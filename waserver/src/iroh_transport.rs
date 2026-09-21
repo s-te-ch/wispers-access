@@ -3,7 +3,7 @@
 use crate::ipc;
 use crate::protocol::{self, Peer, StreamOutcome};
 use crate::serving::{BoxFuture, Closer, ExitReason, Server, ServingHandle, shutdown_signal};
-use crate::status::{GuestStatus, InviteStatus, Roster, TransportStatus, invite_status};
+use crate::status::{GuestStatus, InviteStatus, TransportReport, TransportStatus, invite_status};
 use crate::storage::{self, GuestNode};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -321,19 +321,18 @@ pub async fn revoke(circle: &str, dir: storage::CircleDir, number: i64) -> Resul
 
 //-- Status --------------------------------------------------------------------
 
-/// The circle's roster for `waserver status`, from the state database: no
-/// daemon and no network needed.
-pub fn roster(state: Option<&storage::StateDb>) -> Roster {
+/// Fills in the TransportReport, for status reporting.
+pub fn report(state: Option<&storage::StateDb>) -> TransportReport {
     let Some(state) = state else {
         let err = "circle has no state database (init incomplete?)";
-        return Roster {
+        return TransportReport {
             guests: Err(err.to_owned()),
             invites: Err(err.to_owned()),
             transport: Some(TransportStatus::Iroh { endpoint_id: None }),
         };
     };
     let now = Utc::now();
-    Roster {
+    TransportReport {
         guests: state
             .guests()
             .map(|guests| guests.iter().map(guest_status).collect())
