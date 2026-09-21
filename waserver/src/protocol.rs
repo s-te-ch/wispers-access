@@ -6,6 +6,7 @@
 use crate::config::CircleConfig;
 use crate::guest_api;
 use crate::http::{self, Target};
+use crate::storage;
 use anyhow::{Context, Result};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -23,44 +24,82 @@ use wispers_access_wire as wire;
 pub struct StreamContext {
     pub config: Arc<CircleConfig>,
     pub events: broadcast::Sender<u64>,
+    pub db: storage::StateDb,
 }
 
-/// Serves one stream a guest opened.
-pub async fn handle<S>(mut stream: S, ctx: StreamContext, user_id: Option<String>) -> Result<()>
+/// Who is on the other end of a stream, as far as serving it is concerned.
+#[derive(Clone)]
+pub struct Peer {
+    /// The transport's identifier for the peer, as authenticated by the
+    /// handshake: the iroh endpoint ID in hex, or the Wispers Connect node
+    /// number, which the library checks against the signed roster. What
+    /// `POST /v1/activation` binds to an invite.
+    pub peer_id: String,
+    /// The guest's identity, carried to the app in the identity header.
+    /// `None` means the peer is not a guest yet, only its key is known: the
+    /// control plane is all it gets, activation being what it is there for.
+    pub user_id: Option<String>,
+}
+
+/// What became of a stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StreamOutcome {
+    Served,
+    /// A peer without an identity opened a data-plane stream. The contract
+    /// gives an unbound key one thing, an activation attempt, and ends the
+    /// connection with `unknown` on anything else; only the caller holds
+    /// the connection, so it does the closing.
+    Refused,
+}
+
+/// Serves one stream a peer opened.
+pub async fn handle<S>(mut stream: S, ctx: StreamContext, peer: Peer) -> Result<StreamOutcome>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let mut first = [0u8; 1];
-    match stream.read_exact(&mut first).await {
-        Ok(_) => {}
-        // A stream opened and closed without a byte carries no request.
-        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
-        Err(e) => return Err(e).context("reading stream type"),
-    }
-    match FirstByte::from(first[0]) {
-        FirstByte::LegacyHttp => {
-            let target = match ctx.config.default_share() {
-                Some(share) => Target::Upstream(share.upstream.as_str().into()),
-                None => Target::NoShares,
-            };
-            // The byte was the start of the request; hand it back.
-            http::serve(Prefixed::new(first.to_vec(), stream), target, user_id).await
-        }
-        FirstByte::Typed(StreamType::Data) => {
-            let preamble: HttpPreamble = wire::read_message(&mut stream)
-                .await
-                .context("reading DATA preamble")?;
-            let target = share_target(&ctx.config, &preamble.share_id);
-            http::serve(stream, target, user_id).await
-        }
+    let Some((first, kind)) = read_stream_type(&mut stream).await? else {
+        return Ok(StreamOutcome::Served);
+    };
+    match kind {
         FirstByte::Typed(StreamType::Ctrl) => {
-            guest_api::serve(stream, ctx.config, ctx.events, user_id).await
+            guest_api::serve(stream, ctx, peer).await?;
+        }
+        FirstByte::LegacyHttp | FirstByte::Typed(StreamType::Data) => {
+            let Some(user_id) = peer.user_id else {
+                return Ok(StreamOutcome::Refused);
+            };
+            if kind == FirstByte::LegacyHttp {
+                let target = match ctx.config.default_share() {
+                    Some(share) => Target::Upstream(share.upstream.as_str().into()),
+                    None => Target::NoShares,
+                };
+                // The byte was the start of the request; hand it back.
+                http::serve(Prefixed::new(vec![first], stream), target, user_id).await?;
+            } else {
+                let preamble: HttpPreamble = wire::read_message(&mut stream)
+                    .await
+                    .context("reading DATA preamble")?;
+                let target = share_target(&ctx.config, &preamble.share_id);
+                http::serve(stream, target, user_id).await?;
+            }
         }
         FirstByte::Unknown(byte) => {
             warn!(byte, "unknown stream type; closing");
             stream.shutdown().await.ok();
-            Ok(())
         }
+    }
+    Ok(StreamOutcome::Served)
+}
+
+/// Reads the type byte that opens every stream, returning it raw and
+/// classified. `None` when the stream was opened and closed without a byte,
+/// which carries no request.
+async fn read_stream_type<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Option<(u8, FirstByte)>> {
+    let mut first = [0u8; 1];
+    match stream.read_exact(&mut first).await {
+        Ok(_) => Ok(Some((first[0], FirstByte::from(first[0])))),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+        Err(e) => Err(e).context("reading stream type"),
     }
 }
 
@@ -163,6 +202,7 @@ upstream = ":1"
         StreamContext {
             config: Arc::new(CircleConfig::parse(config).unwrap()),
             events: broadcast::channel(4).0,
+            db: storage::StateDb::open_in_memory().unwrap(),
         }
     }
 
@@ -200,8 +240,16 @@ upstream = ":1"
     /// Runs the dispatcher on one end of a pipe, writes `request` into the
     /// other, half-closes it and returns everything the dispatcher wrote back.
     async fn exchange(ctx: StreamContext, user_id: Option<&str>, request: Vec<u8>) -> Vec<u8> {
+        let peer = Peer {
+            peer_id: "peer-x".to_owned(),
+            user_id: user_id.map(str::to_owned),
+        };
+        exchange_as(ctx, peer, request).await
+    }
+
+    async fn exchange_as(ctx: StreamContext, peer: Peer, request: Vec<u8>) -> Vec<u8> {
         let (server, mut client) = tokio::io::duplex(64 * 1024);
-        let server_task = tokio::spawn(handle(server, ctx, user_id.map(str::to_owned)));
+        let server_task = tokio::spawn(handle(server, ctx, peer));
         client.write_all(&request).await.unwrap();
         client.shutdown().await.unwrap();
         let mut response = Vec::new();
@@ -256,21 +304,20 @@ upstream = ":1"
         let upstream = echo_upstream().await;
         let response = exchange(
             context_with_upstream(&upstream),
-            None,
+            Some("bob"),
             data_stream("jf", GET),
         )
         .await;
         let text = String::from_utf8_lossy(&response);
         assert!(text.starts_with("HTTP/1.1 200"), "{text}");
-        // No identity resolved: the upstream saw no header.
-        assert!(text.ends_with('-'), "{text}");
+        assert!(text.ends_with("bob"), "{text}");
     }
 
     #[tokio::test]
     async fn unknown_share_gets_a_typed_404_with_the_config_hash() {
         let ctx = context_with_upstream("127.0.0.1:1");
         let hash = ctx.config.config_hash();
-        let response = exchange(ctx, None, data_stream("gone", GET)).await;
+        let response = exchange(ctx, Some("bob"), data_stream("gone", GET)).await;
         let (head, _) = split_response(&response);
         assert!(head.starts_with("http/1.1 404"), "{head}");
         assert!(
@@ -285,7 +332,7 @@ upstream = ":1"
 
     #[tokio::test]
     async fn no_shares_gets_a_503() {
-        let response = exchange(context("name = \"x\"\n"), None, GET.to_vec()).await;
+        let response = exchange(context("name = \"x\"\n"), Some("bob"), GET.to_vec()).await;
         let (head, _) = split_response(&response);
         assert!(head.starts_with("http/1.1 503"), "{head}");
         assert!(
@@ -353,7 +400,11 @@ upstream = ":1"
         let ctx = context_with_upstream("127.0.0.1:1");
         let events = ctx.events.clone();
         let (server, mut client) = tokio::io::duplex(64 * 1024);
-        let server_task = tokio::spawn(handle(server, ctx, None));
+        let peer = Peer {
+            peer_id: "peer-x".to_owned(),
+            user_id: Some("bob".to_owned()),
+        };
+        let server_task = tokio::spawn(handle(server, ctx, peer));
         let request = format!("GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::EVENTS_PATH);
         client.write_all(&ctrl_stream(&request)).await.unwrap();
 
@@ -412,5 +463,115 @@ upstream = ":1"
         let mut out = String::new();
         p.read_to_string(&mut out).await.unwrap();
         assert_eq!(out, "hello world");
+    }
+
+    fn activation_request(secret: &wire::InviteSecret) -> Vec<u8> {
+        let body = serde_json::to_vec(&wire::Activation { secret: *secret }).unwrap();
+        let mut req = format!(
+            "\x01POST {} HTTP/1.1\r\nHost: waserver\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+            wire::ACTIVATION_PATH,
+            body.len()
+        )
+        .into_bytes();
+        req.extend(body);
+        req
+    }
+
+    #[tokio::test]
+    async fn activation_binds_the_handshake_peer_and_answers_with_the_circle() {
+        use crate::storage::NewInvite;
+        let ctx = context_with_upstream(":1");
+        let db = ctx.db.clone();
+        let secret = wire::InviteSecret([7; 16]);
+        let now = chrono::Utc::now().timestamp();
+        db.create_invite(
+            NewInvite {
+                secret: &secret,
+                user_id: "alice",
+                node_name: "phone",
+                expires_at: now + 3600,
+            },
+            now,
+        )
+        .unwrap();
+        let peer = Peer {
+            peer_id: "peer-a".to_owned(),
+            user_id: None,
+        };
+
+        // A wrong secret is refused with the contract's code, and nothing
+        // is bound.
+        let raw = exchange_as(
+            ctx.clone(),
+            peer.clone(),
+            activation_request(&wire::InviteSecret([9; 16])),
+        )
+        .await;
+        let (status, body) = split_response(&raw);
+        assert!(status.starts_with("http/1.1 403"), "{status}");
+        let err: wire::ApiError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(err.error, "invite-unknown");
+        assert!(db.guest_by_peer("peer-a").unwrap().is_none());
+
+        // The right one binds the peer the connection authenticated and
+        // returns the circle, so the join has nothing left to fetch.
+        let raw = exchange_as(ctx.clone(), peer.clone(), activation_request(&secret)).await;
+        let (status, body) = split_response(&raw);
+        assert!(status.starts_with("http/1.1 200"), "{status}");
+        assert!(status.contains("etag:"), "{status}");
+        let info: CircleInfo = serde_json::from_slice(&body).unwrap();
+        assert_eq!(info.name, "Family");
+        let guest = db.guest_by_peer("peer-a").unwrap().expect("bound");
+        assert_eq!(guest.user_id, "alice");
+
+        // Garbage is malformed, not a database error.
+        let raw = exchange_as(
+            ctx.clone(),
+            peer.clone(),
+            b"\x01POST /v1/activation HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\n{{{".to_vec(),
+        )
+        .await;
+        let (status, _) = split_response(&raw);
+        assert!(status.starts_with("http/1.1 400"), "{status}");
+
+        // Another key presenting the consumed secret is refused; the
+        // route itself exists for every peer.
+        let raw = exchange(ctx, None, activation_request(&secret)).await;
+        let (status, body) = split_response(&raw);
+        assert!(status.starts_with("http/1.1 409"), "{status}");
+        let err: wire::ApiError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(err.error, "invite-consumed");
+    }
+
+    #[tokio::test]
+    async fn unbound_peers_get_the_control_plane_only() {
+        let ctx = context_with_upstream(":1");
+        let peer = Peer {
+            peer_id: "peer-u".to_owned(),
+            user_id: None,
+        };
+
+        // A CTRL stream is served like any other.
+        let (server, mut client) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(handle(server, ctx.clone(), peer.clone()));
+        let request = format!("\x01GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
+        client.write_all(request.as_bytes()).await.unwrap();
+        client.shutdown().await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Served);
+        assert!(split_response(&response).0.starts_with("http/1.1 200"));
+
+        // A DATA stream is refused unread.
+        let (server, mut client) = tokio::io::duplex(1024);
+        let task = tokio::spawn(handle(server, ctx.clone(), peer.clone()));
+        wire::open_data_stream(&mut client, "jf").await.unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Refused);
+
+        // So is a legacy raw request.
+        let (server, mut client) = tokio::io::duplex(1024);
+        let task = tokio::spawn(handle(server, ctx, peer));
+        client.write_all(GET).await.unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Refused);
     }
 }

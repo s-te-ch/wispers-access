@@ -1,17 +1,87 @@
-//! Serving logic - handles hub connection and incoming P2P connections.
+//! Serving: the daemon's startup sequence and the per-circle state shared
+//! by the transports, the IPC server and the stream handlers. A transport
+//! (`wispers_connect_transport.rs`, `iroh_transport.rs`) contributes a
+//! `bind` that returns its node or endpoint and a `run` that drives its loop;
+//! `serve` calls them in order and owns everything in between.
 
 use crate::config::{CircleConfig, TransportConfig};
 use crate::ipc;
+use crate::iroh_transport;
 use crate::protocol;
 use crate::storage;
-use crate::wcbe;
-use anyhow::{Context, Result};
+use crate::wispers_connect_transport;
+use anyhow::Result;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::{RwLock, broadcast};
-use tracing::{error, info, warn};
-use wispers_connect as wc;
+use tracing::{info, warn};
+use wispers_access_wire as wire;
+
+pub async fn serve(circle: &str) -> Result<()> {
+    let dir = storage::CircleDir::new(circle)?;
+    let cfg = dir.load_config()?;
+    match cfg.default_share() {
+        Some(s) => info!(share = %s.id, upstream = %s.upstream, "default share"),
+        None => warn!("no shares configured; guests get 503 until `waserver reload`"),
+    }
+    let state = dir.open_state()?;
+    let server: Arc<dyn Server> = match cfg.transport.clone() {
+        TransportConfig::WispersConnect { backend } => {
+            Arc::new(wispers_connect_transport::bind(circle, state.clone(), backend).await?)
+        }
+        TransportConfig::Iroh {} => Arc::new(iroh_transport::bind(circle, state.clone()).await?),
+    };
+    let handle = ServingHandle::new(dir, cfg, state, server.clone());
+    let ipc_server = ipc::Server::bind(circle).await?;
+    let mut ipc_task = tokio::spawn(ipc_server.run(handle.clone()));
+    let reason = server.run(handle).await?;
+    if reason == ExitReason::Stopped {
+        // `waserver stop` ended the loop. Give some time to answer the request.
+        let _ = tokio::time::timeout(IPC_REPLY_GRACE, &mut ipc_task).await;
+    }
+    Ok(())
+}
+
+/// A circle's server, using the appropriate transport through dynamic dispatch.
+/// Created by that transport's `bind` function.
+pub trait Server: Send + Sync {
+    /// Serves until the transport stops or a signal arrives.
+    fn run(&self, handle: ServingHandle) -> BoxFuture<'_, Result<ExitReason>>;
+
+    /// Mints an invite for a new guest.
+    fn invite<'a>(
+        &'a self,
+        node_name: &'a str,
+        user_id: &'a str,
+    ) -> BoxFuture<'a, Result<wire::Invite>>;
+
+    /// Marks a guest revoked. Called by `ServingHandle::revoke_guest`, which
+    /// then closes the guest's live connections.
+    fn revoke_guest(&self, number: i64) -> Result<storage::GuestNode>;
+
+    /// Stops serving. Called by `ServingHandle::shutdown`, which already tells
+    /// every live connection to close beforehand.
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>>;
+}
+
+pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Why a Server's `run` loop returned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExitReason {
+    /// A shutdown signal. Nobody is waiting for a reply.
+    Signal,
+    /// Stopped from inside (`waserver stop`) or the session ended.
+    Stopped,
+}
+
+/// How long the exit waits for the IPC server to answer the `stop` that
+/// ended the loop.
+const IPC_REPLY_GRACE: Duration = Duration::from_secs(2);
 
 #[derive(Clone)]
 pub struct ServingHandle {
@@ -19,63 +89,67 @@ pub struct ServingHandle {
 }
 
 struct Inner {
-    wc_handle: RwLock<Option<wc::ServingHandle>>,
-    connected_since: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
-    /// Live P2P connections from guests, keyed by a per-connection id (one
-    /// guest may briefly hold several connections, e.g. across a reconnect).
-    peers: RwLock<HashMap<u64, PeerConnection>>,
-    next_peer_id: AtomicU64,
+    server: Arc<dyn Server>,
+    /// The circle's state database, which activation writes to.
+    db: storage::StateDb,
+
+    // Time or creation and time since being reachable, respectively.
     started_at: chrono::DateTime<chrono::Utc>,
-    own_node_number: Option<i32>,
-    wcbe_client: wcbe::Client,
-    connectivity_group_id: String,
+    reachable_since: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
+
+    /// Live connections from guests, keyed by a per-connection ID.
+    connections: RwLock<HashMap<u64, GuestConnection>>,
+    next_connection_id: AtomicU64,
+
+    /// Config location.
     dir: storage::CircleDir,
-    /// The config as last loaded. Swapped whole on `reload`. Streams take a
-    /// snapshot when they start, so a reload applies from the next stream on.
+    /// The config as last loaded. Swapped whole on `reload`.
     config: RwLock<Arc<CircleConfig>>,
-    /// Carries the new config hash on every reload that changed something,
-    /// to every guest holding an events stream open.
+    /// Notifies connected guests of config updates.
     events: broadcast::Sender<u64>,
 }
 
-/// What `reload` reports back.
+/// Outcome of `reload`-ing the config.
 pub struct ReloadOutcome {
     pub changed: bool,
     pub config: Arc<CircleConfig>,
 }
 
-struct PeerConnection {
-    node_number: i32,
-    user_id: Option<String>,
+struct GuestConnection {
+    number: i32,
+    user_id: String,
     connected_since: chrono::DateTime<chrono::Utc>,
+    /// Closes the connection with a contract code, on transports that can.
+    closer: Option<Closer>,
 }
 
-/// One guest's live connection state, aggregated over its QUIC connections.
-pub struct PeerSnapshot {
-    pub node_number: i32,
-    pub user_id: Option<String>,
+/// Callback type for closing a live connection.
+pub type Closer = Box<dyn Fn(wire::CloseCode) + Send + Sync>;
+
+/// One guest's live connection state, for status reporting. Multiple QUIC
+/// connections from the same guest are aggregated into one entry.
+pub struct ConnectedGuest {
+    /// The node number (Wispers Connect) or guest number (iroh).
+    pub number: i32,
+    pub user_id: String,
     pub connected_since: chrono::DateTime<chrono::Utc>,
 }
 
 impl ServingHandle {
-    pub fn new(
+    pub(crate) fn new(
         dir: storage::CircleDir,
         config: CircleConfig,
-        api_key: &str,
-        cg_id: &str,
-        api_base: &str,
-        own_node_number: Option<i32>,
+        db: storage::StateDb,
+        server: Arc<dyn Server>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                wc_handle: RwLock::new(None),
-                connected_since: RwLock::new(None),
-                peers: RwLock::new(HashMap::new()),
-                next_peer_id: AtomicU64::new(0),
+                server,
+                db,
+                reachable_since: RwLock::new(None),
+                connections: RwLock::new(HashMap::new()),
+                next_connection_id: AtomicU64::new(0),
                 started_at: chrono::Utc::now(),
-                own_node_number,
-                wcbe_client: wcbe::Client::new(api_key, api_base),
-                connectivity_group_id: cg_id.to_owned(),
                 dir,
                 config: RwLock::new(Arc::new(config)),
                 events: broadcast::channel(16).0,
@@ -93,6 +167,7 @@ impl ServingHandle {
         protocol::StreamContext {
             config: self.config().await,
             events: self.inner.events.clone(),
+            db: self.inner.db.clone(),
         }
     }
 
@@ -122,278 +197,116 @@ impl ServingHandle {
         })
     }
 
-    pub async fn connected_to_hub(&self) -> bool {
-        self.inner.wc_handle.read().await.is_some()
+    /// Whether guests can reach this server.
+    pub async fn reachable(&self) -> bool {
+        self.inner.reachable_since.read().await.is_some()
+    }
+
+    pub async fn reachable_since(&self) -> Option<chrono::DateTime<chrono::Utc>> {
+        *self.inner.reachable_since.read().await
+    }
+
+    pub async fn set_reachable(&self) {
+        *self.inner.reachable_since.write().await = Some(chrono::Utc::now());
     }
 
     pub fn started_at(&self) -> chrono::DateTime<chrono::Utc> {
         self.inner.started_at
     }
 
-    pub async fn connected_since(&self) -> Option<chrono::DateTime<chrono::Utc>> {
-        *self.inner.connected_since.read().await
-    }
-
-    pub fn own_node_number(&self) -> Option<i32> {
-        self.inner.own_node_number
-    }
-
     /// The guests with a live P2P connection right now, one entry per node
     /// (earliest `connected_since` when a guest holds several connections).
-    pub async fn connected_peers(&self) -> Vec<PeerSnapshot> {
-        let peers = self.inner.peers.read().await;
-        let mut by_node: HashMap<i32, PeerSnapshot> = HashMap::new();
-        for p in peers.values() {
-            by_node
-                .entry(p.node_number)
+    pub async fn connected_guests(&self) -> Vec<ConnectedGuest> {
+        let connections = self.inner.connections.read().await;
+        let mut by_number: HashMap<i32, ConnectedGuest> = HashMap::new();
+        for p in connections.values() {
+            by_number
+                .entry(p.number)
                 .and_modify(|s| {
                     s.connected_since = s.connected_since.min(p.connected_since);
-                    if s.user_id.is_none() {
-                        s.user_id = p.user_id.clone();
-                    }
                 })
-                .or_insert(PeerSnapshot {
-                    node_number: p.node_number,
+                .or_insert(ConnectedGuest {
+                    number: p.number,
                     user_id: p.user_id.clone(),
                     connected_since: p.connected_since,
                 });
         }
-        let mut snapshots: Vec<PeerSnapshot> = by_node.into_values().collect();
-        snapshots.sort_by_key(|s| s.node_number);
-        snapshots
+        let mut guests: Vec<ConnectedGuest> = by_number.into_values().collect();
+        guests.sort_by_key(|g| g.number);
+        guests
     }
 
-    async fn register_peer(&self, node_number: i32, user_id: Option<String>) -> u64 {
-        let id = self.inner.next_peer_id.fetch_add(1, Ordering::Relaxed);
-        self.inner.peers.write().await.insert(
+    /// Tracks a live connection for `status` and, with a closer, for
+    /// `revoke` and shutdown.
+    pub async fn register_connection(
+        &self,
+        number: i32,
+        user_id: String,
+        closer: Option<Closer>,
+    ) -> u64 {
+        let id = self
+            .inner
+            .next_connection_id
+            .fetch_add(1, Ordering::Relaxed);
+        self.inner.connections.write().await.insert(
             id,
-            PeerConnection {
-                node_number,
+            GuestConnection {
+                number,
                 user_id,
                 connected_since: chrono::Utc::now(),
+                closer,
             },
         );
         id
     }
 
-    async fn unregister_peer(&self, id: u64) {
-        self.inner.peers.write().await.remove(&id);
+    pub async fn unregister_connection(&self, id: u64) {
+        self.inner.connections.write().await.remove(&id);
     }
 
-    pub async fn get_registration_token(&self, node_name: &str, user_id: &str) -> Result<String> {
-        let metadata = wcbe::NodeMetadata {
-            user_id: user_id.to_owned(),
-        };
-        self.inner
-            .wcbe_client
-            .get_registration_token(
-                &self.inner.connectivity_group_id,
-                Some(node_name),
-                Some(&metadata),
-            )
-            .await
+    /// Mints an invite for a new guest.
+    pub async fn invite(&self, node_name: &str, user_id: &str) -> Result<wire::Invite> {
+        self.inner.server.invite(node_name, user_id).await
     }
 
-    pub async fn get_activation_code(&self) -> Result<String> {
-        let Some(handle) = self.wc_handle().await else {
-            anyhow::bail!("Not connected to hub");
-        };
-        // Invites are delivered out-of-band (chat, email, QR), so use the
-        // long-lived profile; the interactive one expires in two minutes.
-        let code = handle
-            .generate_activation_code_with_ttl(wc::TtlProfile::Asynchronous)
-            .await?;
-        Ok(code.format())
+    /// Marks the guest revoked and closes its live connections with the
+    /// `revoked` code, so it learns at once.
+    pub async fn revoke_guest(&self, number: i64) -> Result<storage::GuestNode> {
+        let guest = self.inner.server.revoke_guest(number)?;
+        self.close_connections(|c| i64::from(c.number) == number, wire::CloseCode::Revoked)
+            .await;
+        Ok(guest)
     }
 
+    /// Stops serving. When this is called, live connections have already been
+    /// told to close first, so no need to close them in an orderly fashion.
     pub async fn shutdown(&self) -> Result<()> {
-        match self.wc_handle().await {
-            Some(handle) => handle.shutdown().await.context("shutdown failed"),
-            None => Ok(()),
-        }
+        self.close_connections(|_| true, wire::CloseCode::Closing)
+            .await;
+        self.inner.server.shutdown().await
     }
 
-    async fn set_wc_handle(&self, handle: wc::ServingHandle) {
-        *self.inner.wc_handle.write().await = Some(handle);
-        *self.inner.connected_since.write().await = Some(chrono::Utc::now());
-    }
-
-    async fn wc_handle(&self) -> Option<wc::ServingHandle> {
-        self.inner.wc_handle.read().await.clone()
-    }
-}
-
-pub async fn serve(circle: &str) -> Result<()> {
-    let dir = storage::CircleDir::new(circle)?;
-    let cfg = dir.load_config()?;
-    let TransportConfig::WispersConnect { backend } = &cfg.transport;
-    let backend = backend.clone();
-    match cfg.default_share() {
-        Some(s) => info!(share = %s.id, upstream = %s.upstream, "default share"),
-        None => warn!("no shares configured; guests get 503 until `waserver reload`"),
-    }
-    let state = dir.open_state()?;
-    let Some(wcs) = state.wispers_connect_state()? else {
-        anyhow::bail!("Circle {} has no Wispers Connect credentials", circle);
-    };
-    let node_storage = wc::NodeStorage::new(state);
-    if let Some(backend) = backend.as_deref() {
-        node_storage.override_hub_addr(backend);
-    }
-    let node = Arc::new(node_storage.restore_or_init_node().await?);
-    if !node.is_registered() {
-        anyhow::bail!("Wispers Connect node is not registered");
-    }
-
-    // Start serving IPC requests to handle local requests.
-    let cg_id = match node.connectivity_group_id() {
-        Some(id) => id.to_string(),
-        None => {
-            anyhow::bail!("server node not registered");
-        }
-    };
-    let api_base = wcbe::api_base(backend.as_deref());
-    let serving_handle = ServingHandle::new(
-        dir,
-        cfg,
-        &wcs.api_key,
-        &cg_id,
-        &api_base,
-        node.node_number(),
-    );
-    let ipc_server = ipc::Server::bind(circle).await?;
-    tokio::spawn(ipc_server.run(serving_handle.clone()));
-
-    // Connect to the hub.
-    let (wc_handle, session, mut incoming) = node
-        .start_serving()
-        .await
-        .context("starting Wispers node serving loop")?;
-    serving_handle.set_wc_handle(wc_handle).await;
-    info!("Connected to hub");
-
-    // Run the Wispers serving session.
-    let mut session_task = tokio::spawn(async move { session.run().await });
-
-    // Resolves on SIGTERM/SIGINT so we tear the hub session down cleanly
-    // instead of being killed mid-flight (e.g. by a container supervisor).
-    let shutdown = shutdown_signal();
-    tokio::pin!(shutdown);
-
-    // Main serving loop. Accept connections from the peer nodes or from IPC.
-    loop {
-        tokio::select! {
-            // Incoming QUIC connection.
-            Some(result) = incoming.quic.recv() => {
-                tokio::spawn(handle_quic_conn(
-                    result,
-                    node.clone(),
-                    serving_handle.clone(),
-                ));
-            },
-            // Session end.
-            result = &mut session_task => break handle_session_end(result),
-            // Shutdown signal: stop the session the same way `waserver stop`
-            // does, drain it, then exit cleanly. This stop was intended, so we
-            // report success (exit 0) regardless of how the session terminates.
-            _ = &mut shutdown => {
-                info!("shutdown signal received; shutting down gracefully");
-                if let Err(e) = serving_handle.shutdown().await {
-                    warn!(error = format!("{:#}", e), "error during graceful shutdown");
-                }
-                let _ = (&mut session_task).await;
-                break Ok(());
+    async fn close_connections(
+        &self,
+        which: impl Fn(&GuestConnection) -> bool,
+        code: wire::CloseCode,
+    ) {
+        for c in self.inner.connections.read().await.values() {
+            if which(c)
+                && let Some(close) = &c.closer
+            {
+                close(code);
             }
         }
     }
 }
 
-async fn handle_quic_conn(
-    r: Result<wc::QuicConnection, wc::P2pError>,
-    node: Arc<wc::Node>,
-    serving_handle: ServingHandle,
-) {
-    let conn = match r {
-        Ok(c) => c,
-        Err(e) => {
-            error!("Failed to accept QUIC connection: {}", e);
-            return;
-        }
-    };
-    let peer = conn.peer_node_number;
-    info!(peer, "QUIC connection accepted");
-
-    // Resolve the peer's identity once per connection.
-    let user_id = resolve_identity(&node, peer).await;
-    match &user_id {
-        Some(uid) => info!(peer, user_id = %uid, "resolved peer identity"),
-        None => warn!(
-            peer,
-            "no identity resolved; forwarding without identity header"
-        ),
-    }
-
-    // Track the connection for `waserver status` while it lives.
-    let registration = serving_handle.register_peer(peer, user_id.clone()).await;
-
-    loop {
-        match conn.accept_stream().await {
-            Ok(stream) => {
-                let user_id = user_id.clone();
-                // Each stream is served against the config as of now; a
-                // reload applies from the next stream on.
-                let ctx = serving_handle.stream_context().await;
-                tokio::spawn(async move {
-                    if let Err(e) = protocol::handle(stream, ctx, user_id).await {
-                        error!(error = format!("{:#}", e), "QUIC stream handler error");
-                    }
-                });
-            }
-            Err(e) => {
-                warn!(peer, error = %e, "QUIC connection closed");
-                break;
-            }
-        }
-    }
-
-    serving_handle.unregister_peer(registration).await;
-}
-
-/// Best-effort lookup of the peer's `user_id` from its node metadata, via the hub.
-async fn resolve_identity(node: &wc::Node, peer: i32) -> Option<String> {
-    let group = match node.group_info().await {
-        Ok(g) => g,
-        Err(e) => {
-            warn!(peer, error = %e, "could not fetch group info for identity");
-            return None;
-        }
-    };
-    let info = group.nodes.iter().find(|n| n.node_number == peer)?;
-    let metadata: wcbe::NodeMetadata = serde_json::from_str(&info.metadata).ok()?;
-    Some(metadata.user_id).filter(|s| !s.is_empty())
-}
-
-fn handle_session_end(
-    result: Result<Result<(), wc::ServingError>, tokio::task::JoinError>,
-) -> Result<()> {
-    match result {
-        Ok(Ok(())) => {
-            info!("Session ended normally");
-        }
-        Ok(Err(e)) => {
-            return Err(anyhow::anyhow!("Session error: {}", e));
-        }
-        Err(e) => {
-            return Err(anyhow::anyhow!("Session task panicked: {}", e));
-        }
-    }
-    Ok(())
-}
+//-- Shared plumbing -----------------------------------------------------------
 
 /// Resolves when the process receives a shutdown signal (`SIGTERM` or `SIGINT`)
 /// If the handlers can't be installed, this never resolves, so the server
 /// keeps running rather than shutting down spuriously.
-async fn shutdown_signal() {
+pub(crate) async fn shutdown_signal() {
     #[cfg(unix)]
     {
         use tokio::signal::unix::{SignalKind, signal};

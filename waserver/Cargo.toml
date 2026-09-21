@@ -31,12 +31,11 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wispers-access-wire = { path = "../wire" }
 wispers-connect = "0.14.0"
 qrcode = "0.14"
+rand = "0.10"
 image = { version = "0.25", default-features = false, features = ["png"] }
+iroh = "1.2"
 
 [target.'cfg(unix)'.dependencies]
 daemonize = "0.5"
 libc = "0.2"
 
-[target.'cfg(windows)'.dependencies]
-# IPC password for the loopback TCP socket that stands in for the Unix socket.
-rand = "0.10"

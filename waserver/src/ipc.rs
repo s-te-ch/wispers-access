@@ -152,7 +152,14 @@ impl Server {
 #[serde(tag = "cmd", rename_all = "snake_case")]
 pub enum Request {
     Status,
-    GetInvite { node_name: String, user_id: String },
+    GetInvite {
+        node_name: String,
+        user_id: String,
+    },
+    /// iroh only: mark a guest revoked and close its live connections.
+    RevokeGuest {
+        number: i64,
+    },
     Reload,
     Shutdown,
 }
@@ -177,7 +184,9 @@ pub enum ResponseData {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct StatusData {
-    pub connected_to_hub: bool,
+    /// Reachable by guests: connected to the hub (Wispers Connect), or
+    /// online with a home relay (iroh).
+    pub reachable: bool,
     /// The shares as currently served, in config order.
     pub shares: Vec<ShareData>,
     /// Hash of the served share list. Differs from the file's when a
@@ -190,16 +199,14 @@ pub struct StatusData {
     pub started_at: Option<String>, // RFC 3339
     #[serde(default)]
     pub connected_since: Option<String>, // RFC 3339
-    /// This server's own node number in the connectivity group.
-    #[serde(default)]
-    pub node_number: Option<i32>,
     /// Guests with a live P2P connection to this server right now.
     #[serde(default)]
-    pub connected_peers: Option<Vec<PeerData>>,
+    pub connected_guests: Option<Vec<GuestData>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct PeerData {
+pub struct GuestData {
+    /// The node number (Wispers Connect) or guest number (iroh).
     pub node_number: i32,
     #[serde(default)]
     pub user_id: Option<String>,
@@ -218,8 +225,8 @@ pub struct ShareData {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct InviteData {
-    pub registration_token: String,
-    pub activation_code: String,
+    /// The invite code, ready to show.
+    pub code: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -252,6 +259,10 @@ async fn handle_request(
         Ok(Request::GetInvite { node_name, user_id }) => {
             handle_invite(&handle, &node_name, &user_id).await
         }
+        Ok(Request::RevokeGuest { number }) => match handle.revoke_guest(number).await {
+            Ok(_) => Response::success(ResponseData::Empty),
+            Err(e) => Response::error(format!("{:#}", e)),
+        },
         Ok(Request::Reload) => handle_reload(&handle).await,
         Ok(Request::Shutdown) => {
             shutdown = true;
@@ -275,26 +286,25 @@ async fn parse_request(mut reader: BufReader<ReadHalf>) -> std::result::Result<R
 }
 
 async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
-    let peers = handle
-        .connected_peers()
+    let connected = handle
+        .connected_guests()
         .await
         .into_iter()
-        .map(|p| PeerData {
-            node_number: p.node_number,
-            user_id: p.user_id,
+        .map(|p| GuestData {
+            node_number: p.number,
+            user_id: Some(p.user_id),
             connected_since: Some(fmt_rfc3339(p.connected_since)),
         })
         .collect();
     let config = handle.config().await;
     Response::success(ResponseData::Status(StatusData {
-        connected_to_hub: handle.connected_to_hub().await,
+        reachable: handle.reachable().await,
         shares: share_data(&config),
         config_hash: config.config_hash(),
         pid: Some(std::process::id()),
         started_at: Some(fmt_rfc3339(handle.started_at())),
-        connected_since: handle.connected_since().await.map(fmt_rfc3339),
-        node_number: handle.own_node_number(),
-        connected_peers: Some(peers),
+        connected_since: handle.reachable_since().await.map(fmt_rfc3339),
+        connected_guests: Some(connected),
     }))
 }
 
@@ -320,28 +330,19 @@ async fn handle_invite(
     node_name: &str,
     user_id: &str,
 ) -> Response {
-    let token = match handle.get_registration_token(node_name, user_id).await {
-        Ok(t) => t,
-        Err(e) => return Response::error(invite_error_message(&e)),
-    };
-    let code = match handle.get_activation_code().await {
-        Ok(c) => c,
-        Err(e) => {
-            let e = format!("error generating activation code: {}", e);
-            return Response::error(e);
-        }
-    };
-    Response::success(ResponseData::Invite(InviteData {
-        registration_token: token,
-        activation_code: code,
-    }))
+    match handle.invite(node_name, user_id).await {
+        Ok(invite) => Response::success(ResponseData::Invite(InviteData {
+            code: invite.to_code(),
+        })),
+        Err(e) => Response::error(invite_error_message(&e)),
+    }
 }
 
 /// Explain a quota rejection after an `invite` if it happens.
 fn invite_error_message(e: &anyhow::Error) -> String {
     match e.downcast_ref::<crate::wcbe::QuotaExceeded>() {
         Some(q) if q.quota == "nodes_per_group" => format!(
-            "the circle is full: {} of {} node quota used (members and pending \
+            "the circle is full: {} of {} node quota used (this server, guests and pending \
              invites). Revoke nodes with `waserver revoke` or wait for a pending
              invite to expire. `waserver status <circle>` shows the available quota.",
             q.current, q.limit

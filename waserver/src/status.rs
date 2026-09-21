@@ -6,8 +6,10 @@
 
 use crate::config::{CircleConfig, ShareKind, TransportConfig};
 use crate::ipc;
+use crate::iroh_transport;
 use crate::storage;
 use crate::wcbe;
+use crate::wispers_connect_transport;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -78,32 +80,51 @@ struct GroupsQuota {
 #[serde(rename_all = "camelCase")]
 struct CircleStatus {
     name: String,
-    /// From `circle.toml`; `null` when the file failed to load (see
-    /// `configError`).
+    /// Display name from `circle.toml`, `null` when the file failed to load
+    /// (see `configError`).
     display_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     config_error: Option<String>,
-    transport: Option<&'static str>,
-    /// Custom backend URL, `null` for the managed backend.
-    backend: Option<String>,
-    connectivity_group_id: Option<String>,
-    group_created_at: Option<String>, // RFC 3339
+    /// The transport and what is specific to it; `null` when the config
+    /// failed to load.
+    transport: Option<TransportStatus>,
     server: ServerStatus,
     /// The shares: the running server's list while it runs, else the file's.
     shares: Vec<ShareStatus>,
-    /// `null` when the group query failed (see `membersError`).
-    members: Option<Vec<Member>>,
+    /// The guests; the server itself is not listed. `null` when the query
+    /// failed (see `guestsError`).
+    guests: Option<Vec<GuestStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    members_error: Option<String>,
+    guests_error: Option<String>,
     /// `null` when the query failed (see `invitesError`).
-    invites: Option<Vec<Invite>>,
+    invites: Option<Vec<InviteStatus>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     invites_error: Option<String>,
-    /// Node-quota usage of the group: `current` (members + pending invites)
-    /// vs `limit` (`null` = unlimited). Omitted when the backend doesn't
-    /// report it.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    node_quota: Option<wcbe::NodeQuota>,
+}
+
+/// What only one transport has, tagged by `kind` as in `circle.toml`.
+#[derive(Serialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "kebab-case",
+    rename_all_fields = "camelCase"
+)]
+pub(crate) enum TransportStatus {
+    WispersConnect {
+        /// Custom backend URL, `null` for the managed backend.
+        backend: Option<String>,
+        connectivity_group_id: Option<String>,
+        group_created_at: Option<String>, // RFC 3339
+        /// Node-quota usage of the group: `current` (this server, guests
+        /// and pending invites) vs `limit` (`null` = unlimited). Omitted
+        /// when the backend doesn't report it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        node_quota: Option<wcbe::NodeQuota>,
+    },
+    Iroh {
+        /// The server's endpoint ID.
+        endpoint_id: Option<String>,
+    },
 }
 
 #[derive(Serialize)]
@@ -113,14 +134,13 @@ struct ServerStatus {
     state: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    hub_connected: Option<bool>,
+    /// Reachable by guests.
+    reachable: Option<bool>,
     pid: Option<u32>,
     started_at: Option<String>,      // RFC 3339
     connected_since: Option<String>, // RFC 3339
-    /// This server's own node number in the Members list.
-    node_number: Option<i32>,
-    /// `circle.toml` on disk differs from what the server serves; run
-    /// `waserver reload`. `null` when the server is down or the file is broken.
+    /// `circle.toml` on disk differs from what the server serves. `null` when
+    /// the server is down or the file is broken.
     reload_pending: Option<bool>,
 }
 
@@ -139,27 +159,28 @@ struct ShareStatus {
 /// join was rolled back — issue a new invite.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Invite {
-    node_name: Option<String>,
-    user_id: Option<String>,
-    created_at: String,      // RFC 3339
-    expires_at: String,      // RFC 3339
-    used_at: Option<String>, // RFC 3339
+pub(crate) struct InviteStatus {
+    pub(crate) node_name: Option<String>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) created_at: String,      // RFC 3339
+    pub(crate) expires_at: String,      // RFC 3339
+    pub(crate) used_at: Option<String>, // RFC 3339
     /// `pending` | `used` | `expired`
-    status: &'static str,
+    pub(crate) status: &'static str,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct Member {
-    node_number: i32,
-    name: Option<String>,
-    user_id: Option<String>,
-    created_at: String,           // RFC 3339
-    last_seen_at: Option<String>, // RFC 3339
+pub(crate) struct GuestStatus {
+    /// The node number (Wispers Connect) or guest number (iroh).
+    pub(crate) node_number: i32,
+    pub(crate) name: Option<String>,
+    pub(crate) user_id: Option<String>,
+    pub(crate) created_at: String,           // RFC 3339
+    pub(crate) last_seen_at: Option<String>, // RFC 3339
     /// Does the guest have a live P2P connection to this server right now?
-    connected_to_server: Option<bool>,
-    connected_since: Option<String>, // RFC 3339
+    pub(crate) connected_to_server: Option<bool>,
+    pub(crate) connected_since: Option<String>, // RFC 3339
 }
 
 //-- Gathering -----------------------------------------------------------------
@@ -218,11 +239,14 @@ async fn gather_groups_quota(
         let Ok(Loaded {
             config,
             wcs: Some(wcs),
+            ..
         }) = l
         else {
             continue;
         };
-        let TransportConfig::WispersConnect { backend } = &config.transport;
+        let TransportConfig::WispersConnect { backend } = &config.transport else {
+            continue;
+        };
         let api_base = wcbe::api_base(backend.as_deref());
         match targets
             .iter_mut()
@@ -260,27 +284,25 @@ async fn gather_circle(name: &str, loaded: Result<Loaded, String>) -> CircleStat
     };
     let config = loaded.as_ref().map(|l| &l.config);
     let wcs = loaded.as_ref().and_then(|l| l.wcs.as_ref());
-    let (server, group, invites) = tokio::join!(
+    let (server, roster) = tokio::join!(
         query_server(name, config),
-        query_connectivity_group(config, wcs),
-        query_invites(config, wcs)
+        query_roster(config, wcs, loaded.as_ref().and_then(|l| l.state.as_ref()))
     );
-    let (server, live_peers, served_shares) = server;
-    let (group, members_error) = match group {
+    let (server, live_guests, served_shares) = server;
+    let (mut guests, guests_error) = match roster.guests {
         Ok(g) => (Some(g), None),
         Err(e) => (None, Some(e)),
     };
-    let (invites, invites_error) = match invites {
-        Ok(tokens) => (Some(tokens.iter().map(to_invite).collect()), None),
+    let (invites, invites_error) = match roster.invites {
+        Ok(i) => (Some(i), None),
         Err(e) => (None, Some(e)),
     };
-    let mut members = group.as_ref().map(to_members);
-    match (members.as_mut(), live_peers.as_ref()) {
-        (Some(members), Some(peers)) => apply_live_connections(members, peers, server.node_number),
+    match (guests.as_mut(), live_guests.as_ref()) {
+        (Some(guests), Some(connected)) => apply_live_connections(guests, connected),
         // A stopped server has no connections.
-        (Some(members), None) if server.state == "offline" => {
-            for m in members.iter_mut() {
-                m.connected_to_server = Some(false);
+        (Some(guests), None) if server.state == "offline" => {
+            for g in guests.iter_mut() {
+                g.connected_to_server = Some(false);
             }
         }
         _ => {}
@@ -305,20 +327,42 @@ async fn gather_circle(name: &str, loaded: Result<Loaded, String>) -> CircleStat
         name: name.to_owned(),
         display_name: config.map(|c| c.name.clone()),
         config_error,
-        transport: config.map(|c| c.transport.kind().as_str()),
-        backend: config.and_then(|c| {
-            let TransportConfig::WispersConnect { backend } = &c.transport;
-            backend.clone()
-        }),
-        connectivity_group_id: wcs.map(|h| h.connectivity_group_id.clone()),
-        group_created_at: group.as_ref().map(|g| g.created_at.clone()),
+        transport: roster.transport,
         server,
         shares,
-        members,
-        members_error,
+        guests,
+        guests_error,
         invites,
         invites_error,
-        node_quota: group.as_ref().and_then(|g| g.node_quota),
+    }
+}
+
+/// Members and invitees of the circle, and the transport's own facts;
+/// each transport module fills one from its own sources.
+pub(crate) struct Roster {
+    pub(crate) guests: Result<Vec<GuestStatus>, String>,
+    pub(crate) invites: Result<Vec<InviteStatus>, String>,
+    pub(crate) transport: Option<TransportStatus>,
+}
+
+async fn query_roster(
+    config: Option<&CircleConfig>,
+    wcs: Option<&storage::WispersConnectState>,
+    state: Option<&storage::StateDb>,
+) -> Roster {
+    match config.map(|c| &c.transport) {
+        Some(TransportConfig::WispersConnect { backend }) => {
+            wispers_connect_transport::roster(backend.as_deref(), wcs).await
+        }
+        Some(TransportConfig::Iroh {}) => iroh_transport::roster(state),
+        None => {
+            let err = "circle config failed to load";
+            Roster {
+                guests: Err(err.to_owned()),
+                invites: Err(err.to_owned()),
+                transport: None,
+            }
+        }
     }
 }
 
@@ -326,6 +370,7 @@ async fn gather_circle(name: &str, loaded: Result<Loaded, String>) -> CircleStat
 struct Loaded {
     config: CircleConfig,
     wcs: Option<storage::WispersConnectState>,
+    state: Option<storage::StateDb>,
 }
 
 /// A config that fails to load is an error; a missing `state.db` (an `init`
@@ -333,43 +378,40 @@ struct Loaded {
 fn load_circle(name: &str) -> Result<Loaded> {
     let dir = storage::CircleDir::new(name)?;
     let config = dir.load_config()?;
-    let wcs = match dir.open_state() {
-        Ok(state) => state.wispers_connect_state()?,
+    let state = match dir.open_state() {
+        Ok(state) => Some(state),
         Err(storage::Error::NotInitialised(_)) => None,
         Err(e) => return Err(e.into()),
     };
-    Ok(Loaded { config, wcs })
+    let wcs = match &state {
+        Some(state) => state.wispers_connect_state()?,
+        None => None,
+    };
+    Ok(Loaded { config, wcs, state })
 }
 
-/// Overlay the server's live view onto the backend's member list: while the
-/// daemon runs it knows authoritatively which guests are connected to it.
-fn apply_live_connections(
-    members: &mut [Member],
-    peers: &[ipc::PeerData],
-    own_node_number: Option<i32>,
-) {
-    for m in members.iter_mut() {
-        if own_node_number == Some(m.node_number) {
-            continue; // the server itself; "connected to server" is meaningless
-        }
-        match peers.iter().find(|p| p.node_number == m.node_number) {
-            Some(p) => {
-                m.connected_to_server = Some(true);
-                m.connected_since = p.connected_since.clone();
+/// Overlay the server's live view onto the guest list: while the daemon
+/// runs it knows authoritatively which guests are connected to it.
+fn apply_live_connections(guests: &mut [GuestStatus], connected: &[ipc::GuestData]) {
+    for g in guests.iter_mut() {
+        match connected.iter().find(|c| c.node_number == g.node_number) {
+            Some(c) => {
+                g.connected_to_server = Some(true);
+                g.connected_since = c.connected_since.clone();
             }
-            None => m.connected_to_server = Some(false),
+            None => g.connected_to_server = Some(false),
         }
     }
 }
 
-/// Queries the daemon. The second element is its live-peer list, the third
+/// Queries the daemon. The second element is its connected-guest list, the third
 /// the share list it serves (both `None` when the daemon is down).
 async fn query_server(
     circle: &str,
     config: Option<&CircleConfig>,
 ) -> (
     ServerStatus,
-    Option<Vec<ipc::PeerData>>,
+    Option<Vec<ipc::GuestData>>,
     Option<Vec<ipc::ShareData>>,
 ) {
     let Ok(mut client) = ipc::Client::connect(circle).await else {
@@ -381,20 +423,15 @@ async fn query_server(
             ..
         }) => {
             let status = ServerStatus {
-                state: if s.connected_to_hub {
-                    "serving"
-                } else {
-                    "connecting"
-                },
+                state: if s.reachable { "serving" } else { "connecting" },
                 error: None,
-                hub_connected: Some(s.connected_to_hub),
+                reachable: Some(s.reachable),
                 pid: s.pid,
                 started_at: s.started_at,
                 connected_since: s.connected_since,
-                node_number: s.node_number,
                 reload_pending: config.map(|c| c.config_hash() != s.config_hash),
             };
-            (status, s.connected_peers, Some(s.shares))
+            (status, s.connected_guests, Some(s.shares))
         }
         Ok(ipc::Response::Success { .. }) => (
             ServerStatus::error("unexpected response from server"),
@@ -412,11 +449,10 @@ impl ServerStatus {
         Self {
             state: "offline",
             error: None,
-            hub_connected: None,
+            reachable: None,
             pid: None,
             started_at: None,
             connected_since: None,
-            node_number: None,
             reload_pending: None,
         }
     }
@@ -465,52 +501,11 @@ async fn probe_upstream(upstream: &str) -> bool {
     .unwrap_or(false)
 }
 
-async fn query_connectivity_group(
-    config: Option<&CircleConfig>,
-    wcs: Option<&storage::WispersConnectState>,
-) -> Result<wcbe::GroupDetail, String> {
-    let (Some(cfg), Some(wcs)) = (config, wcs) else {
-        return Err(NOT_INITIALISED.to_owned());
-    };
-    let TransportConfig::WispersConnect { backend } = &cfg.transport;
-    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref()));
-    client
-        .get_connectivity_group(&wcs.connectivity_group_id)
-        .await
-        .map_err(|e| format!("{:#}", e))
-}
-
-async fn query_invites(
-    config: Option<&CircleConfig>,
-    wcs: Option<&storage::WispersConnectState>,
-) -> Result<Vec<wcbe::RegistrationToken>, String> {
-    let (Some(cfg), Some(wcs)) = (config, wcs) else {
-        return Err(NOT_INITIALISED.to_owned());
-    };
-    let TransportConfig::WispersConnect { backend } = &cfg.transport;
-    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref()));
-    client
-        .list_registration_tokens(&wcs.connectivity_group_id)
-        .await
-        .map_err(|e| format!("{:#}", e))
-}
-
-/// The circle has a config but no usable state: an `init` that did not
-/// complete, or a broken config file (reported separately as `configError`).
-const NOT_INITIALISED: &str = "circle has no Wispers Connect credentials (init incomplete?)";
-
-fn to_invite(token: &wcbe::RegistrationToken) -> Invite {
-    Invite {
-        node_name: token.node_name.clone(),
-        user_id: token.node_metadata.as_deref().and_then(parse_user_id),
-        created_at: token.created_at.clone(),
-        expires_at: token.expires_at.clone(),
-        used_at: token.used_at.clone(),
-        status: invite_status(token.used_at.as_deref(), &token.expires_at, Utc::now()),
-    }
-}
-
-fn invite_status(used_at: Option<&str>, expires_at: &str, now: DateTime<Utc>) -> &'static str {
+pub(crate) fn invite_status(
+    used_at: Option<&str>,
+    expires_at: &str,
+    now: DateTime<Utc>,
+) -> &'static str {
     if used_at.is_some() {
         return "used";
     }
@@ -518,29 +513,6 @@ fn invite_status(used_at: Option<&str>, expires_at: &str, now: DateTime<Utc>) ->
         Some(expiry) if expiry <= now => "expired",
         _ => "pending",
     }
-}
-
-fn to_members(group: &wcbe::GroupDetail) -> Vec<Member> {
-    let mut members: Vec<Member> = group
-        .nodes
-        .iter()
-        .map(|n| Member {
-            node_number: n.node_number,
-            name: n.name.clone(),
-            user_id: n.metadata.as_deref().and_then(parse_user_id),
-            created_at: n.created_at.clone(),
-            last_seen_at: n.last_seen_at.clone(),
-            connected_to_server: None,
-            connected_since: None,
-        })
-        .collect();
-    members.sort_by_key(|m| m.node_number);
-    members
-}
-
-fn parse_user_id(metadata: &str) -> Option<String> {
-    let meta: wcbe::NodeMetadata = serde_json::from_str(metadata).ok()?;
-    Some(meta.user_id).filter(|s| !s.is_empty())
 }
 
 //-- Human rendering -----------------------------------------------------------
@@ -551,9 +523,9 @@ fn print_fleet(report: &StatusReport) {
         return;
     }
     let mut tw = TabWriter::new(std::io::stdout().lock()).padding(2);
-    writeln!(&mut tw, "CIRCLE\tSTATE\tHUB\tSHARES\tNODES").unwrap();
+    writeln!(&mut tw, "CIRCLE\tSTATE\tNETWORK\tSHARES\tNODES").unwrap();
     for c in &report.circles {
-        let hub = match c.server.hub_connected {
+        let hub = match c.server.reachable {
             Some(true) => "connected",
             Some(false) => "not connected",
             None => "-",
@@ -567,7 +539,7 @@ fn print_fleet(report: &StatusReport) {
                 .collect::<Vec<_>>()
                 .join(", ")
         };
-        let nodes = match &c.members {
+        let nodes = match &c.guests {
             // Live server view: connected guests / total guests.
             Some(m) if m.iter().any(|m| m.connected_to_server.is_some()) => {
                 let connected = m
@@ -577,7 +549,7 @@ fn print_fleet(report: &StatusReport) {
                 let guests = m.iter().filter(|m| m.connected_to_server.is_some()).count();
                 format!("{}/{} connected", connected, guests)
             }
-            Some(m) => format!("{} members", m.len()),
+            Some(g) => format!("{} guests", g.len()),
             None => "?".to_owned(),
         };
         let state = match (c.server.state, c.server.reload_pending) {
@@ -623,25 +595,39 @@ fn print_circle_details(c: &CircleStatus) {
     if let Some(e) = &c.config_error {
         writeln!(&mut tw, "  Config\tERROR: {}", e).unwrap();
     }
-    writeln!(&mut tw, "  Transport\t{}", c.transport.unwrap_or("-")).unwrap();
-    writeln!(
-        &mut tw,
-        "  Backend\t{}",
-        backend_label(c.backend.as_deref())
-    )
-    .unwrap();
-    writeln!(
-        &mut tw,
-        "  Connectivity group\t{}",
-        c.connectivity_group_id.as_deref().unwrap_or("-")
-    )
-    .unwrap();
-    if let Some(created) = &c.group_created_at {
-        writeln!(&mut tw, "  Created\t{}", fmt_utc(created)).unwrap();
-    }
-    if let Some(quota) = &c.node_quota {
-        let members = c.members.as_ref().map(|m| m.len()).unwrap_or(0);
-        writeln!(&mut tw, "  Quota\t{}", fmt_quota(quota, members)).unwrap();
+    match &c.transport {
+        Some(TransportStatus::WispersConnect {
+            backend,
+            connectivity_group_id,
+            group_created_at,
+            node_quota,
+        }) => {
+            writeln!(&mut tw, "  Transport\twispers-connect").unwrap();
+            writeln!(&mut tw, "  Backend\t{}", backend_label(backend.as_deref())).unwrap();
+            writeln!(
+                &mut tw,
+                "  Connectivity group\t{}",
+                connectivity_group_id.as_deref().unwrap_or("-")
+            )
+            .unwrap();
+            if let Some(created) = group_created_at {
+                writeln!(&mut tw, "  Created\t{}", fmt_utc(created)).unwrap();
+            }
+            if let Some(quota) = node_quota {
+                let guests = c.guests.as_ref().map(|g| g.len()).unwrap_or(0);
+                writeln!(&mut tw, "  Quota\t{}", fmt_quota(quota, guests)).unwrap();
+            }
+        }
+        Some(TransportStatus::Iroh { endpoint_id }) => {
+            writeln!(&mut tw, "  Transport\tiroh").unwrap();
+            writeln!(
+                &mut tw,
+                "  Endpoint ID\t{}",
+                endpoint_id.as_deref().unwrap_or("-")
+            )
+            .unwrap();
+        }
+        None => writeln!(&mut tw, "  Transport\t-").unwrap(),
     }
 
     writeln!(&mut tw, "\nServer").unwrap();
@@ -654,13 +640,17 @@ fn print_circle_details(c: &CircleStatus) {
         state = format!("{}: {}", state, e);
     }
     writeln!(&mut tw, "  State\t{}", state).unwrap();
-    if let Some(connected) = server.hub_connected {
+    if let Some(connected) = server.reachable {
         let hub = match (connected, server.connected_since.as_deref()) {
             (true, Some(since)) => format!("connected (for {})", fmt_age(since)),
             (true, None) => "connected".to_owned(),
             (false, _) => "not connected".to_owned(),
         };
-        writeln!(&mut tw, "  Hub\t{}", hub).unwrap();
+        let label = match c.transport {
+            Some(TransportStatus::Iroh { .. }) => "Relay",
+            _ => "Hub",
+        };
+        writeln!(&mut tw, "  {}\t{}", label, hub).unwrap();
     }
     if server.reload_pending == Some(true) {
         writeln!(
@@ -695,42 +685,43 @@ fn print_circle_details(c: &CircleStatus) {
         }
     }
 
-    writeln!(&mut tw, "\nMembers").unwrap();
-    match (&c.members, &c.members_error) {
-        (Some(members), _) => {
+    writeln!(&mut tw, "\nGuests").unwrap();
+    match (&c.guests, &c.guests_error) {
+        (Some(guests), _) => {
             writeln!(&mut tw, "  #\tNAME\tUSER\tLAST SEEN\tSTATUS").unwrap();
-            for m in members {
-                let is_self = c.server.node_number == Some(m.node_number);
-                let live_now = m.connected_to_server == Some(true)
-                    || (is_self && c.server.hub_connected == Some(true));
-                let last_seen = if live_now {
+            for g in guests {
+                let last_seen = if g.connected_to_server == Some(true) {
                     "now".to_owned()
                 } else {
-                    match m.last_seen_at.as_deref() {
+                    match g.last_seen_at.as_deref() {
                         Some(at) => fmt_ago(at),
                         None => "-".to_owned(),
                     }
                 };
-                let status = if is_self {
-                    "(this server)".to_owned()
-                } else {
-                    match m.connected_to_server {
-                        Some(true) => match &m.connected_since {
-                            Some(since) => format!("connected ({})", fmt_age(since)),
-                            None => "connected".to_owned(),
-                        },
-                        Some(false) => "-".to_owned(),
-                        None => "?".to_owned(),
-                    }
+                let status = match g.connected_to_server {
+                    Some(true) => match &g.connected_since {
+                        Some(since) => format!("connected ({})", fmt_age(since)),
+                        None => "connected".to_owned(),
+                    },
+                    Some(false) => "-".to_owned(),
+                    None => "?".to_owned(),
                 };
                 writeln!(
                     &mut tw,
                     "  {}\t{}\t{}\t{}\t{}",
-                    m.node_number,
-                    m.name.as_deref().unwrap_or("-"),
-                    m.user_id.as_deref().unwrap_or("-"),
+                    g.node_number,
+                    g.name.as_deref().unwrap_or("-"),
+                    g.user_id.as_deref().unwrap_or("-"),
                     last_seen,
                     status
+                )
+                .unwrap();
+            }
+            if matches!(c.transport, Some(TransportStatus::WispersConnect { .. })) {
+                writeln!(
+                    &mut tw,
+                    "  (node {} is this server)",
+                    wispers_connect_transport::SERVER_NODE_NUMBER
                 )
                 .unwrap();
             }
@@ -769,19 +760,19 @@ fn print_circle_details(c: &CircleStatus) {
     tw.flush().unwrap();
 }
 
-/// Renders node-quota usage, e.g. `11 of 12 used (9 members + 2 pending
-/// invites)`.
-fn fmt_quota(quota: &wcbe::NodeQuota, member_count: usize) -> String {
+/// Renders node-quota usage, e.g. `11 of 12 used (this server + 8 guests +
+/// 2 pending invites)`. The hub counts the server as one node of the group.
+fn fmt_quota(quota: &wcbe::NodeQuota, guest_count: usize) -> String {
     let used = fmt_used(quota.current, quota.limit);
-    let pending = (quota.current.max(0) as usize).saturating_sub(member_count);
+    let pending = (quota.current.max(0) as usize).saturating_sub(guest_count + 1);
     if pending == 0 {
         return used;
     }
     format!(
-        "{} ({} member{} + {} pending invite{})",
+        "{} (this server + {} guest{} + {} pending invite{})",
         used,
-        member_count,
-        if member_count == 1 { "" } else { "s" },
+        guest_count,
+        if guest_count == 1 { "" } else { "s" },
         pending,
         if pending == 1 { "" } else { "s" },
     )
@@ -881,16 +872,6 @@ mod tests {
         assert_eq!(fmt_duration(2 * 86400 + 3 * 3600), "2d 3h");
     }
 
-    #[test]
-    fn user_id_comes_from_node_metadata() {
-        assert_eq!(
-            parse_user_id(r#"{"userId": "lara@example.com"}"#),
-            Some("lara@example.com".to_owned())
-        );
-        assert_eq!(parse_user_id(r#"{"userId": ""}"#), None);
-        assert_eq!(parse_user_id("not json"), None);
-    }
-
     // The JSON keys are a stable contract (unlike the human output).
     // This pins the camelCase naming and the null-for-unknown convention.
     #[test]
@@ -900,10 +881,15 @@ mod tests {
                 name: "family".to_owned(),
                 display_name: Some("Family".to_owned()),
                 config_error: None,
-                transport: Some("wispers-connect"),
-                backend: None,
-                connectivity_group_id: Some("cg-1".to_owned()),
-                group_created_at: None,
+                transport: Some(TransportStatus::WispersConnect {
+                    backend: None,
+                    connectivity_group_id: Some("cg-1".to_owned()),
+                    group_created_at: None,
+                    node_quota: Some(wcbe::NodeQuota {
+                        limit: Some(12),
+                        current: 11,
+                    }),
+                }),
                 server: ServerStatus::offline(),
                 shares: vec![ShareStatus {
                     id: "jellyfin".to_owned(),
@@ -912,9 +898,9 @@ mod tests {
                     upstream: "localhost:8096".to_owned(),
                     upstream_reachable: false,
                 }],
-                members: None,
-                members_error: None,
-                invites: Some(vec![Invite {
+                guests: None,
+                guests_error: None,
+                invites: Some(vec![InviteStatus {
                     node_name: Some("Nick's iPhone".to_owned()),
                     user_id: Some("nick@example.com".to_owned()),
                     created_at: "2026-07-20T09:00:00Z".to_owned(),
@@ -923,10 +909,6 @@ mod tests {
                     status: "pending",
                 }]),
                 invites_error: None,
-                node_quota: Some(wcbe::NodeQuota {
-                    limit: Some(12),
-                    current: 11,
-                }),
             }],
             groups_quota: None,
         };
@@ -934,18 +916,19 @@ mod tests {
         let circle = &json["circles"][0];
         assert_eq!(circle["name"], "family");
         assert_eq!(circle["displayName"], "Family");
-        assert_eq!(circle["transport"], "wispers-connect");
-        assert_eq!(circle["backend"], serde_json::Value::Null);
-        assert_eq!(circle["connectivityGroupId"], "cg-1");
+        assert_eq!(circle["transport"]["kind"], "wispers-connect");
+        assert_eq!(circle["transport"]["backend"], serde_json::Value::Null);
+        assert_eq!(circle["transport"]["connectivityGroupId"], "cg-1");
+        assert_eq!(circle["transport"]["nodeQuota"]["limit"], 12);
+        assert_eq!(circle["transport"]["nodeQuota"]["current"], 11);
         assert_eq!(circle["server"]["state"], "offline");
-        assert_eq!(circle["server"]["hubConnected"], serde_json::Value::Null);
-        assert_eq!(circle["server"]["nodeNumber"], serde_json::Value::Null);
+        assert_eq!(circle["server"]["reachable"], serde_json::Value::Null);
         assert_eq!(circle["server"]["reloadPending"], serde_json::Value::Null);
         assert_eq!(circle["shares"][0]["id"], "jellyfin");
         assert_eq!(circle["shares"][0]["upstream"], "localhost:8096");
         assert_eq!(circle["shares"][0]["upstreamReachable"], false);
         assert_eq!(circle["shares"][0]["kind"], "web");
-        assert_eq!(circle["members"], serde_json::Value::Null);
+        assert_eq!(circle["guests"], serde_json::Value::Null);
         let invite = &circle["invites"][0];
         assert_eq!(invite["nodeName"], "Nick's iPhone");
         assert_eq!(invite["userId"], "nick@example.com");
@@ -954,10 +937,8 @@ mod tests {
         // Errors are omitted, not null, when absent.
         assert!(circle["server"].get("error").is_none());
         assert!(circle.get("configError").is_none());
-        assert!(circle.get("membersError").is_none());
+        assert!(circle.get("guestsError").is_none());
         assert!(circle.get("invitesError").is_none());
-        assert_eq!(circle["nodeQuota"]["limit"], 12);
-        assert_eq!(circle["nodeQuota"]["current"], 11);
         // Single-circle reports have no fleet-level groups quota; omitted.
         assert!(json.get("groupsQuota").is_none());
     }
@@ -987,21 +968,21 @@ mod tests {
     fn quota_renders_pending_breakdown() {
         let quota = |limit, current| wcbe::NodeQuota { limit, current };
         assert_eq!(
-            fmt_quota(&quota(Some(12), 11), 9),
-            "11 of 12 used (9 members + 2 pending invites)"
+            fmt_quota(&quota(Some(12), 11), 8),
+            "11 of 12 used (this server + 8 guests + 2 pending invites)"
         );
-        // No pending invites: the member count would just repeat the table.
-        assert_eq!(fmt_quota(&quota(Some(12), 9), 9), "9 of 12 used");
+        // No pending invites: the guest count would just repeat the table.
+        assert_eq!(fmt_quota(&quota(Some(12), 9), 8), "9 of 12 used");
         assert_eq!(
-            fmt_quota(&quota(Some(12), 2), 1),
-            "2 of 12 used (1 member + 1 pending invite)"
+            fmt_quota(&quota(Some(12), 3), 1),
+            "3 of 12 used (this server + 1 guest + 1 pending invite)"
         );
-        assert_eq!(fmt_quota(&quota(None, 3), 3), "3 used (no limit)");
+        assert_eq!(fmt_quota(&quota(None, 3), 2), "3 used (no limit)");
     }
 
     #[test]
-    fn live_connections_overlay_members() {
-        let member = |node_number| Member {
+    fn live_connections_overlay_guests() {
+        let guest = |node_number| GuestStatus {
             node_number,
             name: None,
             user_id: None,
@@ -1010,24 +991,22 @@ mod tests {
             connected_to_server: None,
             connected_since: None,
         };
-        let mut members = vec![member(1), member(2), member(3)];
-        let peers = vec![ipc::PeerData {
+        let mut guests = vec![guest(2), guest(3)];
+        let connected = vec![ipc::GuestData {
             node_number: 2,
             user_id: Some("lara@example.com".to_owned()),
             connected_since: Some("2026-07-20T10:00:00Z".to_owned()),
         }];
-        apply_live_connections(&mut members, &peers, Some(1));
+        apply_live_connections(&mut guests, &connected);
 
-        // The server's own row stays untouched.
-        assert_eq!(members[0].connected_to_server, None);
         // A live guest gets the connection and its start time.
-        assert_eq!(members[1].connected_to_server, Some(true));
+        assert_eq!(guests[0].connected_to_server, Some(true));
         assert_eq!(
-            members[1].connected_since.as_deref(),
+            guests[0].connected_since.as_deref(),
             Some("2026-07-20T10:00:00Z")
         );
         // A guest without a connection is authoritatively not connected.
-        assert_eq!(members[2].connected_to_server, Some(false));
+        assert_eq!(guests[1].connected_to_server, Some(false));
     }
 
     #[test]
