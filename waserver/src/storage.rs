@@ -452,6 +452,19 @@ impl StateDb {
         Ok(())
     }
 
+    /// Removes the DB entry for given guest, used when the guests asks to be
+    /// removed. Unlike a revoke, this leaves no mark.
+    pub fn remove_guest(&self, number: i64) -> Result<(), Error> {
+        let conn = self.conn.lock().expect("unpoisoned db lock");
+        let removed = conn
+            .execute("DELETE FROM guests WHERE id = ?1", [number])
+            .map_err(Error::Db)?;
+        if removed == 0 {
+            return Err(Error::NoSuchGuest(number));
+        }
+        Ok(())
+    }
+
     /// Marks a guest node revoked. Revoking twice keeps the first time.
     pub fn revoke_guest(&self, number: i64, now: i64) -> Result<GuestNode, Error> {
         use rusqlite::OptionalExtension;
@@ -740,6 +753,24 @@ mod tests {
             Some(2_000)
         );
         assert_eq!(db.guests().unwrap().len(), 1);
+
+        // A guest that leaves is forgotten outright, invite left consumed.
+        let leaver = wire::InviteSecret([3; 16]);
+        db.create_invite(invite(&leaver, "carol"), 2_000).unwrap();
+        let Redemption::Activated(carol) = db.redeem_invite(&leaver, "peer-c", 2_001).unwrap()
+        else {
+            panic!("expected activation");
+        };
+        db.remove_guest(carol.number).unwrap();
+        assert!(db.guest_by_peer("peer-c").unwrap().is_none());
+        assert!(matches!(
+            db.remove_guest(carol.number),
+            Err(Error::NoSuchGuest(_))
+        ));
+        assert_eq!(
+            db.redeem_invite(&leaver, "peer-c2", 2_002).unwrap(),
+            Redemption::Refused(InviteConsumed)
+        );
 
         // A revoked key is never re-bound, even with a fresh invite.
         let fresh = wire::InviteSecret([2; 16]);

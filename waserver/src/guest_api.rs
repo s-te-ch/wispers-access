@@ -59,12 +59,22 @@ async fn route(
         "guest API request"
     );
     let response = match (req.method(), req.uri().path()) {
+        // A key that is not a guest yet is authenticated but not authorised:
+        // activation is all it may do, and nothing about the circle leaks
+        // before that.
+        (method, path)
+            if peer.user_id.is_none()
+                && (method, path) != (&Method::POST, wire::ACTIVATION_PATH) =>
+        {
+            error(StatusCode::FORBIDDEN, "not-activated")
+        }
         (&Method::GET, wire::CIRCLE_PATH) => get_circle(&req, &ctx.config),
         (&Method::GET, wire::EVENTS_PATH) => get_events(&ctx.events),
         (&Method::POST, wire::ACTIVATION_PATH) => {
             post_activation(req, &ctx.db, &peer.peer_id, &ctx.config).await
         }
-        (_, wire::CIRCLE_PATH | wire::EVENTS_PATH | wire::ACTIVATION_PATH) => {
+        (&Method::DELETE, wire::GUEST_PATH) => delete_guest(&ctx.db, &peer.peer_id),
+        (_, wire::CIRCLE_PATH | wire::EVENTS_PATH | wire::ACTIVATION_PATH | wire::GUEST_PATH) => {
             error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
         }
         _ => error(StatusCode::NOT_FOUND, "no such route"),
@@ -172,6 +182,29 @@ async fn post_activation(
             error(StatusCode::INTERNAL_SERVER_ERROR, "state database error")
         }
     }
+}
+
+/// Called when the guest leaves the circle. The guest closes the connection
+/// itself afterwards.
+fn delete_guest(db: &storage::StateDb, peer_id: &str) -> Response<BoxedBody> {
+    let guest = match db.guest_by_peer(peer_id) {
+        Ok(Some(guest)) => guest,
+        // Wispers Connect guests have no row here; they leave via the hub.
+        Ok(None) => return error(StatusCode::NOT_FOUND, "no such guest"),
+        Err(e) => {
+            log_error!(error = %e, "leave failed on the state database");
+            return error(StatusCode::INTERNAL_SERVER_ERROR, "state database error");
+        }
+    };
+    if let Err(e) = db.remove_guest(guest.number) {
+        log_error!(error = %e, "leave failed on the state database");
+        return error(StatusCode::INTERNAL_SERVER_ERROR, "state database error");
+    }
+    info!(peer_id, guest = guest.number, user_id = %guest.user_id, "guest left");
+    Response::builder()
+        .status(StatusCode::NO_CONTENT)
+        .body(empty())
+        .expect("static response is valid")
 }
 
 fn refuse(peer_id: &str, why: ActivationError) -> Response<BoxedBody> {

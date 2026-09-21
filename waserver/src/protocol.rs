@@ -346,7 +346,7 @@ upstream = ":1"
         let ctx = context_with_upstream("127.0.0.1:1");
         let hash = ConfigHash(ctx.config.config_hash());
         let request = format!("GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
-        let response = exchange(ctx, None, ctrl_stream(&request)).await;
+        let response = exchange(ctx, Some("bob"), ctrl_stream(&request)).await;
         let (head, body) = split_response(&response);
         assert!(head.starts_with("http/1.1 200"), "{head}");
         assert!(head.contains("content-type: application/json"), "{head}");
@@ -373,7 +373,7 @@ upstream = ":1"
             wire::CIRCLE_PATH,
             etag
         );
-        let response = exchange(ctx, None, ctrl_stream(&request)).await;
+        let response = exchange(ctx, Some("bob"), ctrl_stream(&request)).await;
         let (head, body) = split_response(&response);
         assert!(head.starts_with("http/1.1 304"), "{head}");
         assert!(head.contains(&format!("etag: {etag}")), "{head}");
@@ -385,13 +385,13 @@ upstream = ":1"
         let ctx = context_with_upstream("127.0.0.1:1");
         let response = exchange(
             ctx.clone(),
-            None,
+            Some("bob"),
             ctrl_stream("GET /v1/nope HTTP/1.1\r\nHost: w\r\n\r\n"),
         )
         .await;
         assert!(split_response(&response).0.starts_with("http/1.1 404"));
         let request = format!("DELETE {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
-        let response = exchange(ctx, None, ctrl_stream(&request)).await;
+        let response = exchange(ctx, Some("bob"), ctrl_stream(&request)).await;
         assert!(split_response(&response).0.starts_with("http/1.1 405"));
     }
 
@@ -534,6 +534,24 @@ upstream = ":1"
         let (status, _) = split_response(&raw);
         assert!(status.starts_with("http/1.1 400"), "{status}");
 
+        // The guest can leave: the server forgets it.
+        let raw = exchange_as(
+            ctx.clone(),
+            Peer {
+                peer_id: "peer-a".to_owned(),
+                user_id: Some("alice".to_owned()),
+            },
+            format!(
+                "\x01DELETE {} HTTP/1.1\r\nHost: w\r\n\r\n",
+                wire::GUEST_PATH
+            )
+            .into_bytes(),
+        )
+        .await;
+        let (status, _) = split_response(&raw);
+        assert!(status.starts_with("http/1.1 204"), "{status}");
+        assert!(db.guest_by_peer("peer-a").unwrap().is_none());
+
         // Another key presenting the consumed secret is refused; the
         // route itself exists for every peer.
         let raw = exchange(ctx, None, activation_request(&secret)).await;
@@ -551,7 +569,8 @@ upstream = ":1"
             user_id: None,
         };
 
-        // A CTRL stream is served like any other.
+        // A CTRL stream is served, but only activation is allowed: nothing
+        // about the circle leaks to a key that is not a guest.
         let (server, mut client) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(handle(server, ctx.clone(), peer.clone()));
         let request = format!("\x01GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
@@ -560,7 +579,10 @@ upstream = ":1"
         let mut response = Vec::new();
         client.read_to_end(&mut response).await.unwrap();
         assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Served);
-        assert!(split_response(&response).0.starts_with("http/1.1 200"));
+        let (status, body) = split_response(&response);
+        assert!(status.starts_with("http/1.1 403"), "{status}");
+        let err: wire::ApiError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(err.error, "not-activated");
 
         // A DATA stream is refused unread.
         let (server, mut client) = tokio::io::duplex(1024);

@@ -36,7 +36,14 @@ pub async fn serve(circle: &str) -> Result<()> {
         TransportConfig::Iroh {} => Arc::new(iroh_transport::bind(circle, state.clone()).await?),
     };
     let handle = ServingHandle::new(dir, cfg, state, server.clone());
-    let ipc_server = ipc::Server::bind(circle).await?;
+    let ipc_server = match ipc::Server::bind(circle).await {
+        Ok(ipc_server) => ipc_server,
+        Err(e) => {
+            // Let the transport go down properly rather than drop it.
+            let _ = server.shutdown().await;
+            return Err(e);
+        }
+    };
     let mut ipc_task = tokio::spawn(ipc_server.run(handle.clone()));
     let reason = server.run(handle).await?;
     if reason == ExitReason::Stopped {
@@ -81,7 +88,7 @@ pub enum ExitReason {
 
 /// How long the exit waits for the IPC server to answer the `stop` that
 /// ended the loop.
-const IPC_REPLY_GRACE: Duration = Duration::from_secs(2);
+const IPC_REPLY_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct ServingHandle {

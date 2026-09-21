@@ -4709,6 +4709,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "iroh",
  "libc",
  "rusqlite",
  "rusqlite_migration",

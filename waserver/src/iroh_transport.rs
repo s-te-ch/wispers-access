@@ -93,9 +93,11 @@ impl Server for Endpoint {
             .revoke_guest(number, chrono::Utc::now().timestamp())?)
     }
 
+    /// Shutdown, but wait for guests to acknowledge the close, so they see an
+    /// orderly close.
     fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
         Box::pin(async move {
-            self.endpoint.close().await;
+            let _ = tokio::time::timeout(CLOSE_TIMEOUT, self.endpoint.close()).await;
             Ok(())
         })
     }
@@ -126,6 +128,9 @@ pub fn mint_invite(
         secret,
     })
 }
+
+/// How long shutdown waits for guests to acknowledge the close.
+const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Grace for an unknown key to activate before its connection is closed.
 const ACTIVATION_WINDOW: Duration = Duration::from_secs(10);
@@ -360,6 +365,8 @@ fn guest_status(g: &storage::GuestNode) -> GuestStatus {
         last_seen_at: g.last_seen_at.map(fmt_unix),
         connected_to_server: None,
         connected_since: None,
+        revoked: g.revoked_at.is_some(),
+        revoked_at: g.revoked_at.map(fmt_unix),
     }
 }
 

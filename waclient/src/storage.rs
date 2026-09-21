@@ -92,6 +92,15 @@ impl DB {
     }
 }
 
+/// What an iroh circle needs to reach its server.
+pub struct IrohState {
+    /// The Ed25519 key this device minted for the circle at join; its
+    /// public key is what the server bound to the invite.
+    pub secret_key: [u8; 32],
+    /// The server's endpoint ID from the invite, in hex.
+    pub server_endpoint_id: String,
+}
+
 /// One joined circle.
 #[derive(Clone)]
 pub struct Row {
@@ -178,6 +187,46 @@ impl Row {
             rusqlite::params![backend, self.id],
         )?;
         Ok(())
+    }
+
+    /// Records that this circle rides iroh, and what that needs.
+    pub fn write_iroh_state(&self, state: &IrohState) -> Result<()> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        conn.execute(
+            "UPDATE circles SET transport = 'iroh', iroh_secret = ?1, iroh_server = ?2
+             WHERE id = ?3",
+            rusqlite::params![&state.secret_key[..], state.server_endpoint_id, self.id],
+        )?;
+        Ok(())
+    }
+
+    pub fn read_iroh_state(&self) -> Result<Option<IrohState>> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let (secret, server): (Option<Vec<u8>>, Option<String>) = conn.query_row(
+            "SELECT iroh_secret, iroh_server FROM circles WHERE id = ?1",
+            [self.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        let (Some(secret), Some(server)) = (secret, server) else {
+            return Ok(None);
+        };
+        Ok(Some(IrohState {
+            secret_key: secret
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("stored iroh key has the wrong length"))?,
+            server_endpoint_id: server,
+        }))
+    }
+
+    /// The transport this circle rides.
+    pub fn read_transport_kind(&self) -> Result<wire::Transport> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let name: String = conn.query_row(
+            "SELECT transport FROM circles WHERE id = ?1",
+            [self.id],
+            |r| r.get(0),
+        )?;
+        Ok(name.parse()?)
     }
 
     pub fn read_backend(&self) -> Result<Option<String>> {
@@ -435,6 +484,12 @@ fn migrations() -> Migrations<'static> {
                  kind TEXT NOT NULL,
                  PRIMARY KEY (circle_id, share_id)
              ) STRICT;",
+        ),
+        // v2 — transport kind, iroh device key and server endpoint ID.
+        M::up(
+            "ALTER TABLE circles ADD COLUMN transport TEXT NOT NULL DEFAULT 'wispers-connect';
+             ALTER TABLE circles ADD COLUMN iroh_secret BLOB;
+             ALTER TABLE circles ADD COLUMN iroh_server TEXT;",
         ),
     ])
 }
