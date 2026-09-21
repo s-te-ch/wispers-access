@@ -349,8 +349,8 @@ pub const EVENT_CIRCLE_CHANGED: &str = "circle-changed";
 ///
 /// The body is an [`Activation`]. On success, returns 200 with the same
 /// [`CircleInfo`] body and `ETag` as `GET /v1/circle`. On failure, returns an
-/// [`ApiError`] carrying an [`ActivationError`], after which the server closes
-/// the connection with [`CloseCode::ActivationFailed`].
+/// [`ApiError`] carrying an [`ActivationError`]; an unbound connection is
+/// then closed with [`CloseCode::Unknown`], which is what the key still is.
 pub const ACTIVATION_PATH: &str = "/v1/activation";
 
 /// Body of `POST /v1/activation`.
@@ -539,8 +539,6 @@ pub enum CloseCode {
     Unknown = 1,
     /// This endpoint ID was revoked. Terminal.
     Revoked = 2,
-    /// The activation on this connection failed.
-    ActivationFailed = 3,
 }
 
 impl CloseCode {
@@ -553,7 +551,6 @@ impl CloseCode {
             CloseCode::Closing => b"closing",
             CloseCode::Unknown => b"unknown",
             CloseCode::Revoked => b"revoked",
-            CloseCode::ActivationFailed => b"activation-failed",
         }
     }
 
@@ -562,7 +559,6 @@ impl CloseCode {
             0 => Some(CloseCode::Closing),
             1 => Some(CloseCode::Unknown),
             2 => Some(CloseCode::Revoked),
-            3 => Some(CloseCode::ActivationFailed),
             _ => None, // Unknown, treat as [`CloseCode::Closing`].
         }
     }
@@ -829,16 +825,11 @@ mod tests {
 
     #[test]
     fn close_codes_round_trip() {
-        for c in [
-            CloseCode::Closing,
-            CloseCode::Unknown,
-            CloseCode::Revoked,
-            CloseCode::ActivationFailed,
-        ] {
+        for c in [CloseCode::Closing, CloseCode::Unknown, CloseCode::Revoked] {
             assert_eq!(CloseCode::from_code(c.code().into()), Some(c));
             assert!(c.reason().is_ascii());
         }
-        assert_eq!(CloseCode::from_code(4), None);
+        assert_eq!(CloseCode::from_code(3), None);
         assert_eq!(CloseCode::Unknown.code(), 1);
         assert_eq!(CloseCode::Revoked.reason(), b"revoked");
         assert_eq!(ALPN, b"wispers-access/1");

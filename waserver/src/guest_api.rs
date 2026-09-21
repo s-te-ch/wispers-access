@@ -2,43 +2,37 @@
 //!
 //! Every stream carries one request. `GET /v1/events` is the long-lived
 //! one: it stays open and streams server-sent events until the guest goes
-//! away.
+//! away. `POST /v1/activation` is how a guest on a transport where waserver
+//! is the authority (iroh) binds its key to an invite.
 
 use crate::config::CircleConfig;
+use crate::protocol::{Peer, StreamContext};
+use crate::storage::{self, Redemption};
 use anyhow::Result;
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, StreamBody, combinators::BoxBody};
+use http_body_util::{BodyExt, Full, Limited, StreamBody, combinators::BoxBody};
 use hyper::body::{Frame, Incoming};
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
-use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
-use tracing::{debug, info};
-use wire::{CircleChanged, CircleInfo, ConfigHash, Share};
+use tracing::{debug, error as log_error, info, warn};
+use wire::{ActivationError, CircleChanged, CircleInfo, ConfigHash, Share};
 use wispers_access_wire as wire;
 
 type BoxedBody = BoxBody<Bytes, std::io::Error>;
 
-/// Serves one CTRL stream against `config`, with `events` as the source of
-/// the events stream.
-pub async fn serve<S>(
-    io: S,
-    config: Arc<CircleConfig>,
-    events: broadcast::Sender<u64>,
-    user_id: Option<String>,
-) -> Result<()>
+/// Serves one CTRL stream against the circle as of `ctx`.
+pub async fn serve<S>(io: S, ctx: StreamContext, peer: Peer) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let service = hyper::service::service_fn(move |req| {
-        route(req, config.clone(), events.clone(), user_id.clone())
-    });
+    let service = hyper::service::service_fn(move |req| route(req, ctx.clone(), peer.clone()));
     let served = http1::Builder::new()
         // One request per stream: the guest may FIN its side right after
         // the request and wait for the response on the other half.
@@ -55,20 +49,22 @@ where
 
 async fn route(
     req: Request<Incoming>,
-    config: Arc<CircleConfig>,
-    events: broadcast::Sender<u64>,
-    user_id: Option<String>,
+    ctx: StreamContext,
+    peer: Peer,
 ) -> Result<Response<BoxedBody>, Infallible> {
     info!(
         method = %req.method(),
         path = req.uri().path(),
-        user_id = user_id.as_deref().unwrap_or("-"),
+        user_id = peer.user_id.as_deref().unwrap_or("-"),
         "guest API request"
     );
     let response = match (req.method(), req.uri().path()) {
-        (&Method::GET, wire::CIRCLE_PATH) => get_circle(&req, &config),
-        (&Method::GET, wire::EVENTS_PATH) => get_events(&events),
-        (_, wire::CIRCLE_PATH | wire::EVENTS_PATH) => {
+        (&Method::GET, wire::CIRCLE_PATH) => get_circle(&req, &ctx.config),
+        (&Method::GET, wire::EVENTS_PATH) => get_events(&ctx.events),
+        (&Method::POST, wire::ACTIVATION_PATH) => {
+            post_activation(req, &ctx.db, &peer.peer_id, &ctx.config).await
+        }
+        (_, wire::CIRCLE_PATH | wire::EVENTS_PATH | wire::ACTIVATION_PATH) => {
             error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
         }
         _ => error(StatusCode::NOT_FOUND, "no such route"),
@@ -94,6 +90,14 @@ fn get_circle(req: &Request<Incoming>, config: &CircleConfig) -> Response<BoxedB
             .body(empty())
             .expect("static response is valid");
     }
+    circle_response(builder, config)
+}
+
+/// A 200 with the circle as JSON.
+fn circle_response(
+    builder: hyper::http::response::Builder,
+    config: &CircleConfig,
+) -> Response<BoxedBody> {
     let body = serde_json::to_vec(&circle_info(config)).expect("CircleInfo serialises");
     builder
         .status(StatusCode::OK)
@@ -118,6 +122,62 @@ fn circle_info(config: &CircleConfig) -> CircleInfo {
             })
             .collect(),
     }
+}
+
+/// An activation body is one secret; anything bigger is not a guest.
+const MAX_ACTIVATION_BODY: usize = 1024;
+
+/// Binds the peer's key to the invite whose secret the body carries. The
+/// peer ID comes from the connection's handshake, never from the body. On
+/// success the response is the circle, as for `GET /v1/circle`, so a join
+/// has nothing left to fetch.
+async fn post_activation(
+    req: Request<Incoming>,
+    db: &storage::StateDb,
+    peer_id: &str,
+    config: &CircleConfig,
+) -> Response<BoxedBody> {
+    let body = match Limited::new(req.into_body(), MAX_ACTIVATION_BODY)
+        .collect()
+        .await
+    {
+        Ok(collected) => collected.to_bytes(),
+        Err(_) => return refuse(peer_id, ActivationError::Malformed),
+    };
+    let Ok(request) = serde_json::from_slice::<wire::Activation>(&body) else {
+        return refuse(peer_id, ActivationError::Malformed);
+    };
+    let now = chrono::Utc::now().timestamp();
+    match db.redeem_invite(&request.secret, peer_id, now) {
+        Ok(Redemption::Activated(guest)) => {
+            info!(
+                peer_id,
+                guest = guest.number,
+                user_id = %guest.user_id,
+                "guest activated"
+            );
+            let hash = ConfigHash(config.config_hash());
+            circle_response(
+                Response::builder()
+                    .header(hyper::header::ETAG, hash.etag())
+                    .header(hyper::header::CACHE_CONTROL, "no-cache"),
+                config,
+            )
+        }
+        Ok(Redemption::Refused(why)) => refuse(peer_id, why),
+        Err(e) => {
+            // Not the guest's fault; an unbound connection gets closed
+            // anyway, as the key stays unknown.
+            log_error!(error = %e, "activation failed on the state database");
+            error(StatusCode::INTERNAL_SERVER_ERROR, "state database error")
+        }
+    }
+}
+
+fn refuse(peer_id: &str, why: ActivationError) -> Response<BoxedBody> {
+    warn!(peer_id, why = why.as_str(), "activation refused");
+    let status = StatusCode::from_u16(why.status()).expect("contract statuses are valid");
+    error(status, why.as_str())
 }
 
 /// How often an idle events stream sends a comment. Keeps middleboxes from

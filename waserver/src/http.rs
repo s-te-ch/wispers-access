@@ -38,7 +38,7 @@ pub const ERROR_HEADER: &str = "x-wispers-access-error";
 pub const CONFIG_HASH_HEADER: &str = "x-wispers-access-config-hash";
 
 /// Serve HTTP/1 over one stream, forwarding every request to the target.
-pub async fn serve<S>(io: S, target: Target, user_id: Option<String>) -> Result<()>
+pub async fn serve<S>(io: S, target: Target, user_id: String) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
@@ -61,7 +61,7 @@ where
 async fn forward(
     req: hyper::Request<Incoming>,
     target: Target,
-    user_id: Option<String>,
+    user_id: String,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
     let upstream = match target {
         Target::Upstream(upstream) => upstream,
@@ -107,7 +107,7 @@ async fn forward(
 async fn try_forward(
     mut req: hyper::Request<Incoming>,
     upstream: Arc<str>,
-    user_id: Option<String>,
+    user_id: String,
 ) -> Result<hyper::Response<BoxedBody>> {
     // Open a connection to the upstream app. `upstream` is `host:port`; tokio
     // resolves DNS names (e.g. a Docker compose service) and parses IP:port.
@@ -135,7 +135,7 @@ async fn try_forward(
     // Rewrite the request before forwarding.
     let (mut parts, body) = req.into_parts();
     strip_hop_by_hop(&mut parts.headers, upgrade);
-    inject_identity(&mut parts.headers, user_id.as_deref());
+    inject_identity(&mut parts.headers, &user_id);
     // "forwarding" appearing means the request was fully received from the peer
     // over its QUIC stream and is now going to the local app.
     let uri_for_log = parts.uri.clone();
@@ -203,15 +203,13 @@ pub const IDENTITY_HEADER: &str = "x-wispers-access-user";
 
 /// Set the identity header from the resolved peer identity. Always strips any
 /// incoming value first.
-fn inject_identity(headers: &mut hyper::HeaderMap, user_id: Option<&str>) {
+fn inject_identity(headers: &mut hyper::HeaderMap, user_id: &str) {
     headers.remove(IDENTITY_HEADER);
-    if let Some(user_id) = user_id {
-        match hyper::header::HeaderValue::from_str(user_id) {
-            Ok(value) => {
-                headers.insert(IDENTITY_HEADER, value);
-            }
-            Err(_) => warn!(%user_id, "user_id is not a valid header value; omitting identity"),
+    match hyper::header::HeaderValue::from_str(user_id) {
+        Ok(value) => {
+            headers.insert(IDENTITY_HEADER, value);
         }
+        Err(_) => warn!(%user_id, "user_id is not a valid header value; omitting identity"),
     }
 }
 

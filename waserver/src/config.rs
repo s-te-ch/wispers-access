@@ -40,6 +40,7 @@ pub enum TransportConfig {
         #[serde(default)]
         backend: Option<String>,
     },
+    Iroh {},
 }
 
 impl Default for TransportConfig {
@@ -52,6 +53,7 @@ impl TransportConfig {
     pub fn kind(&self) -> TransportKind {
         match self {
             TransportConfig::WispersConnect { .. } => TransportKind::WispersConnect,
+            TransportConfig::Iroh {} => TransportKind::Iroh,
         }
     }
 }
@@ -60,12 +62,14 @@ impl TransportConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
 pub enum TransportKind {
     WispersConnect,
+    Iroh,
 }
 
 impl TransportKind {
     pub fn as_str(self) -> &'static str {
         match self {
             TransportKind::WispersConnect => "wispers-connect",
+            TransportKind::Iroh => "iroh",
         }
     }
 }
@@ -174,6 +178,7 @@ pub fn render_template(name: &str, transport: &TransportConfig) -> String {
         TransportConfig::WispersConnect { backend: None } => out.push_str(
             "# backend = \"https://hub.example\"   # self-hosted Wispers Connect backend\n",
         ),
+        TransportConfig::Iroh {} => {}
     }
     out.push_str(
         "\n# One [[share]] block per app. `id` is what guests persist: keep it stable\n\
@@ -326,9 +331,22 @@ upstream = ":2283"
             Err(Error::EmptyName)
         ));
         assert!(matches!(
-            CircleConfig::parse("name = \"x\"\n[transport]\nkind = \"iroh\"\n"),
+            CircleConfig::parse("name = \"x\"\n[transport]\nkind = \"tailscale\"\n"),
             Err(Error::Parse(_))
         ));
+        // A setting from another transport is a parse error.
+        assert!(matches!(
+            CircleConfig::parse(
+                "name = \"x\"\n[transport]\nkind = \"iroh\"\nbackend = \"https://h\"\n"
+            ),
+            Err(Error::Parse(_))
+        ));
+        assert_eq!(
+            CircleConfig::parse("name = \"x\"\n[transport]\nkind = \"iroh\"\n")
+                .unwrap()
+                .transport,
+            TransportConfig::Iroh {}
+        );
         assert!(matches!(
             CircleConfig::parse("name = \"x\"\nbogus = 1\n"),
             Err(Error::Parse(_))

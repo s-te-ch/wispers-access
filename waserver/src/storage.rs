@@ -33,6 +33,8 @@ pub enum Error {
     AlreadyExists(String),
     #[error("no guest node number {0}")]
     NoSuchGuest(i64),
+    #[error("stored iroh key has the wrong length")]
+    CorruptKey,
     #[error("could not determine the OS config directory")]
     NoConfigDir,
 }
@@ -132,10 +134,12 @@ const KEY_API_KEY: &str = "api_key";
 const KEY_CONNECTIVITY_GROUP_ID: &str = "connectivity_group_id";
 const KEY_ROOT_KEY: &str = "root_key";
 const KEY_REGISTRATION: &str = "registration";
+const KEY_IROH_SECRET: &str = "iroh_secret";
 
 impl StateDb {
-    fn open(path: PathBuf) -> Result<Self, Error> {
-        let mut conn = rusqlite::Connection::open(&path).map_err(Error::Db)?;
+    /// `CircleDir` opens the real file; tests open one in a temp dir.
+    pub(crate) fn open(path: PathBuf) -> Result<Self, Error> {
+        let conn = rusqlite::Connection::open(&path).map_err(Error::Db)?;
         // The daemon and the CLI (or two CLI tasks) may open the file at the
         // same time; wait for a short lock instead of failing.
         conn.busy_timeout(std::time::Duration::from_secs(5))
@@ -147,6 +151,16 @@ impl StateDb {
         }
         conn.pragma_update(None, "journal_mode", "WAL")
             .map_err(Error::Db)?;
+        Self::prepare(conn)
+    }
+
+    /// A database that lives and dies with the test.
+    #[cfg(test)]
+    pub(crate) fn open_in_memory() -> Result<Self, Error> {
+        Self::prepare(rusqlite::Connection::open_in_memory().map_err(Error::Db)?)
+    }
+
+    fn prepare(mut conn: rusqlite::Connection) -> Result<Self, Error> {
         conn.pragma_update(None, "foreign_keys", "ON")
             .map_err(Error::Db)?;
         migrations()
@@ -176,6 +190,19 @@ impl StateDb {
             KEY_CONNECTIVITY_GROUP_ID,
             state.connectivity_group_id.as_bytes(),
         )
+    }
+
+    /// The iroh endpoint's secret key; its public key is the circle's
+    /// endpoint ID in every invite.
+    pub fn iroh_secret(&self) -> Result<Option<[u8; 32]>, Error> {
+        match self.get(KEY_IROH_SECRET)? {
+            Some(bytes) => Ok(Some(bytes.try_into().map_err(|_| Error::CorruptKey)?)),
+            None => Ok(None),
+        }
+    }
+
+    pub fn set_iroh_secret(&self, secret: &[u8; 32]) -> Result<(), Error> {
+        self.set(KEY_IROH_SECRET, secret)
     }
 
     fn get_string(&self, key: &str) -> Result<Option<String>, Error> {
@@ -214,15 +241,15 @@ impl StateDb {
 //-- Invites and guest nodes ---------------------------------------------------
 
 /// An invite to be recorded.
-#[allow(dead_code)] // the iroh transport is the first caller
 pub struct NewInvite<'a> {
     /// Only its SHA-256 is stored, so a copied database grants no access;
     /// the secret is high-entropy random, so no slow hash is needed.
     pub secret: &'a wire::InviteSecret,
     /// The label the app sees in the identity header.
     pub user_id: &'a str,
-    /// What the host calls this guest's device.
-    pub display_name: &'a str,
+    /// What the host calls the guest's device; becomes the guest node's
+    /// display name.
+    pub node_name: &'a str,
     pub expires_at: i64,
 }
 
@@ -244,6 +271,17 @@ pub struct GuestNode {
     pub revoked_at: Option<i64>,
 }
 
+/// An invite as recorded, for `status`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InviteRow {
+    pub id: i64,
+    pub user_id: String,
+    pub node_name: String,
+    pub created_at: i64,
+    pub expires_at: i64,
+    pub consumed_at: Option<i64>,
+}
+
 /// The outcome of redeeming an invite.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Redemption {
@@ -252,24 +290,47 @@ pub enum Redemption {
 }
 
 /// Times are Unix seconds; callers pass `now` so the rules are testable.
-#[allow(dead_code)] // the iroh transport is the first caller
 impl StateDb {
     /// Records an invite, returns its id.
     pub fn create_invite(&self, invite: NewInvite<'_>, now: i64) -> Result<i64, Error> {
         let conn = self.conn.lock().expect("unpoisoned db lock");
         conn.execute(
-            "INSERT INTO invites (secret_hash, user_id, display_name, created_at, expires_at)
+            "INSERT INTO invites (secret_hash, user_id, node_name, created_at, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 hash_secret(invite.secret),
                 invite.user_id,
-                invite.display_name,
+                invite.node_name,
                 now,
                 invite.expires_at
             ],
         )
         .map_err(Error::Db)?;
         Ok(conn.last_insert_rowid())
+    }
+
+    /// Every invite, newest first.
+    pub fn invites(&self) -> Result<Vec<InviteRow>, Error> {
+        let conn = self.conn.lock().expect("unpoisoned db lock");
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, user_id, node_name, created_at, expires_at, consumed_at
+                 FROM invites ORDER BY id DESC",
+            )
+            .map_err(Error::Db)?;
+        let rows = stmt
+            .query_map([], |r| {
+                Ok(InviteRow {
+                    id: r.get(0)?,
+                    user_id: r.get(1)?,
+                    node_name: r.get(2)?,
+                    created_at: r.get(3)?,
+                    expires_at: r.get(4)?,
+                    consumed_at: r.get(5)?,
+                })
+            })
+            .map_err(Error::Db)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Error::Db)
     }
 
     /// Redeem the invite code, binding `peer_id` to the metadata (user ID, node
@@ -315,14 +376,14 @@ impl StateDb {
 
         let invite: Option<(i64, String, String, i64, Option<i64>)> = tx
             .query_row(
-                "SELECT id, user_id, display_name, expires_at, consumed_at
+                "SELECT id, user_id, node_name, expires_at, consumed_at
                  FROM invites WHERE secret_hash = ?1",
                 [&secret_hash[..]],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
             )
             .optional()
             .map_err(Error::Db)?;
-        let Some((invite_id, user_id, display_name, expires_at, consumed_at)) = invite else {
+        let Some((invite_id, user_id, node_name, expires_at, consumed_at)) = invite else {
             return Ok(Redemption::Refused(InviteUnknown));
         };
         if consumed_at.is_some() {
@@ -335,7 +396,7 @@ impl StateDb {
         tx.execute(
             "INSERT INTO guests (peer_id, user_id, display_name, invite_id, activated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![peer_id, user_id, display_name, invite_id, now],
+            rusqlite::params![peer_id, user_id, node_name, invite_id, now],
         )
         .map_err(Error::Db)?;
         let number = tx.last_insert_rowid();
@@ -349,7 +410,7 @@ impl StateDb {
             number,
             peer_id: peer_id.to_owned(),
             user_id,
-            display_name,
+            display_name: node_name,
             activated_at: now,
             last_seen_at: None,
             revoked_at: None,
@@ -484,7 +545,7 @@ fn migrations() -> Migrations<'static> {
                  id INTEGER PRIMARY KEY,
                  secret_hash BLOB NOT NULL UNIQUE,
                  user_id TEXT NOT NULL,
-                 display_name TEXT NOT NULL,
+                 node_name TEXT NOT NULL,
                  created_at INTEGER NOT NULL,
                  expires_at INTEGER NOT NULL,
                  consumed_at INTEGER
@@ -590,7 +651,7 @@ mod tests {
         NewInvite {
             secret,
             user_id: user,
-            display_name: "phone",
+            node_name: "phone",
             expires_at: 1_000 + 24 * 3600,
         }
     }

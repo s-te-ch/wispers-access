@@ -3,16 +3,17 @@ mod guest_api;
 mod http;
 mod initialization;
 mod ipc;
+mod iroh_transport;
 mod logging;
 mod protocol;
 mod serving;
 mod status;
 mod storage;
 mod wcbe;
+mod wispers_connect_transport;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use wispers_access_wire as wire;
 
 #[derive(Parser)]
 #[command(name = "waserver", version)]
@@ -29,11 +30,13 @@ enum Command {
     /// the backend.
     Init {
         /// Wispers Connect API key (can also be set via WC_API_KEY env var).
+        /// Required for the wispers-connect transport; unused on iroh.
         #[arg(long, env = "WC_API_KEY", hide_env_values = true)]
-        api_key: String,
+        api_key: Option<String>,
         /// Base URL of a custom Wispers Connect backend (e.g.
         /// `https://myhub.example.com`). Omit to use the managed backend. Must
         /// be https. Pinned into the circle and carried in its invite codes.
+        /// Wispers Connect only.
         #[arg(long, env = "WC_BACKEND")]
         backend: Option<String>,
         /// Transport every member of this circle uses.
@@ -105,8 +108,8 @@ enum Command {
     Revoke {
         /// Name of the circle.
         circle: String,
-        /// Node number whose access to revoke.
-        node_number: i32,
+        /// The node's number in `waserver status`.
+        number: i64,
     },
 }
 
@@ -154,8 +157,14 @@ async fn async_main(command: Command) -> Result<()> {
                 config::TransportKind::WispersConnect => config::TransportConfig::WispersConnect {
                     backend: normalize_backend(backend.as_deref())?,
                 },
+                config::TransportKind::Iroh => {
+                    if normalize_backend(backend.as_deref())?.is_some() {
+                        anyhow::bail!("--backend applies to the wispers-connect transport only");
+                    }
+                    config::TransportConfig::Iroh {}
+                }
             };
-            initialization::up(&api_key, &circle, &display_name, &transport).await
+            initialization::up(api_key.as_deref(), &circle, &display_name, &transport).await
         }
         Command::Deinit { circle } => initialization::down(&circle).await,
         Command::Serve { circle } => {
@@ -176,10 +185,7 @@ async fn async_main(command: Command) -> Result<()> {
             user_id,
             png,
         } => invite(&circle, &node_name, &user_id, png.as_deref()).await,
-        Command::Revoke {
-            circle,
-            node_number,
-        } => revoke(&circle, node_number).await,
+        Command::Revoke { circle, number } => revoke(&circle, number).await,
     }
 }
 
@@ -340,41 +346,20 @@ async fn invite(
     user_id: &str,
     png: Option<&std::path::Path>,
 ) -> Result<()> {
+    // The daemon mints invites on every transport: an invite is only good
+    // once it can be redeemed there.
     let Ok(mut client) = ipc::Client::connect(circle).await else {
         anyhow::bail!("cannot connect to server for circle {}", circle);
     };
-    // The circle's pinned backend (if any) gets baked into the invite so the
-    // guest client knows which hub to join.
-    let config::TransportConfig::WispersConnect { backend } =
-        storage::CircleDir::new(circle)?.load_config()?.transport;
     let req = ipc::Request::GetInvite {
         node_name: node_name.to_owned(),
         user_id: user_id.to_owned(),
     };
-    match client.request(&req).await {
+    let code = match client.request(&req).await {
         Ok(ipc::Response::Success {
             data: ipc::ResponseData::Invite(invite),
             ..
-        }) => {
-            let code = wire::Invite::WispersConnect {
-                registration_token: invite.registration_token,
-                activation_code: invite.activation_code,
-                backend,
-            }
-            .to_code();
-            let qr = qrcode::QrCode::new(code.as_bytes()).context("cannot build QR code")?;
-            println!("Invite code (valid for 24 hours):\n\n  {}\n", code);
-            println!("{}", render_qr_ansi(&qr));
-            if let Some(path) = png {
-                let img = qr
-                    .render::<image::Luma<u8>>()
-                    .min_dimensions(360, 360)
-                    .build();
-                img.save(path)
-                    .with_context(|| format!("cannot write {}", path.display()))?;
-                println!("QR code written to {}", path.display());
-            }
-        }
+        }) => invite.code,
         Ok(ipc::Response::Success { .. }) => {
             anyhow::bail!("unexpected response from server");
         }
@@ -384,6 +369,18 @@ async fn invite(
         Err(e) => {
             anyhow::bail!("error sending command to server: {}", e);
         }
+    };
+    let qr = qrcode::QrCode::new(code.as_bytes()).context("cannot build QR code")?;
+    println!("Invite code (valid for 24 hours):\n\n  {}\n", code);
+    println!("{}", render_qr_ansi(&qr));
+    if let Some(path) = png {
+        let img = qr
+            .render::<image::Luma<u8>>()
+            .min_dimensions(360, 360)
+            .build();
+        img.save(path)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        println!("QR code written to {}", path.display());
     }
     Ok(())
 }
@@ -450,54 +447,17 @@ fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
     Ok(Some(trimmed.to_owned()))
 }
 
-async fn revoke(circle: &str, node_number: i32) -> Result<()> {
-    use wispers_connect as wc;
-
-    if node_number == 1 {
-        anyhow::bail!("Node 1 is the server and cannot be revoked");
-    }
-
-    // Restore the node.
+/// Revokes a guest's access. Where the roster lives, and whether a daemon
+/// is needed, is the transport's business.
+async fn revoke(circle: &str, number: i64) -> Result<()> {
     let dir = storage::CircleDir::new(circle)?;
-    let cfg = dir.load_config()?;
-    let state = dir.open_state()?;
-    let Some(wcs) = state.wispers_connect_state()? else {
-        anyhow::bail!("Circle {} has no Wispers Connect credentials", circle);
-    };
-    let config::TransportConfig::WispersConnect { backend } = &cfg.transport;
-    let node_storage = wc::NodeStorage::new(state);
-    if let Some(backend) = backend.as_deref() {
-        node_storage.override_hub_addr(backend);
+    match dir.load_config()?.transport {
+        config::TransportConfig::WispersConnect { backend } => {
+            let node_number = i32::try_from(number).context("not a node number")?;
+            wispers_connect_transport::revoke(circle, dir, backend, node_number).await
+        }
+        config::TransportConfig::Iroh {} => iroh_transport::revoke(circle, dir, number).await,
     }
-    let node = node_storage.restore_or_init_node().await?;
-
-    // Check group info for the node first, revoke if activated, and deal with
-    // other states accordingly.
-    let info = node.group_info().await?;
-    match info.nodes.iter().find(|n| n.node_number == node_number) {
-        Some(n) => match n.state {
-            wc::NodeState::Activated => {
-                // The standard case. The node is both activated and registered.
-                node.revoke_node(node_number).await?;
-            }
-            wc::NodeState::Revoked => {
-                // The node was already revoked but not yet deregistered. Try again below.
-            }
-            // TODO: Registered-but-never-activated could technically happen, so
-            // we should have a cleaner solution than the one below.
-            _ => anyhow::bail!("node {node_number} has never been activated."),
-        },
-        None => anyhow::bail!("Node {} is unknown", node_number),
-    }
-
-    // At this point we can be sure the node is revoked, so we proceed to
-    // deregistering it.
-    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref()));
-    client
-        .delete_node(&wcs.connectivity_group_id, node_number)
-        .await?;
-    println!("Node {node_number} is now revoked and deregistered");
-    Ok(())
 }
 
 #[cfg(test)]
@@ -537,19 +497,18 @@ mod tests {
             }
             _ => panic!("parsed the wrong command"),
         }
-        assert!(
-            Cli::try_parse_from([
-                "waserver",
-                "init",
-                "--api-key",
-                "k",
-                "--transport",
-                "iroh",
-                "f",
-                "F"
-            ])
-            .is_err()
-        );
+        match Cli::try_parse_from(["waserver", "init", "--transport", "iroh", "f", "F"])
+            .unwrap()
+            .command
+        {
+            Command::Init {
+                api_key, transport, ..
+            } => {
+                assert_eq!(api_key, None);
+                assert_eq!(transport, config::TransportKind::Iroh);
+            }
+            _ => panic!("parsed the wrong command"),
+        }
         assert!(
             Cli::try_parse_from([
                 "waserver",
