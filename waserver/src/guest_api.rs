@@ -59,6 +59,15 @@ async fn route(
         "guest API request"
     );
     let response = match (req.method(), req.uri().path()) {
+        // A key that is not a guest yet is authenticated but not authorised:
+        // activation is all it may do, and nothing about the circle leaks
+        // before that.
+        (method, path)
+            if peer.user_id.is_none()
+                && (method, path) != (&Method::POST, wire::ACTIVATION_PATH) =>
+        {
+            error(StatusCode::FORBIDDEN, "not-activated")
+        }
         (&Method::GET, wire::CIRCLE_PATH) => get_circle(&req, &ctx.config),
         (&Method::GET, wire::EVENTS_PATH) => get_events(&ctx.events),
         (&Method::POST, wire::ACTIVATION_PATH) => {

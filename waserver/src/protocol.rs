@@ -551,8 +551,8 @@ upstream = ":1"
             user_id: None,
         };
 
-        // A CTRL stream is served, but only the activation route exists:
-        // nothing about the circle leaks to a key that is not a guest.
+        // A CTRL stream is served, but only activation is allowed: nothing
+        // about the circle leaks to a key that is not a guest.
         let (server, mut client) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(handle(server, ctx.clone(), peer.clone()));
         let request = format!("\x01GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
@@ -561,7 +561,10 @@ upstream = ":1"
         let mut response = Vec::new();
         client.read_to_end(&mut response).await.unwrap();
         assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Served);
-        assert!(split_response(&response).0.starts_with("http/1.1 404"));
+        let (status, body) = split_response(&response);
+        assert!(status.starts_with("http/1.1 403"), "{status}");
+        let err: wire::ApiError = serde_json::from_slice(&body).unwrap();
+        assert_eq!(err.error, "not-activated");
 
         // A DATA stream is refused unread.
         let (server, mut client) = tokio::io::duplex(1024);
