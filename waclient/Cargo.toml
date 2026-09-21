@@ -21,6 +21,7 @@ tokio = { version = "1", features = ["io-util", "macros"] }
 uuid = { version = "1", features = ["v4"] }
 wispers-access-wire = { path = "../wire" }
 wispers-connect = "0.14.0"
+iroh = "1.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

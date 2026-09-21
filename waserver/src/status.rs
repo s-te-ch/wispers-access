@@ -181,6 +181,14 @@ pub(crate) struct GuestStatus {
     /// Does the guest have a live P2P connection to this server right now?
     pub(crate) connected_to_server: Option<bool>,
     pub(crate) connected_since: Option<String>, // RFC 3339
+    /// The host revoked the guest; its key is never served again. A guest
+    /// that left is simply gone. iroh only: the hub's integrator API does
+    /// not expose the roster's node state, and a revoked node is
+    /// deregistered there anyway.
+    pub(crate) revoked: bool,
+    /// When, where known (iroh; the hub's roster carries no time).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) revoked_at: Option<String>, // RFC 3339
 }
 
 //-- Gathering -----------------------------------------------------------------
@@ -392,7 +400,7 @@ fn load_circle(name: &str) -> Result<Loaded> {
 /// Overlay the server's live view onto the guest list: while the daemon
 /// runs it knows authoritatively which guests are connected to it.
 fn apply_live_connections(guests: &mut [GuestStatus], connected: &[ipc::GuestData]) {
-    for g in guests.iter_mut() {
+    for g in guests.iter_mut().filter(|g| !g.revoked) {
         match connected.iter().find(|c| c.node_number == g.node_number) {
             Some(c) => {
                 g.connected_to_server = Some(true);
@@ -697,13 +705,15 @@ fn print_circle_details(c: &CircleStatus) {
                         None => "-".to_owned(),
                     }
                 };
-                let status = match g.connected_to_server {
-                    Some(true) => match &g.connected_since {
+                let status = match (g.revoked, &g.revoked_at, g.connected_to_server) {
+                    (true, Some(at), _) => format!("revoked ({})", fmt_ago(at)),
+                    (true, None, _) => "revoked".to_owned(),
+                    (false, _, Some(true)) => match &g.connected_since {
                         Some(since) => format!("connected ({})", fmt_age(since)),
                         None => "connected".to_owned(),
                     },
-                    Some(false) => "-".to_owned(),
-                    None => "?".to_owned(),
+                    (false, _, Some(false)) => "-".to_owned(),
+                    (false, _, None) => "?".to_owned(),
                 };
                 writeln!(
                     &mut tw,
@@ -989,6 +999,8 @@ mod tests {
             last_seen_at: None,
             connected_to_server: None,
             connected_since: None,
+            revoked: false,
+            revoked_at: None,
         };
         let mut guests = vec![guest(2), guest(3)];
         let connected = vec![ipc::GuestData {

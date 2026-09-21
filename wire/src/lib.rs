@@ -29,6 +29,24 @@ pub enum Transport {
     Tailscale,
 }
 
+/// Parses the full name, as in `circle.toml`.
+impl std::str::FromStr for Transport {
+    type Err = UnknownTransport;
+
+    fn from_str(name: &str) -> Result<Self, Self::Err> {
+        match name {
+            "wispers-connect" => Ok(Transport::WispersConnect),
+            "iroh" => Ok(Transport::Iroh),
+            "tailscale" => Ok(Transport::Tailscale),
+            other => Err(UnknownTransport(other.to_owned())),
+        }
+    }
+}
+
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+#[error("unknown transport {0:?}")]
+pub struct UnknownTransport(String);
+
 impl Transport {
     /// The short tag in a version-1 invite code.
     pub fn tag(self) -> &'static str {
@@ -353,6 +371,10 @@ pub const EVENT_CIRCLE_CHANGED: &str = "circle-changed";
 /// then closed with [`CloseCode::Unknown`], which is what the key still is.
 pub const ACTIVATION_PATH: &str = "/v1/activation";
 
+/// `DELETE /v1/guest` (iroh only): the calling guest leaves the circle. The
+/// server forgets itand answers 204.
+pub const GUEST_PATH: &str = "/v1/guest";
+
 /// Body of `POST /v1/activation`.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Activation {
@@ -645,6 +667,18 @@ mod tests {
             activation_code: code.into(),
             backend: backend.map(str::to_owned),
         }
+    }
+
+    #[test]
+    fn transport_names_round_trip() {
+        for t in [
+            Transport::WispersConnect,
+            Transport::Iroh,
+            Transport::Tailscale,
+        ] {
+            assert_eq!(t.as_str().parse::<Transport>(), Ok(t));
+        }
+        assert!("hub".parse::<Transport>().is_err());
     }
 
     #[test]

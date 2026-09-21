@@ -1,6 +1,8 @@
 mod circles;
+mod iroh_transport;
 mod storage;
 mod transports;
+mod wispers_connect_transport;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -15,9 +17,8 @@ use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use transports::{TerminalState, TransportError, WispersConnect};
+use transports::{TerminalState, TransportError};
 use wispers_access_wire as wire;
-use wispers_connect as wc;
 
 /// Body type used in responses we send back to the peer. Boxed so we can return
 /// either the upstream's streamed body or a locally-generated error body.
@@ -80,75 +81,27 @@ async fn async_main(command: Command) -> Result<()> {
 
 async fn join(invite_code: &str) -> Result<()> {
     let invite = wire::Invite::parse(invite_code)?;
-    let wire::Invite::WispersConnect {
-        registration_token,
-        activation_code,
-        backend,
-    } = invite
-    else {
-        anyhow::bail!(
-            "{} invites are not supported by this waclient yet",
-            invite.transport().as_str()
-        );
-    };
-
-    // Create a new DB row.
     let db = storage::DB::new()?;
     let row = db.new_row()?;
-
-    // Register the Wispers node. If the invite named a self-hosted backend,
-    // use override_hub_addr().
-    let ns = wc::NodeStorage::new(row.clone());
-    if let Some(backend) = backend.as_deref() {
-        println!("Using Wispers Connect backend: {}", backend);
-        ns.override_hub_addr(backend);
+    // The row is the circle's; the transport writes its part of it and the
+    // server's answer fills the rest. A failed join leaves no row behind.
+    let result = async {
+        let info = transports::join(invite, &row).await?;
+        record_join(&row, &info)
     }
-    let mut node = ns.restore_or_init_node().await?;
-    println!("Registering Wispers node...");
-    node.register(&registration_token).await?;
-
-    // From here on the hub holds a registration that consumes quota, so
-    // a failed join must log the node out again (revoke + deregister) rather
-    // than orphan the registration. This is best-effort.
-    if let Err(e) = finish_join(&mut node, &row, &activation_code, backend.as_deref()).await {
-        match node.logout().await {
-            Ok(()) => eprintln!("Join failed; deregistered from the hub again."),
-            Err(le) => eprintln!("Join failed; could not deregister from the hub either ({le})."),
-        }
+    .await;
+    if result.is_err() {
         let _ = row.delete_row();
-        return Err(e);
     }
-    Ok(())
+    result
 }
 
-/// The steps of `join` after registration: activation, asking the server
-/// what the circle is, and local bookkeeping. Any failure here makes `join`
-/// roll the registration back.
-async fn finish_join(
-    node: &mut wc::Node,
-    row: &storage::Row,
-    activation_code: &str,
-    backend: Option<&str>,
-) -> Result<()> {
-    println!("Activating Wispers node...");
-    node.activate(activation_code).await?;
-
-    println!("Fetching the circle from the server...");
-    // Straight on the node rather than through a transport: `join` is
-    // Wispers Connect specific anyway, and keeps the node for a rollback.
-    let conn = node
-        .connect_quic(1)
-        .await
-        .context("connecting to the Wispers Access server")?;
-    let stream = conn.open_stream().await.context("opening a stream")?;
-    let info = circles::fetch_info(Box::new(stream), None)
-        .await?
-        .context("server answered 304 to an unconditional request")?;
-
-    // Determine display & host names, deduping the host name if necessary.
+/// The local bookkeeping of any `join`, once the server has answered with
+/// the circle: names, the share list, and marking the row complete so it
+/// survives the next start.
+fn record_join(row: &storage::Row, info: &wire::CircleInfo) -> Result<()> {
     let circle_id = row.circle_id()?;
-    row.write_backend(backend)?;
-    row.write_circle_info(&info)?;
+    row.write_circle_info(info)?;
     let display_name = if info.name.is_empty() {
         circle_id.to_string()
     } else {
@@ -157,8 +110,6 @@ async fn finish_join(
     row.write_display_name(&display_name)?;
     let hostname = host_slug(&display_name).unwrap_or_else(|| circle_id.to_string());
     let hostname = row.write_deduped_hostname(&hostname)?;
-
-    // Mark the row complete, so it doesn't get cleaned up at next start.
     row.mark_complete()?;
 
     println!(
@@ -235,21 +186,7 @@ async fn remove(circle: &str) -> Result<()> {
         .find_row(circle)?
         .with_context(|| format!("no circle '{}' (see 'waclient list')", circle))?;
 
-    // Deregistering is best-effort: for a removed circle the hub already
-    // rejects us, and for a revoked one logout cleanly retires the zombie
-    // registration.
-    let backend = row.read_backend()?;
-    let ns = wc::NodeStorage::new(row.clone());
-    if let Some(backend) = backend.as_deref() {
-        ns.override_hub_addr(backend);
-    }
-    match ns.restore_or_init_node().await {
-        Ok(mut node) => match node.logout().await {
-            Ok(()) => println!("Deregistered from the hub."),
-            Err(e) => println!("Could not deregister from the hub ({e}); removing locally anyway."),
-        },
-        Err(e) => println!("Could not restore the node ({e}); removing locally anyway."),
-    }
+    transports::leave(&row).await?;
     row.delete_row()?;
     println!("Circle '{}' removed from this device.", circle);
     Ok(())
@@ -285,10 +222,9 @@ async fn serve(port: u16) -> Result<()> {
             registry.insert_dead(label, circle_id, state);
             continue;
         }
-        let backend = row.read_backend()?;
-        match WispersConnect::restore(row.clone(), backend.as_deref()).await {
+        match transports::restore(row.clone()).await {
             Ok(transport) => {
-                let circle = Circle::new(label, circle_id, display_name, row, Box::new(transport));
+                let circle = Circle::new(label, circle_id, display_name, row, transport);
                 println!(
                     "  {} ({}) via {}:",
                     circle.display_name(),

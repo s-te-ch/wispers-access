@@ -1,13 +1,14 @@
-//! Connectivity to waservers.
+//! Generic connectivity to the waserver. See *_transport for concrete
+//! implementations for particular transports.
 
+use crate::iroh_transport;
 use crate::storage;
+use crate::wispers_connect_transport;
 use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::OnceCell;
-use wispers_connect as wc;
+use wispers_access_wire as wire;
 
 /// A bidirectional stream to the server, ready for the wire protocol.
 pub type Stream = Box<dyn Bidirectional>;
@@ -19,6 +20,56 @@ pub trait Bidirectional: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> Bidirectional for T {}
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
+
+/// Joins the circle the invite is for, selecting the appropriate transport.
+pub async fn join(invite: wire::Invite, row: &storage::Row) -> Result<wire::CircleInfo> {
+    match invite {
+        wire::Invite::WispersConnect {
+            registration_token,
+            activation_code,
+            backend,
+        } => {
+            wispers_connect_transport::join(
+                row,
+                &registration_token,
+                &activation_code,
+                backend.as_deref(),
+            )
+            .await
+        }
+        wire::Invite::Iroh {
+            endpoint_id,
+            secret,
+        } => iroh_transport::join(row, endpoint_id, &secret).await,
+    }
+}
+
+/// Restores the transport for a circle's database row.
+pub async fn restore(row: storage::Row) -> Result<Box<dyn Transport>, TransportError> {
+    match row
+        .read_transport_kind()
+        .map_err(TransportError::Transient)?
+    {
+        wire::Transport::Iroh => Ok(Box::new(iroh_transport::Iroh::restore(&row).await?)),
+        wire::Transport::WispersConnect => Ok(Box::new(
+            wispers_connect_transport::WispersConnect::restore(row).await?,
+        )),
+        wire::Transport::Tailscale => Err(TransportError::Transient(anyhow::anyhow!(
+            "tailscale circles are not supported by this waclient"
+        ))),
+    }
+}
+
+/// Releases whatever the transport holds beyond this device before the
+/// circle is removed. Best effort: the row goes either way.
+pub async fn leave(row: &storage::Row) -> Result<()> {
+    match row.read_transport_kind()? {
+        wire::Transport::Iroh => iroh_transport::leave(row).await,
+        wire::Transport::WispersConnect => wispers_connect_transport::leave(row).await,
+        wire::Transport::Tailscale => {}
+    }
+    Ok(())
+}
 
 /// One implementation per transport. Object-safe, so a registry can hold
 /// circles on different transports; hence the boxed futures.
@@ -71,133 +122,6 @@ impl TerminalState {
     }
 }
 
-//-- Wispers Connect -----------------------------------------------------------
-
-/// The Wispers Connect transport: a QUIC connection to the circle's server
-/// node (always node 1), brokered by the hub.
-pub struct WispersConnect {
-    node: wc::Node,
-    /// The live connection, established on first use. Replaced with a fresh
-    /// cell when a stream fails to open on it, so the next caller redials.
-    conn: Mutex<Arc<OnceCell<Arc<wc::QuicConnection>>>>,
-}
-
-impl WispersConnect {
-    /// Restores the node from its stored state. A terminal error here means
-    /// the hub has rejected this node for good.
-    pub async fn restore(row: storage::Row, backend: Option<&str>) -> Result<Self, TransportError> {
-        let ns = wc::NodeStorage::new(row);
-        if let Some(backend) = backend {
-            ns.override_hub_addr(backend);
-        }
-        let node = match ns.restore_or_init_node().await {
-            Ok(node) => node,
-            Err(e) => {
-                return Err(match terminal_from_node_err(&e) {
-                    Some(state) => TransportError::Terminal(state),
-                    None => TransportError::Transient(e.into()),
-                });
-            }
-        };
-        if matches!(node.state(), wc::NodeState::Revoked) {
-            return Err(TransportError::Terminal(TerminalState::Revoked));
-        }
-        Ok(Self::from_node(node))
-    }
-
-    /// For a node that was just activated, as in `join`.
-    pub fn from_node(node: wc::Node) -> Self {
-        Self {
-            node,
-            conn: Mutex::new(Arc::new(OnceCell::new())),
-        }
-    }
-
-    async fn try_open_stream(&self) -> Result<Stream, TransportError> {
-        let cell = self.conn.lock().expect("unpoisoned").clone();
-        let conn = match cell
-            .get_or_try_init(|| async {
-                eprintln!("establishing QUIC connection");
-                self.node.connect_quic(1).await.map(Arc::new)
-            })
-            .await
-        {
-            Ok(conn) => conn.clone(),
-            Err(e) => {
-                return Err(match terminal_from_p2p_err(&e) {
-                    Some(state) => TransportError::Terminal(state),
-                    None => TransportError::Transient(e.into()),
-                });
-            }
-        };
-        match conn.open_stream().await {
-            Ok(stream) => Ok(Box::new(stream)),
-            Err(e) => {
-                // The connection has broken: evict it so the next attempt
-                // redials. Several tasks may race here, so only replace the
-                // cell that failed.
-                eprintln!("conn.open_stream failed, evicting connection: {:#}", e);
-                let mut current = self.conn.lock().expect("unpoisoned");
-                if Arc::ptr_eq(&*current, &cell) {
-                    *current = Arc::new(OnceCell::new());
-                }
-                Err(TransportError::Transient(e.into()))
-            }
-        }
-    }
-}
-
-impl Transport for WispersConnect {
-    fn describe(&self) -> String {
-        format!(
-            "Wispers Connect group {}, node {}",
-            self.node
-                .connectivity_group_id()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "?".to_owned()),
-            self.node
-                .node_number()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "?".to_owned())
-        )
-    }
-
-    fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>> {
-        Box::pin(async {
-            // One retry covers a connection that died and had to be
-            // re-established. A terminal rejection is not retried: it can
-            // only repeat.
-            match self.try_open_stream().await {
-                Err(TransportError::Transient(e)) => {
-                    eprintln!("open_stream attempt 1 failed, retrying once: {:#}", e);
-                    self.try_open_stream().await
-                }
-                other => other,
-            }
-        })
-    }
-}
-
-fn terminal_from_node_err(e: &wc::NodeStateError) -> Option<TerminalState> {
-    if e.is_unauthenticated() || e.is_not_found() {
-        return Some(TerminalState::Removed);
-    }
-    if e.is_revoked() {
-        return Some(TerminalState::Revoked);
-    }
-    None
-}
-
-fn terminal_from_p2p_err(e: &wc::P2pError) -> Option<TerminalState> {
-    match e {
-        wc::P2pError::Revoked => Some(TerminalState::Revoked),
-        wc::P2pError::Hub(h) if h.is_unauthenticated() || h.is_not_found() => {
-            Some(TerminalState::Removed)
-        }
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -208,14 +132,5 @@ mod tests {
             assert_eq!(TerminalState::parse(state.as_str()), Some(state));
         }
         assert_eq!(TerminalState::parse("gone"), None);
-    }
-
-    #[test]
-    fn p2p_revocation_is_terminal() {
-        assert_eq!(
-            terminal_from_p2p_err(&wc::P2pError::Revoked),
-            Some(TerminalState::Revoked)
-        );
-        assert_eq!(terminal_from_p2p_err(&wc::P2pError::NotActivated), None);
     }
 }

@@ -88,7 +88,7 @@ pub enum ExitReason {
 
 /// How long the exit waits for the IPC server to answer the `stop` that
 /// ended the loop.
-const IPC_REPLY_GRACE: Duration = Duration::from_secs(2);
+const IPC_REPLY_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct ServingHandle {

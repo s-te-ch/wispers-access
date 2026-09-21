@@ -439,6 +439,10 @@ fn to_guests(group: &wcbe::GroupDetail) -> Vec<GuestStatus> {
             last_seen_at: n.last_seen_at.clone(),
             connected_to_server: None,
             connected_since: None,
+            // waserver revokes *and* removes nodes, so a revoked node never
+            // shows up in the roster.
+            revoked: false,
+            revoked_at: None,
         })
         .collect();
     guests.sort_by_key(|g| g.node_number);

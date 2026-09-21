@@ -534,6 +534,24 @@ upstream = ":1"
         let (status, _) = split_response(&raw);
         assert!(status.starts_with("http/1.1 400"), "{status}");
 
+        // The guest can leave: the server forgets it.
+        let raw = exchange_as(
+            ctx.clone(),
+            Peer {
+                peer_id: "peer-a".to_owned(),
+                user_id: Some("alice".to_owned()),
+            },
+            format!(
+                "\x01DELETE {} HTTP/1.1\r\nHost: w\r\n\r\n",
+                wire::GUEST_PATH
+            )
+            .into_bytes(),
+        )
+        .await;
+        let (status, _) = split_response(&raw);
+        assert!(status.starts_with("http/1.1 204"), "{status}");
+        assert!(db.guest_by_peer("peer-a").unwrap().is_none());
+
         // Another key presenting the consumed secret is refused; the
         // route itself exists for every peer.
         let raw = exchange(ctx, None, activation_request(&secret)).await;
