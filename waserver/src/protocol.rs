@@ -346,7 +346,7 @@ upstream = ":1"
         let ctx = context_with_upstream("127.0.0.1:1");
         let hash = ConfigHash(ctx.config.config_hash());
         let request = format!("GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
-        let response = exchange(ctx, None, ctrl_stream(&request)).await;
+        let response = exchange(ctx, Some("bob"), ctrl_stream(&request)).await;
         let (head, body) = split_response(&response);
         assert!(head.starts_with("http/1.1 200"), "{head}");
         assert!(head.contains("content-type: application/json"), "{head}");
@@ -373,7 +373,7 @@ upstream = ":1"
             wire::CIRCLE_PATH,
             etag
         );
-        let response = exchange(ctx, None, ctrl_stream(&request)).await;
+        let response = exchange(ctx, Some("bob"), ctrl_stream(&request)).await;
         let (head, body) = split_response(&response);
         assert!(head.starts_with("http/1.1 304"), "{head}");
         assert!(head.contains(&format!("etag: {etag}")), "{head}");
@@ -385,13 +385,13 @@ upstream = ":1"
         let ctx = context_with_upstream("127.0.0.1:1");
         let response = exchange(
             ctx.clone(),
-            None,
+            Some("bob"),
             ctrl_stream("GET /v1/nope HTTP/1.1\r\nHost: w\r\n\r\n"),
         )
         .await;
         assert!(split_response(&response).0.starts_with("http/1.1 404"));
         let request = format!("DELETE {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
-        let response = exchange(ctx, None, ctrl_stream(&request)).await;
+        let response = exchange(ctx, Some("bob"), ctrl_stream(&request)).await;
         assert!(split_response(&response).0.starts_with("http/1.1 405"));
     }
 
@@ -551,7 +551,8 @@ upstream = ":1"
             user_id: None,
         };
 
-        // A CTRL stream is served like any other.
+        // A CTRL stream is served, but only the activation route exists:
+        // nothing about the circle leaks to a key that is not a guest.
         let (server, mut client) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(handle(server, ctx.clone(), peer.clone()));
         let request = format!("\x01GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
@@ -560,7 +561,7 @@ upstream = ":1"
         let mut response = Vec::new();
         client.read_to_end(&mut response).await.unwrap();
         assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Served);
-        assert!(split_response(&response).0.starts_with("http/1.1 200"));
+        assert!(split_response(&response).0.starts_with("http/1.1 404"));
 
         // A DATA stream is refused unread.
         let (server, mut client) = tokio::io::duplex(1024);
