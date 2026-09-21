@@ -173,7 +173,10 @@ async fn async_main(command: Command) -> Result<()> {
         }
         Command::Start { circle } => {
             let _log = logging::init_background(&circle)?;
-            serving::serve(&circle).await
+            serving::serve(&circle)
+                .await
+                // At this point, stderr is gone, so we write the error to the log.
+                .inspect_err(|e| tracing::error!(error = format!("{e:#}"), "server failed"))
         }
         Command::Stop { circle } => stop(&circle).await,
         Command::Reload { circle } => reload(&circle).await,
