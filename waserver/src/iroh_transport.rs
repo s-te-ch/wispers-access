@@ -300,21 +300,6 @@ pub fn init(dir: &storage::CircleDir, config_text: &str) -> Result<()> {
     Ok(())
 }
 
-/// Mints an invite with the daemon stopped: the key is read from the state
-/// database, the invite recorded there.
-pub fn invite_offline(
-    dir: &storage::CircleDir,
-    node_name: &str,
-    user_id: &str,
-) -> Result<wire::Invite> {
-    let state = dir.open_state()?;
-    let Some(key) = state.iroh_secret()? else {
-        anyhow::bail!("circle has no iroh key (init incomplete?)");
-    };
-    let endpoint_id = iroh::SecretKey::from_bytes(&key).public();
-    mint_invite(&state, endpoint_id, node_name, user_id)
-}
-
 /// Through the daemon when it runs, so the guest's live connections get the
 /// `revoked` close; straight into the state database otherwise, and the
 /// guest learns on its next dial.

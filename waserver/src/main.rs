@@ -346,40 +346,29 @@ async fn invite(
     user_id: &str,
     png: Option<&std::path::Path>,
 ) -> Result<()> {
-    let dir = storage::CircleDir::new(circle)?;
-    let transport = dir.load_config()?.transport;
-    // The daemon mints invites. Without one, iroh can still mint offline;
-    // Wispers Connect needs the hub session.
-    let code = match ipc::Client::connect(circle).await {
-        Ok(mut client) => {
-            let req = ipc::Request::GetInvite {
-                node_name: node_name.to_owned(),
-                user_id: user_id.to_owned(),
-            };
-            match client.request(&req).await {
-                Ok(ipc::Response::Success {
-                    data: ipc::ResponseData::Invite(invite),
-                    ..
-                }) => invite.code,
-                Ok(ipc::Response::Success { .. }) => {
-                    anyhow::bail!("unexpected response from server");
-                }
-                Ok(ipc::Response::Error { error, .. }) => {
-                    anyhow::bail!("error generating invite: {}", error);
-                }
-                Err(e) => {
-                    anyhow::bail!("error sending command to server: {}", e);
-                }
-            }
+    // The daemon mints invites on every transport: an invite is only good
+    // once it can be redeemed there.
+    let Ok(mut client) = ipc::Client::connect(circle).await else {
+        anyhow::bail!("cannot connect to server for circle {}", circle);
+    };
+    let req = ipc::Request::GetInvite {
+        node_name: node_name.to_owned(),
+        user_id: user_id.to_owned(),
+    };
+    let code = match client.request(&req).await {
+        Ok(ipc::Response::Success {
+            data: ipc::ResponseData::Invite(invite),
+            ..
+        }) => invite.code,
+        Ok(ipc::Response::Success { .. }) => {
+            anyhow::bail!("unexpected response from server");
         }
-        Err(_) => match transport {
-            config::TransportConfig::Iroh {} => {
-                iroh_transport::invite_offline(&dir, node_name, user_id)?.to_code()
-            }
-            config::TransportConfig::WispersConnect { .. } => {
-                anyhow::bail!("cannot connect to server for circle {}", circle);
-            }
-        },
+        Ok(ipc::Response::Error { error, .. }) => {
+            anyhow::bail!("error generating invite: {}", error);
+        }
+        Err(e) => {
+            anyhow::bail!("error sending command to server: {}", e);
+        }
     };
     let qr = qrcode::QrCode::new(code.as_bytes()).context("cannot build QR code")?;
     println!("Invite code (valid for 24 hours):\n\n  {}\n", code);
