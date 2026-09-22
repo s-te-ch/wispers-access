@@ -1,9 +1,8 @@
 //! The REST API presented to guest nodes, made accessible over CTRL streams.
 //!
-//! Every stream carries one request. `GET /v1/events` is the long-lived
-//! one: it stays open and streams server-sent events until the guest goes
-//! away. `POST /v1/activation` is how a guest on a transport where waserver
-//! is the authority (iroh) binds its key to an invite.
+//! Every stream carries one request and one response. `GET /v1/events` is the
+//! exception: after the request, it stays open and streams server-sent events
+//! until the guest node goes away.
 
 use crate::config::ShareConfig;
 use crate::protocol::{Peer, StreamContext};
@@ -27,26 +26,27 @@ use wispers_access_wire as wire;
 
 type BoxedBody = BoxBody<Bytes, std::io::Error>;
 
-/// Serves one CTRL stream against the share as of `ctx`.
+/// Serves one CTRL stream, for the share ID found in `ctx`.
 pub async fn serve<S>(io: S, ctx: StreamContext, peer: Peer) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let service = hyper::service::service_fn(move |req| route(req, ctx.clone(), peer.clone()));
+    let service = hyper::service::service_fn(
+        move |req| route(req, ctx.clone(), peer.clone()),
+    );
     let served = http1::Builder::new()
-        // One request per stream: the guest may FIN its side right after
-        // the request and wait for the response on the other half.
+        // The guest node may FIN right after the request and wait for the
+        // response on the other half.
         .half_close(true)
         .serve_connection(TokioIo::new(io), service)
         .await;
-    // Whatever went wrong here, the guest caused it or went away (an events
-    // stream ends with a failed write once the guest is gone). Just log it.
     if let Err(e) = served {
         debug!(error = %e, "guest API stream ended with an error");
     }
     Ok(())
 }
 
+/// Route the request to the correct handler.
 async fn route(
     req: Request<Incoming>,
     ctx: StreamContext,
@@ -58,21 +58,18 @@ async fn route(
         user_id = peer.user_id.as_deref().unwrap_or("-"),
         "guest API request"
     );
+
+    // Handle unauthorised peers first. They're only allowed to activate.
+    if !(peer.is_authorized() || req.uri().path() == wire::ACTIVATION_PATH) {
+        error(StatusCode::FORBIDDEN, "not-activated")
+    }
+
     let response = match (req.method(), req.uri().path()) {
-        // A key that is not a guest yet is authenticated but not authorised:
-        // activation is all it may do, and nothing about the share leaks
-        // before that.
-        (method, path)
-            if peer.user_id.is_none()
-                && (method, path) != (&Method::POST, wire::ACTIVATION_PATH) =>
-        {
-            error(StatusCode::FORBIDDEN, "not-activated")
-        }
         (&Method::GET, wire::SHARE_PATH) => get_share(&req, &ctx.config),
         (&Method::GET, wire::EVENTS_PATH) => get_events(&ctx.events),
-        (&Method::POST, wire::ACTIVATION_PATH) => {
-            post_activation(req, &ctx.db, &peer.peer_id, &ctx.config).await
-        }
+        (&Method::POST, wire::ACTIVATION_PATH) => post_activation(
+            req, &ctx.db, &peer.peer_id, &ctx.config,
+        ).await,
         (&Method::DELETE, wire::GUEST_PATH) => delete_guest(&ctx.db, &peer.peer_id),
         (_, wire::SHARE_PATH | wire::EVENTS_PATH | wire::ACTIVATION_PATH | wire::GUEST_PATH) => {
             error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
@@ -82,8 +79,9 @@ async fn route(
     Ok(response)
 }
 
-/// The share as the guest may know it, with the config hash as a strong
-/// entity tag so a guest that is up to date gets a 304 and no body.
+/// The share config, stripped down to what a guest node cares about, with the
+/// config hash as a strong entity tag so a guest that is up to date gets a 304
+/// and no body.
 fn get_share(req: &Request<Incoming>, config: &ShareConfig) -> Response<BoxedBody> {
     let hash = ConfigHash(config.config_hash());
     let up_to_date = req
@@ -108,7 +106,8 @@ fn share_response(
     builder: hyper::http::response::Builder,
     config: &ShareConfig,
 ) -> Response<BoxedBody> {
-    let body = serde_json::to_vec(&share_info(config)).expect("ShareInfo serialises");
+    let share_info = share_info(config)
+    let body = serde_json::to_vec(&share_info).expect("ShareInfo serialises");
     builder
         .status(StatusCode::OK)
         .header(hyper::header::CONTENT_TYPE, "application/json")
@@ -116,7 +115,8 @@ fn share_response(
         .expect("static response is valid")
 }
 
-/// Everything a guest may know about the share. Upstreams stay out.
+/// Strip down a ShareInfo to the part a guest node needs to know,
+/// i.e. leave out upstreams.
 fn share_info(config: &ShareConfig) -> ShareInfo {
     ShareInfo {
         config_hash: ConfigHash(config.config_hash()),
@@ -134,13 +134,11 @@ fn share_info(config: &ShareConfig) -> ShareInfo {
     }
 }
 
-/// An activation body is one secret; anything bigger is not a guest.
 const MAX_ACTIVATION_BODY: usize = 1024;
 
-/// Binds the peer's key to the invite whose secret the body carries. The
-/// peer ID comes from the connection's handshake, never from the body. On
-/// success the response is the share, as for `GET /v1/share`, so a join
-/// has nothing left to fetch.
+/// Redeems an invite secret (in the body), binding the peer to the metadata
+/// associated with the invite, namely the user ID. On success, returns the
+/// share config.
 async fn post_activation(
     req: Request<Incoming>,
     db: &storage::StateDb,
@@ -152,10 +150,10 @@ async fn post_activation(
         .await
     {
         Ok(collected) => collected.to_bytes(),
-        Err(_) => return refuse(peer_id, ActivationError::Malformed),
+        Err(_) => return refuse_activation(peer_id, ActivationError::Malformed),
     };
     let Ok(request) = serde_json::from_slice::<wire::Activation>(&body) else {
-        return refuse(peer_id, ActivationError::Malformed);
+        return refuse_activation(peer_id, ActivationError::Malformed);
     };
     let now = chrono::Utc::now().timestamp();
     match db.redeem_invite(&request.secret, peer_id, now) {
@@ -174,18 +172,21 @@ async fn post_activation(
                 config,
             )
         }
-        Ok(Redemption::Refused(why)) => refuse(peer_id, why),
+        Ok(Redemption::Refused(why)) => refuse_activation(peer_id, why),
         Err(e) => {
-            // Not the guest's fault; an unbound connection gets closed
-            // anyway, as the key stays unknown.
             log_error!(error = %e, "activation failed on the state database");
             error(StatusCode::INTERNAL_SERVER_ERROR, "state database error")
         }
     }
 }
 
-/// Called when the guest leaves the share. The guest closes the connection
-/// itself afterwards.
+fn refuse_activation(peer_id: &str, why: ActivationError) -> Response<BoxedBody> {
+    warn!(peer_id, why = why.as_str(), "activation refused");
+    let status = StatusCode::from_u16(why.status()).expect("contract statuses are valid");
+    error(status, why.as_str())
+}
+
+/// Remove the guest node from the DB. The guest closes the connection itself.
 fn delete_guest(db: &storage::StateDb, peer_id: &str) -> Response<BoxedBody> {
     let guest = match db.guest_by_peer(peer_id) {
         Ok(Some(guest)) => guest,
@@ -200,27 +201,19 @@ fn delete_guest(db: &storage::StateDb, peer_id: &str) -> Response<BoxedBody> {
         log_error!(error = %e, "leave failed on the state database");
         return error(StatusCode::INTERNAL_SERVER_ERROR, "state database error");
     }
-    info!(peer_id, guest = guest.number, user_id = %guest.user_id, "guest left");
+    info!(peer_id, guest = guest.number, user_id = %guest.user_id, "guest node left");
     Response::builder()
         .status(StatusCode::NO_CONTENT)
         .body(empty())
         .expect("static response is valid")
 }
 
-fn refuse(peer_id: &str, why: ActivationError) -> Response<BoxedBody> {
-    warn!(peer_id, why = why.as_str(), "activation refused");
-    let status = StatusCode::from_u16(why.status()).expect("contract statuses are valid");
-    error(status, why.as_str())
-}
-
-/// How often an idle events stream sends a comment. Keeps middleboxes from
-/// timing the stream out and makes a stream whose guest silently went away fail
-/// on the next write instead of lingering until the next reload.
+/// How often an idle events stream sends a comment. Heartbeats keep middleboxes
+/// from timing the stream out and makes a stream whose guest silently went away
+/// fail on the next write instead of lingering until the next reload.
 const EVENTS_HEARTBEAT: Duration = Duration::from_secs(30);
 
-/// A server-sent event stream that stays open. A guest that falls behind
-/// the channel simply misses the older hashes, which is fine: every event
-/// says "fetch", and the fetch is conditional.
+/// Returns a stream of server-side events, concretely share config updates.
 fn get_events(events: &broadcast::Sender<u64>) -> Response<BoxedBody> {
     let events = BroadcastStream::new(events.subscribe()).filter_map(|item| {
         let hash = item.ok()?;
