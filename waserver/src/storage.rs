@@ -1,9 +1,9 @@
-//! Per-circle on-disk storage.
+//! Per-share on-disk storage.
 //!
-//! `~/.config/waserver/circles/<circle>/` holds two files with two owners:
-//! `circle.toml` (the user's, see `config`) and `state.db` (the daemon's).
+//! `~/.config/waserver/shares/<share>/` holds two files with two owners:
+//! `share.toml` (the user's, see `config`) and `state.db` (the daemon's).
 
-use crate::config::{self, CircleConfig};
+use crate::config::{self, ShareConfig};
 use rusqlite_migration::{M, Migrations};
 use std::fs;
 use std::io::{self, Write};
@@ -25,11 +25,11 @@ pub enum Error {
     Db(rusqlite::Error),
     #[error("state database migration: {0}")]
     Migration(rusqlite_migration::Error),
-    #[error("invalid circle name '{0}' (use letters, digits, '-' or '_')")]
+    #[error("invalid share name '{0}' (use letters, digits, '-' or '_')")]
     InvalidName(String),
-    #[error("circle {0} is not initialised")]
+    #[error("share {0} is not initialised")]
     NotInitialised(String),
-    #[error("circle {0} already exists")]
+    #[error("share {0} already exists")]
     AlreadyExists(String),
     #[error("no guest node number {0}")]
     NoSuchGuest(i64),
@@ -39,9 +39,9 @@ pub enum Error {
     NoConfigDir,
 }
 
-/// Names of the initialised circles, unsorted.
-pub fn list_circles() -> Result<Vec<String>, Error> {
-    let dir = circles_dir()?;
+/// Names of the initialised shares, unsorted.
+pub fn list_shares() -> Result<Vec<String>, Error> {
+    let dir = shares_dir()?;
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -52,15 +52,15 @@ pub fn list_circles() -> Result<Vec<String>, Error> {
         .collect())
 }
 
-//-- Circle directory ----------------------------------------------------------
+//-- Share directory ----------------------------------------------------------
 
 #[derive(Clone)]
-pub struct CircleDir {
+pub struct ShareDir {
     name: String,
     dir: PathBuf,
 }
 
-impl CircleDir {
+impl ShareDir {
     /// Validates the name and computes the path, but touches nothing on disk.
     pub fn new(name: &str) -> Result<Self, Error> {
         if !config::is_valid_id(name) {
@@ -68,7 +68,7 @@ impl CircleDir {
         }
         Ok(Self {
             name: name.to_owned(),
-            dir: circles_dir()?.join(name),
+            dir: shares_dir()?.join(name),
         })
     }
 
@@ -80,14 +80,14 @@ impl CircleDir {
         self.config_path().is_file()
     }
 
-    pub fn load_config(&self) -> Result<CircleConfig, Error> {
+    pub fn load_config(&self) -> Result<ShareConfig, Error> {
         if !self.exists() {
             return Err(Error::NotInitialised(self.name.clone()));
         }
-        Ok(CircleConfig::load(&self.config_path())?)
+        Ok(ShareConfig::load(&self.config_path())?)
     }
 
-    /// Creates the directory, writes `circle.toml` and creates an empty `state.db`.
+    /// Creates the directory, writes `share.toml` and creates an empty `state.db`.
     pub fn create(&self, config_text: &str) -> Result<StateDb, Error> {
         if self.dir.exists() {
             return Err(Error::AlreadyExists(self.name.clone()));
@@ -137,7 +137,7 @@ const KEY_REGISTRATION: &str = "registration";
 const KEY_IROH_SECRET: &str = "iroh_secret";
 
 impl StateDb {
-    /// `CircleDir` opens the real file; tests open one in a temp dir.
+    /// `ShareDir` opens the real file; tests open one in a temp dir.
     pub(crate) fn open(path: PathBuf) -> Result<Self, Error> {
         let conn = rusqlite::Connection::open(&path).map_err(Error::Db)?;
         // The daemon and the CLI (or two CLI tasks) may open the file at the
@@ -192,7 +192,7 @@ impl StateDb {
         )
     }
 
-    /// The iroh endpoint's secret key; its public key is the circle's
+    /// The iroh endpoint's secret key; its public key is the share's
     /// endpoint ID in every invite.
     pub fn iroh_secret(&self) -> Result<Option<[u8; 32]>, Error> {
         match self.get(KEY_IROH_SECRET)? {
@@ -253,11 +253,11 @@ pub struct NewInvite<'a> {
     pub expires_at: i64,
 }
 
-/// A guest's node: a transport identity bound to this circle by redeeming
+/// A guest's node: a transport identity bound to this share by redeeming
 /// an invite. A revoked node keeps its row so its key is never bound again.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuestNode {
-    /// How the CLI addresses it (`waserver revoke <circle> <number>`).
+    /// How the CLI addresses it (`waserver revoke <share> <number>`).
     pub number: i64,
     /// The transport's stable identifier for the node, if used (Wispers Connect
     /// doesn't).
@@ -370,7 +370,7 @@ impl StateDb {
             } else if bound_hash == secret_hash {
                 Redemption::Activated(guest)
             } else {
-                Redemption::Refused(AlreadyMember)
+                Redemption::Refused(AlreadyGuest)
             });
         }
 
@@ -579,8 +579,8 @@ fn migrations() -> Migrations<'static> {
 
 //-- Paths and file helpers ----------------------------------------------------
 
-fn circles_dir() -> Result<PathBuf, Error> {
-    Ok(base_dir()?.join("circles"))
+fn shares_dir() -> Result<PathBuf, Error> {
+    Ok(base_dir()?.join("shares"))
 }
 
 fn base_dir() -> Result<PathBuf, Error> {
@@ -710,7 +710,7 @@ mod tests {
         db.create_invite(invite(&bob, "bob"), 1_000).unwrap();
         assert_eq!(
             db.redeem_invite(&bob, "peer-a", 1_003).unwrap(),
-            Redemption::Refused(AlreadyMember)
+            Redemption::Refused(AlreadyGuest)
         );
         assert_eq!(db.guests().unwrap().len(), 1);
         assert_eq!(

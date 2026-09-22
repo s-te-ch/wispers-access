@@ -5,7 +5,7 @@
 //! away. `POST /v1/activation` is how a guest on a transport where waserver
 //! is the authority (iroh) binds its key to an invite.
 
-use crate::config::CircleConfig;
+use crate::config::ShareConfig;
 use crate::protocol::{Peer, StreamContext};
 use crate::storage::{self, Redemption};
 use anyhow::Result;
@@ -22,12 +22,12 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 use tracing::{debug, error as log_error, info, warn};
-use wire::{ActivationError, CircleChanged, CircleInfo, ConfigHash, Share};
+use wire::{ActivationError, App, ConfigHash, ShareChanged, ShareInfo};
 use wispers_access_wire as wire;
 
 type BoxedBody = BoxBody<Bytes, std::io::Error>;
 
-/// Serves one CTRL stream against the circle as of `ctx`.
+/// Serves one CTRL stream against the share as of `ctx`.
 pub async fn serve<S>(io: S, ctx: StreamContext, peer: Peer) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -60,7 +60,7 @@ async fn route(
     );
     let response = match (req.method(), req.uri().path()) {
         // A key that is not a guest yet is authenticated but not authorised:
-        // activation is all it may do, and nothing about the circle leaks
+        // activation is all it may do, and nothing about the share leaks
         // before that.
         (method, path)
             if peer.user_id.is_none()
@@ -68,13 +68,13 @@ async fn route(
         {
             error(StatusCode::FORBIDDEN, "not-activated")
         }
-        (&Method::GET, wire::CIRCLE_PATH) => get_circle(&req, &ctx.config),
+        (&Method::GET, wire::SHARE_PATH) => get_share(&req, &ctx.config),
         (&Method::GET, wire::EVENTS_PATH) => get_events(&ctx.events),
         (&Method::POST, wire::ACTIVATION_PATH) => {
             post_activation(req, &ctx.db, &peer.peer_id, &ctx.config).await
         }
         (&Method::DELETE, wire::GUEST_PATH) => delete_guest(&ctx.db, &peer.peer_id),
-        (_, wire::CIRCLE_PATH | wire::EVENTS_PATH | wire::ACTIVATION_PATH | wire::GUEST_PATH) => {
+        (_, wire::SHARE_PATH | wire::EVENTS_PATH | wire::ACTIVATION_PATH | wire::GUEST_PATH) => {
             error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
         }
         _ => error(StatusCode::NOT_FOUND, "no such route"),
@@ -82,9 +82,9 @@ async fn route(
     Ok(response)
 }
 
-/// The circle as the guest may know it, with the config hash as a strong
+/// The share as the guest may know it, with the config hash as a strong
 /// entity tag so a guest that is up to date gets a 304 and no body.
-fn get_circle(req: &Request<Incoming>, config: &CircleConfig) -> Response<BoxedBody> {
+fn get_share(req: &Request<Incoming>, config: &ShareConfig) -> Response<BoxedBody> {
     let hash = ConfigHash(config.config_hash());
     let up_to_date = req
         .headers()
@@ -100,15 +100,15 @@ fn get_circle(req: &Request<Incoming>, config: &CircleConfig) -> Response<BoxedB
             .body(empty())
             .expect("static response is valid");
     }
-    circle_response(builder, config)
+    share_response(builder, config)
 }
 
-/// A 200 with the circle as JSON.
-fn circle_response(
+/// A 200 with the share as JSON.
+fn share_response(
     builder: hyper::http::response::Builder,
-    config: &CircleConfig,
+    config: &ShareConfig,
 ) -> Response<BoxedBody> {
-    let body = serde_json::to_vec(&circle_info(config)).expect("CircleInfo serialises");
+    let body = serde_json::to_vec(&share_info(config)).expect("ShareInfo serialises");
     builder
         .status(StatusCode::OK)
         .header(hyper::header::CONTENT_TYPE, "application/json")
@@ -116,16 +116,16 @@ fn circle_response(
         .expect("static response is valid")
 }
 
-/// Everything a guest may know about the circle. Upstreams stay out.
-fn circle_info(config: &CircleConfig) -> CircleInfo {
-    CircleInfo {
+/// Everything a guest may know about the share. Upstreams stay out.
+fn share_info(config: &ShareConfig) -> ShareInfo {
+    ShareInfo {
         config_hash: ConfigHash(config.config_hash()),
         name: config.name.clone(),
         transport: config.transport.kind().as_str().to_owned(),
-        shares: config
-            .shares
+        apps: config
+            .apps
             .iter()
-            .map(|s| Share {
+            .map(|s| App {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 kind: s.kind,
@@ -139,13 +139,13 @@ const MAX_ACTIVATION_BODY: usize = 1024;
 
 /// Binds the peer's key to the invite whose secret the body carries. The
 /// peer ID comes from the connection's handshake, never from the body. On
-/// success the response is the circle, as for `GET /v1/circle`, so a join
+/// success the response is the share, as for `GET /v1/share`, so a join
 /// has nothing left to fetch.
 async fn post_activation(
     req: Request<Incoming>,
     db: &storage::StateDb,
     peer_id: &str,
-    config: &CircleConfig,
+    config: &ShareConfig,
 ) -> Response<BoxedBody> {
     let body = match Limited::new(req.into_body(), MAX_ACTIVATION_BODY)
         .collect()
@@ -167,7 +167,7 @@ async fn post_activation(
                 "guest activated"
             );
             let hash = ConfigHash(config.config_hash());
-            circle_response(
+            share_response(
                 Response::builder()
                     .header(hyper::header::ETAG, hash.etag())
                     .header(hyper::header::CACHE_CONTROL, "no-cache"),
@@ -184,7 +184,7 @@ async fn post_activation(
     }
 }
 
-/// Called when the guest leaves the circle. The guest closes the connection
+/// Called when the guest leaves the share. The guest closes the connection
 /// itself afterwards.
 fn delete_guest(db: &storage::StateDb, peer_id: &str) -> Response<BoxedBody> {
     let guest = match db.guest_by_peer(peer_id) {
@@ -243,13 +243,13 @@ fn get_events(events: &broadcast::Sender<u64>) -> Response<BoxedBody> {
 }
 
 fn sse_event(config_hash: u64) -> Bytes {
-    let data = serde_json::to_string(&CircleChanged {
+    let data = serde_json::to_string(&ShareChanged {
         config_hash: ConfigHash(config_hash),
     })
-    .expect("CircleChanged serialises");
+    .expect("ShareChanged serialises");
     Bytes::from(format!(
         "event: {}\ndata: {}\n\n",
-        wire::EVENT_CIRCLE_CHANGED,
+        wire::EVENT_SHARE_CHANGED,
         data
     ))
 }

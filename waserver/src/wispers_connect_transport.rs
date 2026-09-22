@@ -14,11 +14,11 @@ use tracing::{error, info, warn};
 use wispers_access_wire as wire;
 use wispers_connect as wc;
 
-/// The server is always the first node of its connectivity group: `init`
+/// The host node is always the first node of its connectivity group: `init`
 /// registers it before any invite exists. Guests dial it by this number.
 pub const SERVER_NODE_NUMBER: i32 = 1;
 
-/// The node restored from the circle's state, ready to connect to the hub.
+/// The node restored from the share's state, ready to connect to the hub.
 pub struct Node {
     node: Arc<wc::Node>,
     wcbe_client: wcbe::Client,
@@ -31,9 +31,9 @@ pub struct Node {
     hub_session: RwLock<Option<wc::ServingHandle>>,
 }
 
-pub async fn bind(circle: &str, state: storage::StateDb, backend: Option<String>) -> Result<Node> {
+pub async fn bind(share: &str, state: storage::StateDb, backend: Option<String>) -> Result<Node> {
     let Some(wcs) = state.wispers_connect_state()? else {
-        anyhow::bail!("Circle {} has no Wispers Connect credentials", circle);
+        anyhow::bail!("Share {} has no Wispers Connect credentials", share);
     };
     let node_storage = wc::NodeStorage::new(state);
     if let Some(backend) = backend.as_deref() {
@@ -44,7 +44,7 @@ pub async fn bind(circle: &str, state: storage::StateDb, backend: Option<String>
         anyhow::bail!("Wispers Connect node is not registered");
     }
     let Some(cg_id) = node.connectivity_group_id() else {
-        anyhow::bail!("server node not registered");
+        anyhow::bail!("host node not registered");
     };
     Ok(Node {
         connectivity_group_id: cg_id.to_string(),
@@ -252,11 +252,11 @@ fn handle_session_end(
 //-- CLI without the daemon ----------------------------------------------------
 
 /// The steps of `init`, each pushing its undo before the next runs: the
-/// backend group, the circle directory with config and state, the node and
+/// backend group, the share directory with config and state, the node and
 /// its registration.
 pub async fn init(
     rollback: &mut Rollback,
-    dir: &storage::CircleDir,
+    dir: &storage::ShareDir,
     config_text: &str,
     api_key: Option<&str>,
     display_name: &str,
@@ -277,7 +277,7 @@ pub async fn init(
     });
 
     let state = dir.create(config_text)?;
-    rollback.push("circle directory", {
+    rollback.push("share directory", {
         let dir = dir.clone();
         async move { dir.delete().map_err(Into::into) }
     });
@@ -294,7 +294,7 @@ pub async fn init(
     }
     let mut node = node_storage.restore_or_init_node().await?;
     let token = wcbe_client
-        .get_registration_token(&cg_id, Some("Server"), None /* metadata */)
+        .get_registration_token(&cg_id, Some("Host"), None /* metadata */)
         .await?;
     node.register(&token).await.context("registration failed")?;
     Ok(())
@@ -305,9 +305,9 @@ pub async fn init(
 fn explain_group_quota(e: anyhow::Error) -> anyhow::Error {
     match e.downcast_ref::<wcbe::QuotaExceeded>() {
         Some(q) if q.quota == "groups_per_domain" => anyhow::anyhow!(
-            "cannot create a new circle: your plan's connectivity-group quota \
-             is used up ({} of {}). Delete an unused circle with `waserver \
-             deinit <circle>` or upgrade your plan.",
+            "cannot create a new share: your plan's connectivity-group quota \
+             is used up ({} of {}). Delete an unused share with `waserver \
+             deinit <share>` or upgrade your plan.",
             q.current,
             q.limit
         ),
@@ -315,7 +315,7 @@ fn explain_group_quota(e: anyhow::Error) -> anyhow::Error {
     }
 }
 
-/// Removes the connectivity group, which deregisters every node. A circle
+/// Removes the connectivity group, which deregisters every node. A share
 /// whose `init` never got that far has nothing to remove.
 pub async fn deinit(
     wcs: Option<storage::WispersConnectState>,
@@ -331,19 +331,19 @@ pub async fn deinit(
 
 /// Revokes on the hub, then deregisters the node there.
 pub async fn revoke(
-    circle: &str,
-    dir: storage::CircleDir,
+    share: &str,
+    dir: storage::ShareDir,
     backend: Option<String>,
     node_number: i32,
 ) -> Result<()> {
     if node_number == SERVER_NODE_NUMBER {
-        anyhow::bail!("Node {node_number} is the server and cannot be revoked");
+        anyhow::bail!("Node {node_number} is the host and cannot be revoked");
     }
 
     // Restore the node.
     let state = dir.open_state()?;
     let Some(wcs) = state.wispers_connect_state()? else {
-        anyhow::bail!("Circle {} has no Wispers Connect credentials", circle);
+        anyhow::bail!("Share {} has no Wispers Connect credentials", share);
     };
     let node_storage = wc::NodeStorage::new(state);
     if let Some(backend) = backend.as_deref() {
@@ -420,12 +420,12 @@ pub async fn report(
     }
 }
 
-/// The circle has a config but no usable state: an `init` that did not
+/// The share has a config but no usable state: an `init` that did not
 /// complete, or a broken config file (reported separately as `configError`).
-const NOT_INITIALISED: &str = "circle has no Wispers Connect credentials (init incomplete?)";
+const NOT_INITIALISED: &str = "share has no Wispers Connect credentials (init incomplete?)";
 
-/// The group's nodes minus the server itself, which the hub lists as one
-/// of them.
+/// The group's nodes minus the host node itself, which the hub lists as one of
+/// them.
 fn to_guests(group: &wcbe::GroupDetail) -> Vec<GuestStatus> {
     let mut guests: Vec<GuestStatus> = group
         .nodes

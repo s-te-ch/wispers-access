@@ -88,23 +88,23 @@ export WC_API_KEY=…  # the key from step 1
 waserver init team "Awesome Team"
 ```
 
-This creates a *circle* (a group of people you share with) for your team and
-prints the path of its `circle.toml`. Add the app there as a *share*:
+This creates a *share* for your team (the apps you share and the people you
+share them with) and prints the path of its `share.toml`. Add the app there:
 
 ```toml
-[[share]]
+[[app]]
 id = "myapp"
 name = "My App"
 upstream = ":3000"  # host:port, or :port for localhost
 ```
 
-Then serve the circle (`waserver start` runs it in the background instead):
+Then serve the share (`waserver start` runs it in the background instead):
 
 ```sh
 waserver serve team
 ```
 
-Later edits to `circle.toml` apply with `waserver reload team`.
+Later edits to `share.toml` apply with `waserver reload team`.
 
 ### 4. Invite a device
 
@@ -133,19 +133,19 @@ profile, no open port on the internet.
 
 ### … or on a desktop
 
-`waclient` (same releases page) serves every circle you've joined on localhost:
+`waclient` (same releases page) serves every share you've joined on localhost:
 
 ```sh
 waclient join wax_…            # the invite code from step 4
 waclient serve 8000
 ```
 
-It prints each share's URL, e.g. `http://myapp.team.localhost:8000` — open it
+It prints each app's URL, e.g. `http://myapp.team.localhost:8000` — open it
 in your normal browser.
 
 ---
 
-**Self-hosting:** Circles use the managed Wispers Connect backend by default. To
+**Self-hosting:** Shares use the managed Wispers Connect backend by default. To
 be fully cloud-independent, [run your own hub](https://github.com/s-te-ch/wispers-hub)
 and pass `--backend https://hub.example.com` to `waserver init`. Invite codes
 contain the backend, so guests land on the right hub automatically.

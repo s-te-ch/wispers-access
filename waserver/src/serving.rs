@@ -1,10 +1,10 @@
-//! Serving: the daemon's startup sequence and the per-circle state shared
+//! Serving: the daemon's startup sequence and the per-share state shared
 //! by the transports, the IPC server and the stream handlers. A transport
 //! (`wispers_connect_transport.rs`, `iroh_transport.rs`) contributes a
 //! `bind` that returns its node or endpoint and a `run` that drives its loop;
 //! `serve` calls them in order and owns everything in between.
 
-use crate::config::{CircleConfig, TransportConfig};
+use crate::config::{ShareConfig, TransportConfig};
 use crate::ipc;
 use crate::iroh_transport;
 use crate::protocol;
@@ -21,22 +21,22 @@ use tokio::sync::{RwLock, broadcast};
 use tracing::{info, warn};
 use wispers_access_wire as wire;
 
-pub async fn serve(circle: &str) -> Result<()> {
-    let dir = storage::CircleDir::new(circle)?;
+pub async fn serve(share: &str) -> Result<()> {
+    let dir = storage::ShareDir::new(share)?;
     let cfg = dir.load_config()?;
-    match cfg.default_share() {
-        Some(s) => info!(share = %s.id, upstream = %s.upstream, "default share"),
-        None => warn!("no shares configured; guests get 503 until `waserver reload`"),
+    match cfg.default_app() {
+        Some(s) => info!(app = %s.id, upstream = %s.upstream, "default app"),
+        None => warn!("no apps configured; guests get 503 until `waserver reload`"),
     }
     let state = dir.open_state()?;
     let server: Arc<dyn Server> = match cfg.transport.clone() {
         TransportConfig::WispersConnect { backend } => {
-            Arc::new(wispers_connect_transport::bind(circle, state.clone(), backend).await?)
+            Arc::new(wispers_connect_transport::bind(share, state.clone(), backend).await?)
         }
-        TransportConfig::Iroh {} => Arc::new(iroh_transport::bind(circle, state.clone()).await?),
+        TransportConfig::Iroh {} => Arc::new(iroh_transport::bind(share, state.clone()).await?),
     };
     let handle = ServingHandle::new(dir, cfg, state, server.clone());
-    let ipc_server = match ipc::Server::bind(circle).await {
+    let ipc_server = match ipc::Server::bind(share).await {
         Ok(ipc_server) => ipc_server,
         Err(e) => {
             // Let the transport go down properly rather than drop it.
@@ -53,7 +53,7 @@ pub async fn serve(circle: &str) -> Result<()> {
     Ok(())
 }
 
-/// A circle's server, using the appropriate transport through dynamic dispatch.
+/// A share's server, using the appropriate transport through dynamic dispatch.
 /// Created by that transport's `bind` function.
 pub trait Server: Send + Sync {
     /// Serves until the transport stops or a signal arrives.
@@ -97,7 +97,7 @@ pub struct ServingHandle {
 
 struct Inner {
     server: Arc<dyn Server>,
-    /// The circle's state database, which activation writes to.
+    /// The share's state database, which activation writes to.
     db: storage::StateDb,
 
     // Time or creation and time since being reachable, respectively.
@@ -109,9 +109,9 @@ struct Inner {
     next_connection_id: AtomicU64,
 
     /// Config location.
-    dir: storage::CircleDir,
+    dir: storage::ShareDir,
     /// The config as last loaded. Swapped whole on `reload`.
-    config: RwLock<Arc<CircleConfig>>,
+    config: RwLock<Arc<ShareConfig>>,
     /// Notifies connected guests of config updates.
     events: broadcast::Sender<u64>,
 }
@@ -119,7 +119,7 @@ struct Inner {
 /// Outcome of `reload`-ing the config.
 pub struct ReloadOutcome {
     pub changed: bool,
-    pub config: Arc<CircleConfig>,
+    pub config: Arc<ShareConfig>,
 }
 
 struct GuestConnection {
@@ -144,8 +144,8 @@ pub struct ConnectedGuest {
 
 impl ServingHandle {
     pub(crate) fn new(
-        dir: storage::CircleDir,
-        config: CircleConfig,
+        dir: storage::ShareDir,
+        config: ShareConfig,
         db: storage::StateDb,
         server: Arc<dyn Server>,
     ) -> Self {
@@ -165,7 +165,7 @@ impl ServingHandle {
     }
 
     /// The config as currently served.
-    pub async fn config(&self) -> Arc<CircleConfig> {
+    pub async fn config(&self) -> Arc<ShareConfig> {
         self.inner.config.read().await.clone()
     }
 
@@ -178,7 +178,7 @@ impl ServingHandle {
         }
     }
 
-    /// Re-reads `circle.toml`, but only replaces the running config if the
+    /// Re-reads `share.toml`, but only replaces the running config if the
     /// file passes validation.
     pub async fn reload(&self) -> Result<ReloadOutcome> {
         let fresh = Arc::new(self.inner.dir.load_config()?);
@@ -193,7 +193,7 @@ impl ServingHandle {
         };
         if changed {
             info!(
-                shares = ?fresh.shares.iter().map(|s| &s.id).collect::<Vec<_>>(),
+                apps = ?fresh.apps.iter().map(|s| &s.id).collect::<Vec<_>>(),
                 "config reloaded"
             );
             let _ = self.inner.events.send(fresh.config_hash());
@@ -204,7 +204,7 @@ impl ServingHandle {
         })
     }
 
-    /// Whether guests can reach this server.
+    /// Whether guests can reach this host node.
     pub async fn reachable(&self) -> bool {
         self.inner.reachable_since.read().await.is_some()
     }

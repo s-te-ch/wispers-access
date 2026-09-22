@@ -1,27 +1,28 @@
-//! The Wispers Access wire contract between guests and `waserver`.
+//! The Wispers Access wire contract between guest nodes and the host node
+//! (`waserver`).
 //!
 //! Every stream a guest opens starts with one [`StreamType`] byte:
 //!
 //! - [`StreamType::Data`] for the data plane. One length-prefixed
-//!   [`HttpPreamble`] naming the share, then a raw HTTP/1.1 request for that
-//!   share's app, answered in raw HTTP.
-//! - [`StreamType::Ctrl`] for the control plane. A raw HTTP/1.1 request to
-//!   waserver's guest API  (the `/v1/...` routes below), answered in raw HTTP.
+//!   [`HttpPreamble`] naming the app, then a raw HTTP/1.1 request for that app,
+//!   answered in raw HTTP.
+//! - [`StreamType::Ctrl`] for the control plane. A raw HTTP/1.1 request to the
+//!   host node's guest API (the `/v1/...` routes below), answered in raw HTTP.
 //!
-//! Streams whose first byte is an ASCII letter are raw HTTP requests for
-//! the default share from clients that predate this framing. Every stream
-//! ends in a FIN from the side that wrote last.
+//! Streams whose first byte is an ASCII letter are raw HTTP requests for the
+//! default app from clients that predate this framing. Every stream ends in a
+//! FIN from the side that wrote last.
 //!
-//! The JSON types below are the contract. Fields are only ever added, with
-//! a default for readers that predate them; a field is never renamed or
-//! given a new meaning. Unknown fields are ignored.
+//! The JSON types below are the contract. Fields are only ever added, with a
+//! default for readers that predate them; a field is never renamed or given a
+//! new meaning. Unknown fields are ignored.
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 //-- Invite codes --------------------------------------------------------------
 
-/// Transports for peer-to-peer communication between guest nodes and server.
+/// Transports for peer-to-peer communication between guest nodes and the host node.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Transport {
     WispersConnect,
@@ -29,7 +30,7 @@ pub enum Transport {
     Tailscale,
 }
 
-/// Parses the full name, as in `circle.toml`.
+/// Parses the full name, as in `share.toml`.
 impl std::str::FromStr for Transport {
     type Err = UnknownTransport;
 
@@ -57,7 +58,7 @@ impl Transport {
         }
     }
 
-    /// The full name, as in `circle.toml`.
+    /// The full name, as in `share.toml`.
     pub fn as_str(self) -> &'static str {
         match self {
             Transport::WispersConnect => "wispers-connect",
@@ -233,7 +234,7 @@ impl std::fmt::Debug for Invite {
 pub struct EndpointId(pub [u8; 32]);
 
 /// The one-time secret in an iroh invite, 16 random bytes, 32 hex digits in
-/// text. The server keeps only its SHA-256.
+/// text. The host node keeps only its SHA-256.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct InviteSecret(pub [u8; 16]);
 
@@ -338,41 +339,41 @@ impl From<u8> for FirstByte {
 
 //-- DATA streams --------------------------------------------------------------
 
-/// Preamble of a DATA stream: which of the circle's shares the request that
+/// Preamble of a DATA stream: which of the share's apps the request that
 /// follows is for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HttpPreamble {
-    pub share_id: String,
+    pub app_id: String,
 }
 
 //-- The guest API, over CTRL streams ------------------------------------------
 
-/// `GET /v1/circle` returns metadata for the circle, as JSON [`CircleInfo`].
+/// `GET /v1/share` returns metadata for the share, as JSON [`ShareInfo`].
 /// The response carries an `ETag` of the config hash - a request with a matching
 /// `If-None-Match` gets 304 and no body.
-pub const CIRCLE_PATH: &str = "/v1/circle";
+pub const SHARE_PATH: &str = "/v1/share";
 
 /// `GET /v1/events` returns a long-lived `text/event-stream`. Each event is
 /// named after its type and carries that type as JSON data:
 ///
-/// - [`EVENT_CIRCLE_CHANGED`] with [`CircleChanged`]: the circle config has
-///   changed. Refresh it with `GET /v1/circle`.
+/// - [`EVENT_SHARE_CHANGED`] with [`ShareChanged`]: the share's config has
+///   changed. Refresh it with `GET /v1/share`.
 pub const EVENTS_PATH: &str = "/v1/events";
 
-pub const EVENT_CIRCLE_CHANGED: &str = "circle-changed";
+pub const EVENT_SHARE_CHANGED: &str = "share-changed";
 
 /// `POST /v1/activation` (iroh only): redeems an invite code and binds the
-/// guest's key to the invite. After this, the server know which identity is
+/// guest's key to the invite. After this, the host knows which identity is
 /// associated with the guest node.
 ///
 /// The body is an [`Activation`]. On success, returns 200 with the same
-/// [`CircleInfo`] body and `ETag` as `GET /v1/circle`. On failure, returns an
+/// [`ShareInfo`] body and `ETag` as `GET /v1/share`. On failure, returns an
 /// [`ApiError`] carrying an [`ActivationError`]; an unbound connection is
 /// then closed with [`CloseCode::Unknown`], which is what the key still is.
 pub const ACTIVATION_PATH: &str = "/v1/activation";
 
-/// `DELETE /v1/guest` (iroh only): the calling guest leaves the circle. The
-/// server forgets itand answers 204.
+/// `DELETE /v1/guest` (iroh only): the calling guest leaves the share. The
+/// host forgets it and answers 204.
 pub const GUEST_PATH: &str = "/v1/guest";
 
 /// Body of `POST /v1/activation`.
@@ -409,8 +410,8 @@ pub enum ActivationError {
     InviteConsumed,
     /// This endpoint ID was revoked; a revoked key is never re-bound.
     Revoked,
-    /// This endpoint ID is already a member; served as that member.
-    AlreadyMember,
+    /// This endpoint ID is already a guest node.
+    AlreadyGuest,
 }
 
 impl ActivationError {
@@ -419,7 +420,7 @@ impl ActivationError {
             ActivationError::Malformed => 400,
             ActivationError::InviteUnknown | ActivationError::Revoked => 403,
             ActivationError::InviteExpired => 410,
-            ActivationError::InviteConsumed | ActivationError::AlreadyMember => 409,
+            ActivationError::InviteConsumed | ActivationError::AlreadyGuest => 409,
         }
     }
 
@@ -430,7 +431,7 @@ impl ActivationError {
             ActivationError::InviteExpired => "invite-expired",
             ActivationError::InviteConsumed => "invite-consumed",
             ActivationError::Revoked => "revoked",
-            ActivationError::AlreadyMember => "already-member",
+            ActivationError::AlreadyGuest => "already-guest",
         }
     }
 
@@ -447,32 +448,32 @@ impl From<ActivationError> for ApiError {
     }
 }
 
-/// Guest-facing metadata for a circle.
+/// Guest-facing metadata for a share.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CircleInfo {
+pub struct ShareInfo {
     /// Hash of everything below, to make it easy to detect changes.
     pub config_hash: ConfigHash,
-    /// Display name of the circle.
+    /// Display name of the share.
     pub name: String,
     pub transport: String,
-    pub shares: Vec<Share>,
+    pub apps: Vec<App>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Share {
+pub struct App {
     /// Stable key.
     pub id: String,
     /// Display name.
     pub name: String,
     #[serde(default)]
-    pub kind: ShareKind,
+    pub kind: AppKind,
 }
 
 /// What kind of app is being shared: a generic web app, or one of the apps that
 /// integrating clients know how to talk to.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub enum ShareKind {
+pub enum AppKind {
     #[default]
     Web,
     // Values below are aspirational.
@@ -480,19 +481,19 @@ pub enum ShareKind {
     Immich,
 }
 
-impl ShareKind {
+impl AppKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            ShareKind::Web => "web",
-            ShareKind::Jellyfin => "jellyfin",
-            ShareKind::Immich => "immich",
+            AppKind::Web => "web",
+            AppKind::Jellyfin => "jellyfin",
+            AppKind::Immich => "immich",
         }
     }
 }
 
-/// Data of a `circle-changed` event.
+/// Data of a `share-changed` event.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CircleChanged {
+pub struct ShareChanged {
     pub config_hash: ConfigHash,
 }
 
@@ -551,13 +552,13 @@ pub const ALPN: &[u8] = b"wispers-access/1";
 /// QUIC application close codes.
 ///
 /// [`CloseCode::Unknown`] and [`CloseCode::Revoked`] make the guest mark the
-/// circle dead for good, so a guest should only act on them only when they
+/// share dead for good, so a guest should only act on them only when they
 /// arrive on an established (i.e. trusted) connection.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CloseCode {
     /// Orderly close by either side.
     Closing = 0,
-    /// The server does not know this endpoint ID. Terminal.
+    /// The host does not know this endpoint ID. Terminal.
     Unknown = 1,
     /// This endpoint ID was revoked. Terminal.
     Revoked = 2,
@@ -611,16 +612,16 @@ pub async fn write_stream_type<W: AsyncWrite + Unpin>(
 }
 
 /// Opens a DATA stream on the guest side, writing the type byte and the
-/// preamble naming the share.
+/// preamble naming the app.
 pub async fn open_data_stream<W: AsyncWrite + Unpin>(
     w: &mut W,
-    share_id: &str,
+    app_id: &str,
 ) -> std::io::Result<()> {
     write_stream_type(w, StreamType::Data).await?;
     write_message(
         w,
         &HttpPreamble {
-            share_id: share_id.to_owned(),
+            app_id: app_id.to_owned(),
         },
     )
     .await
@@ -848,7 +849,7 @@ mod tests {
             ActivationError::InviteExpired,
             ActivationError::InviteConsumed,
             ActivationError::Revoked,
-            ActivationError::AlreadyMember,
+            ActivationError::AlreadyGuest,
         ] {
             assert_eq!(ActivationError::parse(e.as_str()), Some(e));
             assert_eq!(serde_json::to_value(e).unwrap(), e.as_str());
@@ -884,32 +885,31 @@ mod tests {
     // The JSON shapes are the contract; this pins them.
     #[test]
     fn message_shapes() {
-        let info = CircleInfo {
+        let info = ShareInfo {
             config_hash: ConfigHash(0xdead_beef),
             name: "Family".into(),
             transport: "wispers-connect".into(),
-            shares: vec![Share {
+            apps: vec![App {
                 id: "jf".into(),
                 name: "Jellyfin".into(),
-                kind: ShareKind::Jellyfin,
+                kind: AppKind::Jellyfin,
             }],
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["config_hash"], "00000000deadbeef");
-        assert_eq!(json["shares"][0]["kind"], "jellyfin");
+        assert_eq!(json["apps"][0]["kind"], "jellyfin");
         assert_eq!(
-            serde_json::to_value(CircleChanged {
+            serde_json::to_value(ShareChanged {
                 config_hash: ConfigHash(1)
             })
             .unwrap(),
             serde_json::json!({ "config_hash": "0000000000000001" })
         );
-        // A share without a kind is a web app; unknown fields are ignored.
-        let share: Share =
-            serde_json::from_str(r#"{"id":"x","name":"X","future_field":1}"#).unwrap();
-        assert_eq!(share.kind, ShareKind::Web);
+        // An app without a kind is a web app; unknown fields are ignored.
+        let app: App = serde_json::from_str(r#"{"id":"x","name":"X","future_field":1}"#).unwrap();
+        assert_eq!(app.kind, AppKind::Web);
         // An unknown kind is a contract violation.
-        assert!(serde_json::from_str::<Share>(r#"{"id":"x","name":"X","kind":"plex"}"#).is_err());
+        assert!(serde_json::from_str::<App>(r#"{"id":"x","name":"X","kind":"plex"}"#).is_err());
     }
 
     #[test]
@@ -938,7 +938,7 @@ mod tests {
             FirstByte::Typed(StreamType::Data)
         );
         let back: HttpPreamble = read_message(&mut b).await.unwrap();
-        assert_eq!(back.share_id, "jf");
+        assert_eq!(back.app_id, "jf");
         let mut rest = [0u8; 16];
         b.read_exact(&mut rest).await.unwrap();
         assert_eq!(&rest, b"GET / HTTP/1.1\r\n");

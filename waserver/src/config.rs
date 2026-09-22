@@ -1,4 +1,4 @@
-//! The per-circle config file.
+//! The per-share config file.
 //!
 //! These files are generated once, then edited by the user. After this they're
 //! only read, at start and on `reload`.
@@ -6,19 +6,19 @@
 use serde::Deserialize;
 use std::path::Path;
 
-pub const FILENAME: &str = "circle.toml";
+pub const FILENAME: &str = "share.toml";
 
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct CircleConfig {
+pub struct ShareConfig {
     /// Display name, shown to guests.
     pub name: String,
-    /// The transport for this circle, with that transport's own settings.
+    /// The transport for this share, with that transport's own settings.
     #[serde(default)]
     pub transport: TransportConfig,
-    /// The apps served to this circle, in the order found in the config file.
-    #[serde(default, rename = "share")]
-    pub shares: Vec<ShareConfig>,
+    /// The apps served to this share, in the order found in the config file.
+    #[serde(default, rename = "app")]
+    pub apps: Vec<AppConfig>,
 }
 
 /// Peer-to-peer communications transport types.
@@ -76,7 +76,7 @@ impl TransportKind {
 
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct ShareConfig {
+pub struct AppConfig {
     /// Stable key.
     pub id: String,
     /// Display name, defaults to the ID.
@@ -85,14 +85,14 @@ pub struct ShareConfig {
     /// Which app this is. `web` (the default) is any web app browsed as is.
     /// Other values target specific integrators, like Jellyfin clients.
     #[serde(default)]
-    pub kind: ShareKind,
+    pub kind: AppKind,
     /// `host:port`, or `:port` for localhost.
     pub upstream: String,
 }
 
-/// The share kinds are the wire crate's: the config file and the messages
+/// The app kinds are the wire crate's: the config file and the messages
 /// guests receive use one vocabulary.
-pub use wispers_access_wire::ShareKind;
+pub use wispers_access_wire::AppKind;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -100,59 +100,59 @@ pub enum Error {
     Read(String, std::io::Error),
     #[error(transparent)]
     Parse(#[from] toml::de::Error),
-    #[error("circle name is empty")]
+    #[error("share name is empty")]
     EmptyName,
-    #[error("share {0}: invalid id (use letters, digits, '-' or '_')")]
-    InvalidShareId(String),
-    #[error("share {0}: duplicate id")]
-    DuplicateShareId(String),
-    #[error("share {share}: invalid upstream: {reason}")]
-    InvalidUpstream { share: String, reason: String },
+    #[error("app {0}: invalid id (use letters, digits, '-' or '_')")]
+    InvalidAppId(String),
+    #[error("app {0}: duplicate id")]
+    DuplicateAppId(String),
+    #[error("app {app}: invalid upstream: {reason}")]
+    InvalidUpstream { app: String, reason: String },
 }
 
-impl CircleConfig {
+impl ShareConfig {
     pub fn load(path: &Path) -> Result<Self, Error> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| Error::Read(path.display().to_string(), e))?;
         Self::parse(&text)
     }
 
-    /// Parses, normalises (share names, upstream form) and validates.
+    /// Parses, normalises (app names, upstream form) and validates.
     pub fn parse(text: &str) -> Result<Self, Error> {
-        let mut cfg: CircleConfig = toml::from_str(text)?;
+        let mut cfg: ShareConfig = toml::from_str(text)?;
         if cfg.name.trim().is_empty() {
             return Err(Error::EmptyName);
         }
-        for i in 0..cfg.shares.len() {
-            let id = cfg.shares[i].id.clone();
+        for i in 0..cfg.apps.len() {
+            let id = cfg.apps[i].id.clone();
             if !is_valid_id(&id) {
-                return Err(Error::InvalidShareId(id));
+                return Err(Error::InvalidAppId(id));
             }
-            if cfg.shares[..i].iter().any(|s| s.id == id) {
-                return Err(Error::DuplicateShareId(id));
+            if cfg.apps[..i].iter().any(|s| s.id == id) {
+                return Err(Error::DuplicateAppId(id));
             }
-            let share = &mut cfg.shares[i];
-            if share.name.trim().is_empty() {
-                share.name = id.clone();
+            let app = &mut cfg.apps[i];
+            if app.name.trim().is_empty() {
+                app.name = id.clone();
             }
-            share.upstream = parse_upstream(&share.upstream)
-                .map_err(|reason| Error::InvalidUpstream { share: id, reason })?;
+            app.upstream = parse_upstream(&app.upstream)
+                .map_err(|reason| Error::InvalidUpstream { app: id, reason })?;
         }
         Ok(cfg)
     }
 
-    /// The share used for requests that name no share.
-    pub fn default_share(&self) -> Option<&ShareConfig> {
-        self.shares.first()
+    /// The app used for requests that name no app.
+    pub fn default_app(&self) -> Option<&AppConfig> {
+        self.apps.first()
     }
 
-    /// Hash of everything a guest can observe about the share list. Used by
+    /// Hash of everything a guest can observe about the app list. Used by
     /// guest nodes to detect whether they need to update their cached view of
-    /// the circle config.
+    /// the share config.
     pub fn config_hash(&self) -> u64 {
         let mut h = Fnv1a::new();
         h.write(self.name.as_bytes());
-        for s in &self.shares {
+        for s in &self.apps {
             h.write(s.id.as_bytes());
             h.write(s.name.as_bytes());
             h.write(s.kind.as_str().as_bytes());
@@ -162,12 +162,12 @@ impl CircleConfig {
     }
 }
 
-/// Renders the `circle.toml` that `init` writes: the circle's name and
-/// transport, and a commented-out share block to copy from.
+/// Renders the `share.toml` that `init` writes: the share's name and
+/// transport, and a commented-out app block to copy from.
 pub fn render_template(name: &str, transport: &TransportConfig) -> String {
     let mut out = String::new();
-    out.push_str("# This circle's config. Edit freely and apply with `waserver reload`.\n");
-    out.push_str("# Reference: one [[share]] block per app served to the circle.\n\n");
+    out.push_str("# This share's config. Edit freely and apply with `waserver reload`.\n");
+    out.push_str("# Reference: one [[app]] block per app served to the share.\n\n");
     out.push_str(&format!("name = {}\n\n", quote(name)));
     out.push_str("[transport]\n");
     out.push_str(&format!("kind = {}\n", quote(transport.kind().as_str())));
@@ -181,12 +181,12 @@ pub fn render_template(name: &str, transport: &TransportConfig) -> String {
         TransportConfig::Iroh {} => {}
     }
     out.push_str(
-        "\n# One [[share]] block per app. `id` is what guests persist: keep it stable\n\
+        "\n# One [[app]] block per app. `id` is what guests persist: keep it stable\n\
          # and rename via `name`. `upstream` is host:port, or :port for localhost.\n\
          # `kind` is web (default), jellyfin or immich; it tells integrating clients\n\
          # which app this is.\n\
-         # The first share is the default for clients that predate circles.\n\
-         #\n# [[share]]\n# id = \"myapp\"\n# name = \"My App\"\n# kind = \"jellyfin\"\n# upstream = \":3000\"\n",
+         # The first app is the default for clients that predate the DATA framing.\n\
+         #\n# [[app]]\n# id = \"myapp\"\n# name = \"My App\"\n# kind = \"jellyfin\"\n# upstream = \":3000\"\n",
     );
     out
 }
@@ -195,7 +195,7 @@ fn quote(s: &str) -> String {
     toml::Value::String(s.to_owned()).to_string()
 }
 
-/// Circle and share IDs, file-system and DNS-label safe.
+/// Share and app IDs, file-system and DNS-label safe.
 pub fn is_valid_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
@@ -264,49 +264,49 @@ name = "Family"
 [transport]
 kind = "wispers-connect"
 
-[[share]]
+[[app]]
 id = "jellyfin"
 name = "Jellyfin"
 kind = "jellyfin"
 upstream = "127.0.0.1:8096"
 
-[[share]]
+[[app]]
 id = "photos"
 upstream = ":2283"
 "#;
 
     #[test]
     fn parses_and_normalises() {
-        let cfg = CircleConfig::parse(FULL).unwrap();
+        let cfg = ShareConfig::parse(FULL).unwrap();
         assert_eq!(cfg.name, "Family");
         assert_eq!(
             cfg.transport,
             TransportConfig::WispersConnect { backend: None }
         );
-        assert_eq!(cfg.shares.len(), 2);
-        assert_eq!(cfg.default_share().unwrap().id, "jellyfin");
-        assert_eq!(cfg.shares[0].kind, ShareKind::Jellyfin);
+        assert_eq!(cfg.apps.len(), 2);
+        assert_eq!(cfg.default_app().unwrap().id, "jellyfin");
+        assert_eq!(cfg.apps[0].kind, AppKind::Jellyfin);
         // Name defaults to the id, an empty host means localhost.
-        assert_eq!(cfg.shares[1].name, "photos");
-        assert_eq!(cfg.shares[1].upstream, "localhost:2283");
-        assert_eq!(cfg.shares[1].kind, ShareKind::Web);
+        assert_eq!(cfg.apps[1].name, "photos");
+        assert_eq!(cfg.apps[1].upstream, "localhost:2283");
+        assert_eq!(cfg.apps[1].kind, AppKind::Web);
     }
 
     #[test]
-    fn transport_defaults_to_wispers_connect_and_shares_may_be_absent() {
-        let cfg = CircleConfig::parse("name = \"x\"\n").unwrap();
+    fn transport_defaults_to_wispers_connect_and_apps_may_be_absent() {
+        let cfg = ShareConfig::parse("name = \"x\"\n").unwrap();
         assert_eq!(
             cfg.transport,
             TransportConfig::WispersConnect { backend: None }
         );
-        assert!(cfg.shares.is_empty());
-        assert!(cfg.default_share().is_none());
+        assert!(cfg.apps.is_empty());
+        assert!(cfg.default_app().is_none());
     }
 
     #[test]
     fn transport_settings_live_with_their_transport() {
         let text = "name = \"x\"\n[transport]\nkind = \"wispers-connect\"\nbackend = \"https://h.example\"\n";
-        let cfg = CircleConfig::parse(text).unwrap();
+        let cfg = ShareConfig::parse(text).unwrap();
         assert_eq!(
             cfg.transport,
             TransportConfig::WispersConnect {
@@ -315,73 +315,70 @@ upstream = ":2283"
         );
         // A setting that belongs to no transport, or the old flat form, is rejected.
         assert!(
-            CircleConfig::parse(
+            ShareConfig::parse(
                 "name = \"x\"\n[transport]\nkind = \"wispers-connect\"\nrelay = \"r\"\n"
             )
             .is_err()
         );
-        assert!(CircleConfig::parse("name = \"x\"\ntransport = \"wispers-connect\"\n").is_err());
-        assert!(CircleConfig::parse("name = \"x\"\nbackend = \"https://h.example\"\n").is_err());
+        assert!(ShareConfig::parse("name = \"x\"\ntransport = \"wispers-connect\"\n").is_err());
+        assert!(ShareConfig::parse("name = \"x\"\nbackend = \"https://h.example\"\n").is_err());
     }
 
     #[test]
     fn rejects_bad_files() {
         assert!(matches!(
-            CircleConfig::parse("name = \"\"\n"),
+            ShareConfig::parse("name = \"\"\n"),
             Err(Error::EmptyName)
         ));
         assert!(matches!(
-            CircleConfig::parse("name = \"x\"\n[transport]\nkind = \"tailscale\"\n"),
+            ShareConfig::parse("name = \"x\"\n[transport]\nkind = \"tailscale\"\n"),
             Err(Error::Parse(_))
         ));
         // A setting from another transport is a parse error.
         assert!(matches!(
-            CircleConfig::parse(
+            ShareConfig::parse(
                 "name = \"x\"\n[transport]\nkind = \"iroh\"\nbackend = \"https://h\"\n"
             ),
             Err(Error::Parse(_))
         ));
         assert_eq!(
-            CircleConfig::parse("name = \"x\"\n[transport]\nkind = \"iroh\"\n")
+            ShareConfig::parse("name = \"x\"\n[transport]\nkind = \"iroh\"\n")
                 .unwrap()
                 .transport,
             TransportConfig::Iroh {}
         );
         assert!(matches!(
-            CircleConfig::parse("name = \"x\"\nbogus = 1\n"),
+            ShareConfig::parse("name = \"x\"\nbogus = 1\n"),
             Err(Error::Parse(_))
         ));
-        let dup = "name = \"x\"\n[[share]]\nid = \"a\"\nupstream = \":1\"\n[[share]]\nid = \"a\"\nupstream = \":2\"\n";
+        let dup = "name = \"x\"\n[[app]]\nid = \"a\"\nupstream = \":1\"\n[[app]]\nid = \"a\"\nupstream = \":2\"\n";
         assert!(matches!(
-            CircleConfig::parse(dup),
-            Err(Error::DuplicateShareId(id)) if id == "a"
+            ShareConfig::parse(dup),
+            Err(Error::DuplicateAppId(id)) if id == "a"
         ));
-        let bad_id = "name = \"x\"\n[[share]]\nid = \"a b\"\nupstream = \":1\"\n";
+        let bad_id = "name = \"x\"\n[[app]]\nid = \"a b\"\nupstream = \":1\"\n";
         assert!(matches!(
-            CircleConfig::parse(bad_id),
-            Err(Error::InvalidShareId(_))
+            ShareConfig::parse(bad_id),
+            Err(Error::InvalidAppId(_))
         ));
-        let bad_port = "name = \"x\"\n[[share]]\nid = \"a\"\nupstream = \"app\"\n";
+        let bad_port = "name = \"x\"\n[[app]]\nid = \"a\"\nupstream = \"app\"\n";
         assert!(matches!(
-            CircleConfig::parse(bad_port),
-            Err(Error::InvalidUpstream { share, .. }) if share == "a"
+            ShareConfig::parse(bad_port),
+            Err(Error::InvalidUpstream { app, .. }) if app == "a"
         ));
         // An unknown kind is a contract violation, not a free-form label.
-        let bad_kind = "name = \"x\"\n[[share]]\nid = \"a\"\nkind = \"plex\"\nupstream = \":1\"\n";
-        assert!(matches!(
-            CircleConfig::parse(bad_kind),
-            Err(Error::Parse(_))
-        ));
+        let bad_kind = "name = \"x\"\n[[app]]\nid = \"a\"\nkind = \"plex\"\nupstream = \":1\"\n";
+        assert!(matches!(ShareConfig::parse(bad_kind), Err(Error::Parse(_))));
     }
 
     #[test]
     fn hash_tracks_what_guests_see() {
-        let a = CircleConfig::parse(FULL).unwrap();
-        let same = CircleConfig::parse(&format!("{}\n# a comment\n", FULL)).unwrap();
+        let a = ShareConfig::parse(FULL).unwrap();
+        let same = ShareConfig::parse(&format!("{}\n# a comment\n", FULL)).unwrap();
         assert_eq!(a.config_hash(), same.config_hash());
-        let renamed = CircleConfig::parse(&FULL.replace("Jellyfin", "Movies")).unwrap();
+        let renamed = ShareConfig::parse(&FULL.replace("Jellyfin", "Movies")).unwrap();
         assert_ne!(a.config_hash(), renamed.config_hash());
-        let reordered = CircleConfig::parse(&FULL.replace("photos", "aphotos")).unwrap();
+        let reordered = ShareConfig::parse(&FULL.replace("photos", "aphotos")).unwrap();
         assert_ne!(a.config_hash(), reordered.config_hash());
     }
 
@@ -390,14 +387,14 @@ upstream = ":2283"
         let transport = TransportConfig::WispersConnect {
             backend: Some("https://h.example".to_owned()),
         };
-        let cfg = CircleConfig::parse(&render_template("It's \"Demo\"", &transport)).unwrap();
+        let cfg = ShareConfig::parse(&render_template("It's \"Demo\"", &transport)).unwrap();
         assert_eq!(cfg.name, "It's \"Demo\"");
         assert_eq!(cfg.transport, transport);
-        // The share block is commented out, so nothing is served until edited.
-        assert!(cfg.shares.is_empty());
+        // The app block is commented out, so nothing is served until edited.
+        assert!(cfg.apps.is_empty());
 
         let managed =
-            CircleConfig::parse(&render_template("x", &TransportConfig::default())).unwrap();
+            ShareConfig::parse(&render_template("x", &TransportConfig::default())).unwrap();
         assert_eq!(managed.transport, TransportConfig::default());
     }
 

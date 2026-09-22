@@ -1,6 +1,6 @@
-//! Circle management logic.
+//! Share management logic.
 
-use crate::storage::{self, CircleId};
+use crate::storage::{self, ShareId};
 use crate::transports::{Stream, TerminalState, Transport, TransportError};
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
@@ -9,28 +9,28 @@ use hyper::client::conn::http1 as http1_client;
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
-use wire::{CircleInfo, ConfigHash, Share};
+use wire::{App, ConfigHash, ShareInfo};
 use wispers_access_wire as wire;
 
-/// A circle this client has joined. Manages circle metadata (e.g. the list of
-/// shares) and the transport used to communicate to the circle's server, makes
-/// guest-API calls to the server as needed.
-pub struct Circle {
-    /// The `<circle>` label in `<share>.<circle>.localhost`.
+/// A share this client has joined. Manages share metadata (e.g. the list of
+/// apps) and the transport used to communicate with the share's host node,
+/// makes guest-API calls to the host node as needed.
+pub struct Share {
+    /// The `<share>` label in `<app>.<share>.localhost`.
     label: String,
-    id: CircleId,
+    id: ShareId,
     display_name: String,
     row: storage::Row,
     transport: Box<dyn Transport>,
     /// Set once the transport reports a terminal failure mid-session. From
-    /// then on the circle answers without dialing.
+    /// then on the share answers without dialing.
     dead: Mutex<Option<TerminalState>>,
 }
 
-impl Circle {
+impl Share {
     pub fn new(
         label: String,
-        id: CircleId,
+        id: ShareId,
         display_name: String,
         row: storage::Row,
         transport: Box<dyn Transport>,
@@ -53,41 +53,41 @@ impl Circle {
         &self.display_name
     }
 
-    /// The server as the transport identifies it, for humans.
+    /// The host node as the transport identifies it, for humans.
     pub fn describe_transport(&self) -> String {
         self.transport.describe()
     }
 
-    /// The shares as last fetched from the server.
-    pub fn shares(&self) -> Result<Vec<Share>> {
-        self.row.read_shares()
+    /// The apps as last fetched from the host node.
+    pub fn apps(&self) -> Result<Vec<App>> {
+        self.row.read_apps()
     }
 
-    /// Opens a DATA stream for one share, ready for the HTTP request.
-    pub async fn open_data_stream(&self, share_id: &str) -> Result<Stream, TransportError> {
+    /// Opens a DATA stream for one app, ready for the HTTP request.
+    pub async fn open_data_stream(&self, app_id: &str) -> Result<Stream, TransportError> {
         let mut stream = self.open_stream().await?;
-        wire::open_data_stream(&mut stream, share_id)
+        wire::open_data_stream(&mut stream, app_id)
             .await
             .map_err(|e| TransportError::Transient(e.into()))?;
         Ok(stream)
     }
 
-    /// Asks the server for the share list if it changed since the stored
+    /// Asks the host node for the app list if it changed since the stored
     /// one, and stores the answer. `None` = unchanged.
-    pub async fn refresh(&self) -> Result<Option<CircleInfo>> {
+    pub async fn refresh(&self) -> Result<Option<ShareInfo>> {
         let stream = self.open_stream().await.map_err(|e| match e {
             TransportError::Terminal(state) => anyhow::anyhow!("{}", state.describe()),
             TransportError::Transient(e) => e,
         })?;
-        let known = self.row.read_circle_config_hash()?;
+        let known = self.row.read_share_config_hash()?;
         let info = fetch_info(stream, known).await?;
         if let Some(info) = &info {
-            self.row.write_circle_info(info)?;
+            self.row.write_share_info(info)?;
         }
         Ok(info)
     }
 
-    /// A stream from the transport, unless the circle is known to be dead.
+    /// A stream from the transport, unless the share is known to be dead.
     /// A terminal failure is recorded here, once, for this run and the next.
     async fn open_stream(&self) -> Result<Stream, TransportError> {
         if let Some(state) = *self.dead.lock().expect("unpoisoned") {
@@ -96,7 +96,7 @@ impl Circle {
         match self.transport.open_stream().await {
             Err(TransportError::Terminal(state)) => {
                 eprintln!(
-                    "[{}] circle is no longer available — {}",
+                    "[{}] share is no longer available — {}",
                     self.label,
                     state.describe()
                 );
@@ -109,13 +109,13 @@ impl Circle {
     }
 }
 
-/// `GET /v1/circle` over a fresh stream. `None` when the server says the
-/// circle is unchanged since `known`. Also what `join` uses, before there is
-/// a circle to hang it on.
-pub async fn fetch_info(stream: Stream, known: Option<ConfigHash>) -> Result<Option<CircleInfo>> {
+/// `GET /v1/share` over a fresh stream. `None` when the host node says the
+/// share is unchanged since `known`. Also what `join` uses, before there is a
+/// share to hang it on.
+pub async fn fetch_info(stream: Stream, known: Option<ConfigHash>) -> Result<Option<ShareInfo>> {
     let mut req = hyper::Request::builder()
         .method(hyper::Method::GET)
-        .uri(wire::CIRCLE_PATH);
+        .uri(wire::SHARE_PATH);
     if let Some(known) = known {
         req = req.header(hyper::header::IF_NONE_MATCH, known.etag());
     }
@@ -124,18 +124,18 @@ pub async fn fetch_info(stream: Stream, known: Option<ConfigHash>) -> Result<Opt
         .expect("static request is valid");
     let resp = guest_api_request(stream, req)
         .await
-        .context("GET /v1/circle (is waserver up to date?)")?;
+        .context("GET /v1/share (is waserver up to date?)")?;
     match resp.status() {
         StatusCode::NOT_MODIFIED => Ok(None),
-        StatusCode::OK => Ok(Some(read_circle(resp).await?)),
-        status => anyhow::bail!("server answered {} to GET /v1/circle", status),
+        StatusCode::OK => Ok(Some(read_share(resp).await?)),
+        status => anyhow::bail!("the host node answered {} to GET /v1/share", status),
     }
 }
 
-/// `POST /v1/activation` over a fresh stream on a connection whose key the
-/// server does not know yet: binds that key to the invite and returns the
-/// circle. A refusal carries the contract's reason.
-pub async fn activate(stream: Stream, secret: &wire::InviteSecret) -> Result<CircleInfo> {
+/// `POST /v1/activation` over a fresh stream on a connection whose key the host
+/// node does not know yet: binds that key to the invite and returns the share.
+/// A refusal carries the contract's reason.
+pub async fn activate(stream: Stream, secret: &wire::InviteSecret) -> Result<ShareInfo> {
     let body = serde_json::to_vec(&wire::Activation { secret: *secret })?;
     let req = hyper::Request::builder()
         .method(hyper::Method::POST)
@@ -147,17 +147,17 @@ pub async fn activate(stream: Stream, secret: &wire::InviteSecret) -> Result<Cir
         .await
         .context("POST /v1/activation")?;
     if resp.status() == StatusCode::OK {
-        return read_circle(resp).await;
+        return read_share(resp).await;
     }
     let status = resp.status();
     let body = resp.into_body().collect().await?.to_bytes();
     match serde_json::from_slice::<wire::ApiError>(&body) {
         Ok(err) => anyhow::bail!("activation refused: {}", err.error),
-        Err(_) => anyhow::bail!("server answered {} to the activation", status),
+        Err(_) => anyhow::bail!("the host node answered {} to the activation", status),
     }
 }
 
-/// `DELETE /v1/guest` over a fresh stream: this device leaves the circle.
+/// `DELETE /v1/guest` over a fresh stream: this device leaves the share.
 pub async fn leave(stream: Stream) -> Result<()> {
     let req = hyper::Request::builder()
         .method(hyper::Method::DELETE)
@@ -169,7 +169,7 @@ pub async fn leave(stream: Stream) -> Result<()> {
         .context("DELETE /v1/guest")?;
     match resp.status() {
         StatusCode::NO_CONTENT => Ok(()),
-        status => anyhow::bail!("server answered {} to DELETE /v1/guest", status),
+        status => anyhow::bail!("the host node answered {} to DELETE /v1/guest", status),
     }
 }
 
@@ -191,49 +191,48 @@ async fn guest_api_request(
     Ok(sender.send_request(req).await?)
 }
 
-async fn read_circle(resp: hyper::Response<hyper::body::Incoming>) -> Result<CircleInfo> {
+async fn read_share(resp: hyper::Response<hyper::body::Incoming>) -> Result<ShareInfo> {
     let body = resp
         .into_body()
         .collect()
         .await
-        .context("reading the circle")?
+        .context("reading the share")?
         .to_bytes();
-    serde_json::from_slice(&body).context("parsing the circle")
+    serde_json::from_slice(&body).context("parsing the share")
 }
 
 //-- Registry ------------------------------------------------------------------
 
-/// CircleRegistry manages all circles this client has joined.
+/// ShareRegistry manages all shares this client has joined.
 #[derive(Default)]
-pub struct CircleRegistry {
-    live: HashMap<String, Arc<Circle>>,
+pub struct ShareRegistry {
+    live: HashMap<String, Arc<Share>>,
     by_id: HashMap<String, String>,
     dead: HashMap<String, TerminalState>,
 }
 
 pub enum Lookup {
-    Live(Arc<Circle>),
+    Live(Arc<Share>),
     Dead(TerminalState),
     Unknown,
 }
 
-impl CircleRegistry {
-    pub fn insert(&mut self, circle: Circle) {
-        self.by_id
-            .insert(circle.id.to_string(), circle.label.clone());
-        self.live.insert(circle.label.clone(), Arc::new(circle));
+impl ShareRegistry {
+    pub fn insert(&mut self, share: Share) {
+        self.by_id.insert(share.id.to_string(), share.label.clone());
+        self.live.insert(share.label.clone(), Arc::new(share));
     }
 
-    pub fn insert_dead(&mut self, label: String, id: CircleId, state: TerminalState) {
+    pub fn insert_dead(&mut self, label: String, id: ShareId, state: TerminalState) {
         self.by_id.insert(id.to_string(), label.clone());
         self.dead.insert(label, state);
     }
 
-    /// By label, or by circle id.
+    /// By label, or by share id.
     pub fn get(&self, key: &str) -> Lookup {
         let label = self.by_id.get(key).map(String::as_str).unwrap_or(key);
-        if let Some(circle) = self.live.get(label) {
-            return Lookup::Live(circle.clone());
+        if let Some(share) = self.live.get(label) {
+            return Lookup::Live(share.clone());
         }
         if let Some(state) = self.dead.get(label) {
             return Lookup::Dead(*state);
@@ -241,7 +240,7 @@ impl CircleRegistry {
         Lookup::Unknown
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = &Arc<Circle>> {
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<Share>> {
         self.live.values()
     }
 }

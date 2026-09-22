@@ -10,7 +10,7 @@ use std::pin::Pin;
 use tokio::io::{AsyncRead, AsyncWrite};
 use wispers_access_wire as wire;
 
-/// A bidirectional stream to the server, ready for the wire protocol.
+/// A bidirectional stream to the host node, ready for the wire protocol.
 pub type Stream = Box<dyn Bidirectional>;
 
 /// `dyn` allows one non-auto trait, so `AsyncRead + AsyncWrite` cannot be
@@ -21,8 +21,8 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin> Bidirectional for T {}
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Joins the circle the invite is for, selecting the appropriate transport.
-pub async fn join(invite: wire::Invite, row: &storage::Row) -> Result<wire::CircleInfo> {
+/// Joins the share the invite is for, selecting the appropriate transport.
+pub async fn join(invite: wire::Invite, row: &storage::Row) -> Result<wire::ShareInfo> {
     match invite {
         wire::Invite::WispersConnect {
             registration_token,
@@ -44,7 +44,7 @@ pub async fn join(invite: wire::Invite, row: &storage::Row) -> Result<wire::Circ
     }
 }
 
-/// Restores the transport for a circle's database row.
+/// Restores the transport for a share's database row.
 pub async fn restore(row: storage::Row) -> Result<Box<dyn Transport>, TransportError> {
     match row
         .read_transport_kind()
@@ -55,13 +55,13 @@ pub async fn restore(row: storage::Row) -> Result<Box<dyn Transport>, TransportE
             wispers_connect_transport::WispersConnect::restore(row).await?,
         )),
         wire::Transport::Tailscale => Err(TransportError::Transient(anyhow::anyhow!(
-            "tailscale circles are not supported by this waclient"
+            "tailscale shares are not supported by this waclient"
         ))),
     }
 }
 
 /// Releases whatever the transport holds beyond this device before the
-/// circle is removed. Best effort: the row goes either way.
+/// share is removed. Best effort: the row goes either way.
 pub async fn leave(row: &storage::Row) -> Result<()> {
     match row.read_transport_kind()? {
         wire::Transport::Iroh => iroh_transport::leave(row).await,
@@ -72,26 +72,26 @@ pub async fn leave(row: &storage::Row) -> Result<()> {
 }
 
 /// One implementation per transport. Object-safe, so a registry can hold
-/// circles on different transports; hence the boxed futures.
+/// shares on different transports; hence the boxed futures.
 pub trait Transport: Send + Sync {
     /// Opens a fresh stream, connecting or reconnecting as needed. A passing
     /// failure is retried once; a final one is reported as such.
     fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>>;
 
-    /// How this transport identifies the server, for humans.
+    /// How this transport identifies the host, for humans.
     fn describe(&self) -> String;
 }
 
 pub enum TransportError {
-    /// The server side is gone for good; dialing again cannot help.
+    /// The host node is gone for good; dialing again cannot help.
     Terminal(TerminalState),
     /// An outage or a broken connection. Worth another try later.
     Transient(anyhow::Error),
 }
 
-/// Why a circle is permanently unusable. `Removed` = the hub rejected our
-/// credentials outright (circle deleted server-side); `Revoked` = this device
-/// was revoked from the circle's roster.
+/// Why a share is permanently unusable. `Removed` = the hub rejected our
+/// credentials outright (share deleted on the host node); `Revoked` = this
+/// device was revoked from the share's roster.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TerminalState {
     Removed,
@@ -116,7 +116,7 @@ impl TerminalState {
 
     pub fn describe(self) -> &'static str {
         match self {
-            Self::Removed => "the circle was removed on the server side",
+            Self::Removed => "the share was removed by its host node",
             Self::Revoked => "this device's access was revoked",
         }
     }

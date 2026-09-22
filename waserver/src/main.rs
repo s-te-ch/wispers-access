@@ -25,8 +25,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Initialise a new circle: a group of guests and the shares they see.
-    /// Writes its `circle.toml`, creates its identity and registers it with
+    /// Initialise a new share: a group of guests and the apps they see.
+    /// Writes its `share.toml`, creates its identity and registers it with
     /// the backend.
     Init {
         /// Wispers Connect API key (can also be set via WC_API_KEY env var).
@@ -35,51 +35,51 @@ enum Command {
         api_key: Option<String>,
         /// Base URL of a custom Wispers Connect backend (e.g.
         /// `https://myhub.example.com`). Omit to use the managed backend. Must
-        /// be https. Pinned into the circle and carried in its invite codes.
+        /// be https. Pinned into the share and carried in its invite codes.
         /// Wispers Connect only.
         #[arg(long, env = "WC_BACKEND")]
         backend: Option<String>,
-        /// Transport every member of this circle uses.
+        /// Transport every guest node of this share uses.
         #[arg(long, default_value = "wispers-connect")]
         transport: config::TransportKind,
-        /// Name of the circle (letters, digits, '-' or '_').
-        circle: String,
-        /// Display name of the circle, shown to guests.
+        /// Name of the share (letters, digits, '-' or '_').
+        share: String,
+        /// Display name of the share, shown to guests.
         display_name: String,
     },
-    /// Destroy a circle: removes its backend group (and with it every
-    /// member's access) and its local state. Irreversible.
+    /// Destroy a share: removes its backend group (and with it every
+    /// guest's access) and its local state. Irreversible.
     Deinit {
-        /// Name of the circle.
-        circle: String,
+        /// Name of the share.
+        share: String,
     },
-    /// Runs the server for a circle in the foreground. What it serves comes
-    /// from the circle's `circle.toml`.
+    /// Runs the server for a share in the foreground. What it serves comes
+    /// from the share's `share.toml`.
     Serve {
-        /// Name of the circle.
-        circle: String,
+        /// Name of the share.
+        share: String,
     },
-    /// Runs the server for a circle in the background.
+    /// Runs the server for a share in the background.
     Start {
-        /// Name of the circle.
-        circle: String,
+        /// Name of the share.
+        share: String,
     },
     /// Stops a server that is running in the background.
     Stop {
-        /// Name of the circle.
-        circle: String,
+        /// Name of the share.
+        share: String,
     },
-    /// Re-reads a running server's `circle.toml`. A broken file leaves the
+    /// Re-reads a running server's `share.toml`. A broken file leaves the
     /// running config in place.
     Reload {
-        /// Name of the circle.
-        circle: String,
+        /// Name of the share.
+        share: String,
     },
-    /// Shows the status of all circles, or a detailed view of one circle.
+    /// Shows the status of all shares, or a detailed view of one share.
     Status {
-        /// Name of a circle to show in detail. Omit for a one-line-per-circle
+        /// Name of a share to show in detail. Omit for a one-line-per-share
         /// fleet overview.
-        circle: Option<String>,
+        share: Option<String>,
         /// Output a JSON document instead of the human-readable rendering.
         /// The JSON shape is the stable interface.
         #[arg(long)]
@@ -90,12 +90,12 @@ enum Command {
         /// Don't stop at EOF. Instead, wait for more logs to be written.
         #[arg(short = 'f', long)]
         follow: bool,
-        circle: String,
+        share: String,
     },
     /// Generates a guest device invite code.
     Invite {
-        /// Name of the circle.
-        circle: String,
+        /// Name of the share.
+        share: String,
         /// Name of the new node.
         node_name: String,
         /// User identification (e.g. email address) of the user.
@@ -106,8 +106,8 @@ enum Command {
     },
     /// Revoke access.
     Revoke {
-        /// Name of the circle.
-        circle: String,
+        /// Name of the share.
+        share: String,
         /// The node's number in `waserver status`.
         number: i64,
     },
@@ -150,7 +150,7 @@ async fn async_main(command: Command) -> Result<()> {
             api_key,
             backend,
             transport,
-            circle,
+            share,
             display_name,
         } => {
             let transport = match transport {
@@ -164,31 +164,31 @@ async fn async_main(command: Command) -> Result<()> {
                     config::TransportConfig::Iroh {}
                 }
             };
-            initialization::up(api_key.as_deref(), &circle, &display_name, &transport).await
+            initialization::up(api_key.as_deref(), &share, &display_name, &transport).await
         }
-        Command::Deinit { circle } => initialization::down(&circle).await,
-        Command::Serve { circle } => {
-            let _log = logging::init_foreground(&circle)?;
-            serving::serve(&circle).await
+        Command::Deinit { share } => initialization::down(&share).await,
+        Command::Serve { share } => {
+            let _log = logging::init_foreground(&share)?;
+            serving::serve(&share).await
         }
-        Command::Start { circle } => {
-            let _log = logging::init_background(&circle)?;
-            serving::serve(&circle)
+        Command::Start { share } => {
+            let _log = logging::init_background(&share)?;
+            serving::serve(&share)
                 .await
                 // At this point, stderr is gone, so we write the error to the log.
                 .inspect_err(|e| tracing::error!(error = format!("{e:#}"), "server failed"))
         }
-        Command::Stop { circle } => stop(&circle).await,
-        Command::Reload { circle } => reload(&circle).await,
-        Command::Status { circle, json } => status::run(circle.as_deref(), json).await,
-        Command::Logs { follow, circle } => logs(follow, &circle),
+        Command::Stop { share } => stop(&share).await,
+        Command::Reload { share } => reload(&share).await,
+        Command::Status { share, json } => status::run(share.as_deref(), json).await,
+        Command::Logs { follow, share } => logs(follow, &share),
         Command::Invite {
-            circle,
+            share,
             node_name,
             user_id,
             png,
-        } => invite(&circle, &node_name, &user_id, png.as_deref()).await,
-        Command::Revoke { circle, number } => revoke(&circle, number).await,
+        } => invite(&share, &node_name, &user_id, png.as_deref()).await,
+        Command::Revoke { share, number } => revoke(&share, number).await,
     }
 }
 
@@ -224,9 +224,9 @@ fn start_daemon() -> Result<()> {
     std::process::exit(0);
 }
 
-async fn stop(circle: &str) -> Result<()> {
-    let Ok(mut client) = ipc::Client::connect(circle).await else {
-        anyhow::bail!("cannot connect to server for circle {}", circle);
+async fn stop(share: &str) -> Result<()> {
+    let Ok(mut client) = ipc::Client::connect(share).await else {
+        anyhow::bail!("cannot connect to server for share {}", share);
     };
     match client.request(&ipc::Request::Shutdown).await {
         Ok(ipc::Response::Success { .. }) => {
@@ -242,25 +242,21 @@ async fn stop(circle: &str) -> Result<()> {
     Ok(())
 }
 
-async fn reload(circle: &str) -> Result<()> {
-    let Ok(mut client) = ipc::Client::connect(circle).await else {
-        anyhow::bail!("cannot connect to server for circle {}", circle);
+async fn reload(share: &str) -> Result<()> {
+    let Ok(mut client) = ipc::Client::connect(share).await else {
+        anyhow::bail!("cannot connect to server for share {}", share);
     };
     match client.request(&ipc::Request::Reload).await {
         Ok(ipc::Response::Success {
             data: ipc::ResponseData::Reload(r),
             ..
         }) => {
-            let ids: Vec<&str> = r.shares.iter().map(|s| s.id.as_str()).collect();
+            let ids: Vec<&str> = r.apps.iter().map(|s| s.id.as_str()).collect();
             if r.changed {
-                println!(
-                    "Reloaded. Serving {} share(s): {}",
-                    ids.len(),
-                    ids.join(", ")
-                );
+                println!("Reloaded. Serving {} app(s): {}", ids.len(), ids.join(", "));
             } else {
                 println!(
-                    "No change. Serving {} share(s): {}",
+                    "No change. Serving {} app(s): {}",
                     ids.len(),
                     ids.join(", ")
                 );
@@ -279,15 +275,15 @@ async fn reload(circle: &str) -> Result<()> {
     Ok(())
 }
 
-fn logs(follow: bool, circle: &str) -> Result<()> {
+fn logs(follow: bool, share: &str) -> Result<()> {
     use std::collections::VecDeque;
     use std::io::{self, Read, Write};
 
     let mut stdout = io::stdout().lock();
-    let paths = logging::list_log_files(circle)?;
+    let paths = logging::list_log_files(share)?;
     let mut paths = VecDeque::from(paths);
     let Some(mut path) = paths.pop_front() else {
-        eprintln!("No logs for circle {}", circle);
+        eprintln!("No logs for share {}", share);
         return Ok(());
     };
     let mut file =
@@ -325,7 +321,7 @@ fn logs(follow: bool, circle: &str) -> Result<()> {
         }
 
         // Check for newer log files due to log rotation.
-        for new_path in logging::list_log_files(circle)? {
+        for new_path in logging::list_log_files(share)? {
             if new_path > path {
                 paths.push_back(new_path);
             }
@@ -344,15 +340,15 @@ fn logs(follow: bool, circle: &str) -> Result<()> {
 }
 
 async fn invite(
-    circle: &str,
+    share: &str,
     node_name: &str,
     user_id: &str,
     png: Option<&std::path::Path>,
 ) -> Result<()> {
     // The daemon mints invites on every transport: an invite is only good
     // once it can be redeemed there.
-    let Ok(mut client) = ipc::Client::connect(circle).await else {
-        anyhow::bail!("cannot connect to server for circle {}", circle);
+    let Ok(mut client) = ipc::Client::connect(share).await else {
+        anyhow::bail!("cannot connect to server for share {}", share);
     };
     let req = ipc::Request::GetInvite {
         node_name: node_name.to_owned(),
@@ -452,14 +448,14 @@ fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
 
 /// Revokes a guest's access. Where the roster lives, and whether a daemon
 /// is needed, is the transport's business.
-async fn revoke(circle: &str, number: i64) -> Result<()> {
-    let dir = storage::CircleDir::new(circle)?;
+async fn revoke(share: &str, number: i64) -> Result<()> {
+    let dir = storage::ShareDir::new(share)?;
     match dir.load_config()?.transport {
         config::TransportConfig::WispersConnect { backend } => {
             let node_number = i32::try_from(number).context("not a node number")?;
-            wispers_connect_transport::revoke(circle, dir, backend, node_number).await
+            wispers_connect_transport::revoke(share, dir, backend, node_number).await
         }
-        config::TransportConfig::Iroh {} => iroh_transport::revoke(circle, dir, number).await,
+        config::TransportConfig::Iroh {} => iroh_transport::revoke(share, dir, number).await,
     }
 }
 
@@ -483,18 +479,18 @@ mod tests {
     }
 
     #[test]
-    fn cli_parses_circle_init() {
+    fn cli_parses_share_init() {
         let cli =
             Cli::try_parse_from(["waserver", "init", "--api-key", "k", "team", "Awesome Team"])
                 .unwrap();
         match cli.command {
             Command::Init {
-                circle,
+                share,
                 display_name,
                 transport,
                 ..
             } => {
-                assert_eq!(circle, "team");
+                assert_eq!(share, "team");
                 assert_eq!(display_name, "Awesome Team");
                 assert_eq!(transport, config::TransportKind::WispersConnect);
             }
