@@ -30,11 +30,10 @@ pub enum Target {
     },
 }
 
-/// Names the reason for a locally generated error, so clients can tell it
-/// from an upstream's own 404 or 503.
+/// Header carrying locally generated errors, so clients can tell them apart
+/// from upstream's own 404 or 503.
 pub const ERROR_HEADER: &str = "x-wispers-access-error";
-/// The share's current config hash, on errors that mean "your app list
-/// is stale".
+/// Header carrying the share's current config hash.
 pub const CONFIG_HASH_HEADER: &str = "x-wispers-access-config-hash";
 
 /// Serve HTTP/1 over one stream, forwarding every request to the target.
@@ -44,7 +43,7 @@ where
 {
     let io = TokioIo::new(io);
     let service =
-        hyper::service::service_fn(move |req| forward(req, target.clone(), user_id.clone()));
+        hyper::service::service_fn(move |req| handle_request(req, target.clone(), user_id.clone()));
     http1_server::Builder::new()
         // One request per stream: the client may FIN its side right after the
         // request and wait for the response on the other half.
@@ -56,9 +55,10 @@ where
         .context("HTTP/1 connection error")
 }
 
-/// Service entry point. Always succeeds at the service level. Upstream failures
-/// are converted to 5xx responses rather than connection errors.
-async fn forward(
+/// Handle an HTTP request. This is the hyper service entry point (see
+/// `serve()`). Always succeeds at the service level. Upstream failures are
+/// converted to 5xx responses.
+async fn handle_request(
     req: hyper::Request<Incoming>,
     target: Target,
     user_id: String,
@@ -66,6 +66,7 @@ async fn forward(
     let upstream = match target {
         Target::Upstream(upstream) => upstream,
         Target::NoDefaultApp => {
+            // Legacy client requested the default app when there are no shared apps.
             warn!(uri = %req.uri(), "no app configured; rejecting");
             return Ok(error_response(
                 hyper::StatusCode::SERVICE_UNAVAILABLE,
@@ -73,6 +74,9 @@ async fn forward(
             ));
         }
         Target::UnknownApp { config_hash } => {
+            // The requested upstream app doesn't exist. Note that the upstream
+            // is determined at the stream level, but the error is sent here
+            // because it's an HTTP error.
             let mut resp = error_response(hyper::StatusCode::NOT_FOUND, "app not found");
             let headers = resp.headers_mut();
             headers.insert(
@@ -87,7 +91,7 @@ async fn forward(
             return Ok(resp);
         }
     };
-    match try_forward(req, upstream, user_id).await {
+    match forward_to_upstream(req, upstream, user_id).await {
         Ok(resp) => Ok(resp),
         Err(e) => {
             warn!(error = format!("{:#}", e), "forward error");
@@ -99,13 +103,14 @@ async fn forward(
     }
 }
 
-async fn try_forward(
+/// Forward the request to the chosen upstream app.
+/// This also handles WebSocket upgrades.
+async fn forward_to_upstream(
     mut req: hyper::Request<Incoming>,
     upstream: Arc<str>,
     user_id: String,
 ) -> Result<hyper::Response<BoxedBody>> {
-    // Open a connection to the upstream app. `upstream` is `host:port`; tokio
-    // resolves DNS names (e.g. a Docker compose service) and parses IP:port.
+    // Open a connection to the upstream app. `upstream` is `host:port`.
     let tcp = TcpStream::connect(upstream.as_ref())
         .await
         .with_context(|| format!("connect to upstream {}", upstream))?;
@@ -127,23 +132,20 @@ async fn try_forward(
     let upgrade = is_upgrade_request(req.headers());
     let peer_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
 
-    // Rewrite the request before forwarding.
+    // Rewrite the request, then forward.
     let (mut parts, body) = req.into_parts();
     strip_hop_by_hop(&mut parts.headers, upgrade);
     inject_identity(&mut parts.headers, &user_id);
-    // "forwarding" appearing means the request was fully received from the peer
-    // over its QUIC stream and is now going to the local app.
     let uri_for_log = parts.uri.clone();
     info!(method = %parts.method, uri = %parts.uri, "forwarding to upstream");
     let forwarded = hyper::Request::from_parts(parts, body);
-
     let mut upstream_resp = sender
         .send_request(forwarded)
         .await
         .context("upstream send_request")?;
     info!(status = %upstream_resp.status(), uri = %uri_for_log, "upstream responded");
 
-    // Successful upgrade: hand both raw byte streams to a relay task and return
+    // Successful upgrade. Hand both raw byte streams to a relay task and return
     // the 101 to the peer with its handshake headers intact.
     if upstream_resp.status() == hyper::StatusCode::SWITCHING_PROTOCOLS {
         match peer_upgrade {
@@ -167,8 +169,8 @@ async fn try_forward(
 
 /// Relay raw bytes both ways between the peer (QUIC) side and the upstream
 /// (local app) side after a successful protocol upgrade. Each direction ends at
-/// its own EOF — a half-close on one side is forwarded as a FIN while the
-/// opposite direction keeps flowing — so this returns only once both directions
+/// its own EOF (a half-close on one side is forwarded as a FIN while the
+/// opposite direction keeps flowing) so this returns only once both directions
 /// have closed. Both `Upgraded` halves carry any bytes hyper buffered past the
 /// handshake, so nothing is lost.
 async fn splice_upgrade(peer: hyper::upgrade::OnUpgrade, upstream: hyper::upgrade::OnUpgrade) {
@@ -192,8 +194,7 @@ async fn splice_upgrade(peer: hyper::upgrade::OnUpgrade, upstream: hyper::upgrad
     }
 }
 
-/// Authoritative identity header injected on every forwarded request, naming the
-/// guest behind the connection.
+/// Header signaling the user ID of the guest behind the connection to the shared app.
 pub const IDENTITY_HEADER: &str = "x-wispers-access-user";
 
 /// Set the identity header from the resolved peer identity. Always strips any
@@ -231,9 +232,7 @@ fn strip_hop_by_hop(headers: &mut hyper::HeaderMap, is_upgrade: bool) {
     }
 }
 
-/// True if this is an HTTP/1.1 Upgrade request (e.g. WebSocket): a `Connection`
-/// header listing the `upgrade` token plus an `Upgrade` header naming the target
-/// protocol.
+/// True if this is an HTTP/1.1 Upgrade request (e.g. WebSocket).
 fn is_upgrade_request(headers: &hyper::HeaderMap) -> bool {
     headers.contains_key(hyper::header::UPGRADE) && connection_lists_upgrade(headers)
 }

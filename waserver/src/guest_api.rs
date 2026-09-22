@@ -31,9 +31,7 @@ pub async fn serve<S>(io: S, ctx: StreamContext, peer: Peer) -> Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let service = hyper::service::service_fn(
-        move |req| route(req, ctx.clone(), peer.clone()),
-    );
+    let service = hyper::service::service_fn(move |req| route(req, ctx.clone(), peer.clone()));
     let served = http1::Builder::new()
         // The guest node may FIN right after the request and wait for the
         // response on the other half.
@@ -67,9 +65,9 @@ async fn route(
     let response = match (req.method(), req.uri().path()) {
         (&Method::GET, wire::SHARE_PATH) => get_share(&req, &ctx.config),
         (&Method::GET, wire::EVENTS_PATH) => get_events(&ctx.events),
-        (&Method::POST, wire::ACTIVATION_PATH) => post_activation(
-            req, &ctx.db, &peer.peer_id, &ctx.config,
-        ).await,
+        (&Method::POST, wire::ACTIVATION_PATH) => {
+            post_activation(req, &ctx.db, &peer.peer_id, &ctx.config).await
+        }
         (&Method::DELETE, wire::GUEST_PATH) => delete_guest(&ctx.db, &peer.peer_id),
         (_, wire::SHARE_PATH | wire::EVENTS_PATH | wire::ACTIVATION_PATH | wire::GUEST_PATH) => {
             error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
