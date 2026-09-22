@@ -192,11 +192,9 @@ pub struct StatusData {
     /// Hash of the served app list. Differs from the file's when a
     /// `reload` is pending.
     pub config_hash: u64,
-    // TODO: This is optional for backewards compat. Remove with the next version.
-    #[serde(default)]
-    pub pid: Option<u32>,
-    #[serde(default)]
-    pub started_at: Option<String>, // RFC 3339
+    pub pid: u32,
+    pub started_at: String, // RFC 3339
+    /// Since when the daemon has been reachable; `None` while it is not.
     #[serde(default)]
     pub connected_since: Option<String>, // RFC 3339
     /// Guests with a live P2P connection to this host node right now.
@@ -301,8 +299,8 @@ async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
         reachable: handle.reachable().await,
         apps: app_data(&config),
         config_hash: config.config_hash(),
-        pid: Some(std::process::id()),
-        started_at: Some(fmt_rfc3339(handle.started_at())),
+        pid: std::process::id(),
+        started_at: fmt_rfc3339(handle.started_at()),
         connected_since: handle.reachable_since().await.map(fmt_rfc3339),
         connected_guests: Some(connected),
     }))

@@ -432,8 +432,8 @@ async fn query_server(
                 state: if s.reachable { "serving" } else { "connecting" },
                 error: None,
                 reachable: Some(s.reachable),
-                pid: s.pid,
-                started_at: s.started_at,
+                pid: Some(s.pid),
+                started_at: Some(s.started_at),
                 connected_since: s.connected_since,
                 reload_pending: config.map(|c| c.config_hash() != s.config_hash),
             };
