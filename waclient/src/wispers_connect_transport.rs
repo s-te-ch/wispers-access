@@ -1,6 +1,6 @@
 //! The Wispers Connect transport implementation.
 
-use crate::circles;
+use crate::shares;
 use crate::storage;
 use crate::transports::{BoxFuture, Stream, TerminalState, Transport, TransportError};
 use anyhow::{Context, Result};
@@ -9,7 +9,7 @@ use tokio::sync::OnceCell;
 use wispers_access_wire as wire;
 use wispers_connect as wc;
 
-/// Registers this device as a node of the circle's connectivity group and
+/// Registers this device as a node of the share's connectivity group and
 /// activates it. A failure after registration logs the node out again, so
 /// no registration is orphaned on the hub.
 pub async fn join(
@@ -17,7 +17,7 @@ pub async fn join(
     registration_token: &str,
     activation_code: &str,
     backend: Option<&str>,
-) -> Result<wire::CircleInfo> {
+) -> Result<wire::ShareInfo> {
     // Register the Wispers node. If the invite named a self-hosted backend,
     // use override_hub_addr().
     let ns = wc::NodeStorage::new(row.clone());
@@ -46,40 +46,40 @@ pub async fn join(
     }
 }
 
-/// The steps after registration: activation and asking the server what the
-/// circle is. Any failure here makes `join` roll the registration back.
+/// The steps after registration: activation and asking the host node what the
+/// share is. Any failure here makes `join` roll the registration back.
 async fn activate_and_fetch(
     node: &mut wc::Node,
     row: &storage::Row,
     activation_code: &str,
     backend: Option<&str>,
-) -> Result<wire::CircleInfo> {
+) -> Result<wire::ShareInfo> {
     println!("Activating Wispers node...");
     node.activate(activation_code).await?;
 
-    println!("Fetching the circle from the server...");
+    println!("Fetching the share from its host node...");
     // Straight on the node rather than through a transport: keeps the node
     // for a rollback.
     let conn = node
         .connect_quic(1)
         .await
-        .context("connecting to the Wispers Access server")?;
+        .context("connecting to the host node")?;
     let stream = conn.open_stream().await.context("opening a stream")?;
-    let info = circles::fetch_info(Box::new(stream), None)
+    let info = shares::fetch_info(Box::new(stream), None)
         .await?
-        .context("server answered 304 to an unconditional request")?;
+        .context("the host node answered 304 to an unconditional request")?;
     row.write_backend(backend)?;
     Ok(info)
 }
 
-/// Deregisters from the hub, best effort: for a removed circle the hub
+/// Deregisters from the hub, best effort: for a removed share the hub
 /// already rejects us, and for a revoked one logout cleanly retires the
 /// zombie registration.
 pub async fn leave(row: &storage::Row) {
     let backend = match row.read_backend() {
         Ok(backend) => backend,
         Err(e) => {
-            println!("Could not read the circle ({e}); removing locally anyway.");
+            println!("Could not read the share ({e}); removing locally anyway.");
             return;
         }
     };
@@ -96,7 +96,7 @@ pub async fn leave(row: &storage::Row) {
     }
 }
 
-/// The Wispers Connect transport: a QUIC connection to the circle's server
+/// The Wispers Connect transport: a QUIC connection to the share's host node
 /// node (always node 1), brokered by the hub.
 pub struct WispersConnect {
     node: wc::Node,

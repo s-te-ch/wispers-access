@@ -13,15 +13,15 @@ use tracing::{error, info, warn};
 use wire::CloseCode;
 use wispers_access_wire as wire;
 
-/// The endpoint, bound and keyed by the circle's secret.
+/// The endpoint, bound and keyed by the share's secret.
 pub struct Endpoint {
     endpoint: iroh::Endpoint,
     db: storage::StateDb,
 }
 
-pub async fn bind(circle: &str, state: storage::StateDb) -> Result<Endpoint> {
+pub async fn bind(share: &str, state: storage::StateDb) -> Result<Endpoint> {
     let Some(secret) = state.iroh_secret()? else {
-        anyhow::bail!("Circle {} has no iroh key", circle);
+        anyhow::bail!("Share {} has no iroh key", share);
     };
     let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
         .secret_key(iroh::SecretKey::from_bytes(&secret))
@@ -132,7 +132,8 @@ pub fn mint_invite(
 /// How long shutdown waits for guests to acknowledge the close.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Grace for an unknown key to activate before its connection is closed.
+/// How long a non-activated guest node may sit on a connection without
+/// activating. This isn't security-relevant, just hygiene.
 const ACTIVATION_WINDOW: Duration = Duration::from_secs(10);
 
 /// How long to let a refused guest read its error before the connection is
@@ -297,7 +298,7 @@ fn join(send: SendStream, recv: RecvStream) -> tokio::io::Join<RecvStream, SendS
 
 /// `init`: the directory with config and state, and a freshly generated
 /// endpoint key. Nothing beyond this machine, so nothing to undo.
-pub fn init(dir: &storage::CircleDir, config_text: &str) -> Result<()> {
+pub fn init(dir: &storage::ShareDir, config_text: &str) -> Result<()> {
     let state = dir.create(config_text)?;
     let secret = iroh::SecretKey::generate();
     state.set_iroh_secret(&secret.to_bytes())?;
@@ -308,8 +309,8 @@ pub fn init(dir: &storage::CircleDir, config_text: &str) -> Result<()> {
 /// Through the daemon when it runs, so the guest's live connections get the
 /// `revoked` close; straight into the state database otherwise, and the
 /// guest learns on its next dial.
-pub async fn revoke(circle: &str, dir: storage::CircleDir, number: i64) -> Result<()> {
-    match ipc::Client::connect(circle).await {
+pub async fn revoke(share: &str, dir: storage::ShareDir, number: i64) -> Result<()> {
+    match ipc::Client::connect(share).await {
         Ok(mut client) => match client.request(&ipc::Request::RevokeGuest { number }).await {
             Ok(ipc::Response::Success { .. }) => {}
             Ok(ipc::Response::Error { error, .. }) => anyhow::bail!("{error}"),
@@ -329,7 +330,7 @@ pub async fn revoke(circle: &str, dir: storage::CircleDir, number: i64) -> Resul
 /// Fills in the TransportReport, for status reporting.
 pub fn report(state: Option<&storage::StateDb>) -> TransportReport {
     let Some(state) = state else {
-        let err = "circle has no state database (init incomplete?)";
+        let err = "share has no state database (init incomplete?)";
         return TransportReport {
             guests: Err(err.to_owned()),
             invites: Err(err.to_owned()),

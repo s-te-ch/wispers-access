@@ -1,12 +1,11 @@
-mod circles;
 mod iroh_transport;
+mod shares;
 mod storage;
 mod transports;
 mod wispers_connect_transport;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use circles::{Circle, CircleRegistry, Lookup};
 use clap::{Parser, Subcommand};
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
 use hyper::StatusCode;
@@ -14,6 +13,7 @@ use hyper::body::Incoming;
 use hyper::client::conn::http1 as http1_client;
 use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
+use shares::{Lookup, Share, ShareRegistry};
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
@@ -34,20 +34,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Join a Wispers Access circle.
+    /// Join a Wispers Access share.
     Join {
-        /// Invite code for the circle (`wax_…`), produced by `waserver invite`.
+        /// Invite code for the share (`wax_…`), produced by `waserver invite`.
         invite_code: String,
     },
-    /// Serve every joined circle's shares on localhost, as
-    /// `http://<share>.<circle>.localhost:<port>`.
+    /// Serve every joined share's apps on localhost, as
+    /// `http://<app>.<share>.localhost:<port>`.
     Serve { port: u16 },
-    /// Show all joined circles, their shares and their state.
+    /// Show all joined shares, their apps and their state.
     List,
-    /// Remove a circle from this device, deregistering from its hub when possible.
+    /// Remove a share from this device, deregistering from its hub when possible.
     Remove {
-        /// The circle's label, as shown by `waclient list`.
-        circle: String,
+        /// The share's label, as shown by `waclient list`.
+        share: String,
     },
 }
 
@@ -75,7 +75,7 @@ async fn async_main(command: Command) -> Result<()> {
         Command::Join { invite_code } => join(&invite_code).await,
         Command::Serve { port } => serve(port).await,
         Command::List => list().await,
-        Command::Remove { circle } => remove(&circle).await,
+        Command::Remove { share } => remove(&share).await,
     }
 }
 
@@ -83,8 +83,8 @@ async fn join(invite_code: &str) -> Result<()> {
     let invite = wire::Invite::parse(invite_code)?;
     let db = storage::DB::new()?;
     let row = db.new_row()?;
-    // The row is the circle's; the transport writes its part of it and the
-    // server's answer fills the rest. A failed join leaves no row behind.
+    // The row is the share's; the transport writes its part of it and the
+    // host node's answer fills the rest. A failed join leaves no row behind.
     let result = async {
         let info = transports::join(invite, &row).await?;
         record_join(&row, &info)
@@ -96,38 +96,37 @@ async fn join(invite_code: &str) -> Result<()> {
     result
 }
 
-/// The local bookkeeping of any `join`, once the server has answered with
-/// the circle: names, the share list, and marking the row complete so it
+/// The local bookkeeping of any `join`, once the host node has answered with
+/// the share: names, the app list, and marking the row complete so it
 /// survives the next start.
-fn record_join(row: &storage::Row, info: &wire::CircleInfo) -> Result<()> {
-    let circle_id = row.circle_id()?;
-    row.write_circle_info(info)?;
+fn record_join(row: &storage::Row, info: &wire::ShareInfo) -> Result<()> {
+    let share_id = row.share_id()?;
+    row.write_share_info(info)?;
     let display_name = if info.name.is_empty() {
-        circle_id.to_string()
+        share_id.to_string()
     } else {
         info.name.clone()
     };
     row.write_display_name(&display_name)?;
-    let hostname = host_slug(&display_name).unwrap_or_else(|| circle_id.to_string());
+    let hostname = host_slug(&display_name).unwrap_or_else(|| share_id.to_string());
     let hostname = row.write_deduped_hostname(&hostname)?;
     row.mark_complete()?;
 
     println!(
-        "Joined circle: {}\n  Label: {}\n  Shares: {}\n  Circle id: {}\n",
+        "Joined share: {}\n  Label: {}\n  Apps: {}\n  Share id: {}\n",
         display_name,
         hostname,
-        describe_shares(&info.shares),
-        circle_id,
+        describe_apps(&info.apps),
+        share_id,
     );
     Ok(())
 }
 
-fn describe_shares(shares: &[wire::Share]) -> String {
-    if shares.is_empty() {
+fn describe_apps(apps: &[wire::App]) -> String {
+    if apps.is_empty() {
         return "none yet".to_owned();
     }
-    shares
-        .iter()
+    apps.iter()
         .map(|s| {
             if s.name == s.id {
                 s.id.clone()
@@ -146,11 +145,11 @@ async fn list() -> Result<()> {
     let db = storage::DB::new()?;
     let rows = db.get_all_rows()?;
     if rows.is_empty() {
-        println!("No circles joined. Use 'waclient join <invite_code>'.");
+        println!("No shares joined. Use 'waclient join <invite_code>'.");
         return Ok(());
     }
     let mut tw = TabWriter::new(std::io::stdout().lock()).padding(2);
-    writeln!(&mut tw, "Circle\tName\tShares\tStatus")?;
+    writeln!(&mut tw, "Share\tName\tApps\tStatus")?;
     for row in rows {
         let (_, display_name, hostname) = row.read_names()?;
         let state = match row
@@ -161,8 +160,8 @@ async fn list() -> Result<()> {
             Some(state) => state.describe(),
             None => "ok",
         };
-        let shares = row
-            .read_shares()?
+        let apps = row
+            .read_apps()?
             .iter()
             .map(|s| s.id.clone())
             .collect::<Vec<_>>()
@@ -172,7 +171,7 @@ async fn list() -> Result<()> {
             "{}\t{}\t{}\t{}",
             hostname,
             display_name,
-            if shares.is_empty() { "-" } else { &shares },
+            if apps.is_empty() { "-" } else { &apps },
             state
         )?;
     }
@@ -180,15 +179,15 @@ async fn list() -> Result<()> {
     Ok(())
 }
 
-async fn remove(circle: &str) -> Result<()> {
+async fn remove(share: &str) -> Result<()> {
     let db = storage::DB::new()?;
     let row = db
-        .find_row(circle)?
-        .with_context(|| format!("no circle '{}' (see 'waclient list')", circle))?;
+        .find_row(share)?
+        .with_context(|| format!("no share '{}' (see 'waclient list')", share))?;
 
     transports::leave(&row).await?;
     row.delete_row()?;
-    println!("Circle '{}' removed from this device.", circle);
+    println!("Share '{}' removed from this device.", share);
     Ok(())
 }
 
@@ -205,39 +204,39 @@ fn host_slug(name: &str) -> Option<String> {
 }
 
 async fn serve(port: u16) -> Result<()> {
-    // Load every known circle. One dead or unreachable circle must not take
+    // Load every known share. One dead or unreachable share must not take
     // the others down: it's reported and skipped, and a terminal rejection
-    // is persisted so the circle is never dialed again.
+    // is persisted so the share is never dialed again.
     let db = storage::DB::new()?;
-    let mut registry = CircleRegistry::default();
-    println!("Available shares (as last seen; refreshed in the background):");
+    let mut registry = ShareRegistry::default();
+    println!("Available apps (as last seen; refreshed in the background):");
     for row in db.get_all_rows()? {
-        let (circle_id, display_name, label) = row.read_names()?;
+        let (share_id, display_name, label) = row.read_names()?;
         if let Some(state) = row
             .read_terminal_state()?
             .as_deref()
             .and_then(TerminalState::parse)
         {
-            report_dead_circle(&display_name, &label, state);
-            registry.insert_dead(label, circle_id, state);
+            report_dead_share(&display_name, &label, state);
+            registry.insert_dead(label, share_id, state);
             continue;
         }
         match transports::restore(row.clone()).await {
             Ok(transport) => {
-                let circle = Circle::new(label, circle_id, display_name, row, transport);
+                let share = Share::new(label, share_id, display_name, row, transport);
                 println!(
                     "  {} ({}) via {}:",
-                    circle.display_name(),
-                    circle.label(),
-                    circle.describe_transport()
+                    share.display_name(),
+                    share.label(),
+                    share.describe_transport()
                 );
-                print_share_urls(circle.label(), &circle.shares()?, port);
-                registry.insert(circle);
+                print_app_urls(share.label(), &share.apps()?, port);
+                registry.insert(share);
             }
             Err(TransportError::Terminal(state)) => {
                 let _ = row.write_terminal_state(state.as_str());
-                report_dead_circle(&display_name, &label, state);
-                registry.insert_dead(label, circle_id, state);
+                report_dead_share(&display_name, &label, state);
+                registry.insert_dead(label, share_id, state);
             }
             Err(TransportError::Transient(e)) => {
                 eprintln!(
@@ -249,21 +248,21 @@ async fn serve(port: u16) -> Result<()> {
     }
     let registry = Arc::new(registry);
 
-    // Ask every live circle's server whether the share list changed since the
-    // last run. Best effort and off the startup path: an unreachable server
+    // Ask every live share's host node whether the app list changed since the
+    // last run. Best effort and off the startup path: an unreachable host node
     // just leaves the stored list in place.
-    for circle in registry.iter() {
-        let circle = circle.clone();
+    for share in registry.iter() {
+        let share = share.clone();
         tokio::spawn(async move {
-            match circle.refresh().await {
+            match share.refresh().await {
                 Ok(Some(info)) => {
-                    println!("Updated share list for {} ({}):", info.name, circle.label());
-                    print_share_urls(circle.label(), &info.shares, port);
+                    println!("Updated app list for {} ({}):", info.name, share.label());
+                    print_app_urls(share.label(), &info.apps, port);
                 }
                 Ok(None) => {}
                 Err(e) => eprintln!(
-                    "[{}] could not refresh the share list: {:#}",
-                    circle.label(),
+                    "[{}] could not refresh the app list: {:#}",
+                    share.label(),
                     e
                 ),
             }
@@ -296,19 +295,19 @@ async fn serve(port: u16) -> Result<()> {
     }
 }
 
-fn print_share_urls(hostname: &str, shares: &[wire::Share], port: u16) {
-    if shares.is_empty() {
-        println!("    (no shares yet)");
+fn print_app_urls(hostname: &str, apps: &[wire::App], port: u16) {
+    if apps.is_empty() {
+        println!("    (no apps yet)");
     }
-    for share in shares {
+    for app in apps {
         println!(
             "    {:<16} http://{}.{}.localhost:{}",
-            share.name, share.id, hostname, port
+            app.name, app.id, hostname, port
         );
     }
 }
 
-fn report_dead_circle(display_name: &str, label: &str, state: TerminalState) {
+fn report_dead_share(display_name: &str, label: &str, state: TerminalState) {
     eprintln!(
         "  {} ('{}') is no longer available — {}.",
         label,
@@ -318,7 +317,7 @@ fn report_dead_circle(display_name: &str, label: &str, state: TerminalState) {
     eprintln!("    Run 'waclient remove {}' to clean it up.", label);
 }
 
-async fn handle_connection(tcp_stream: TcpStream, registry: Arc<CircleRegistry>) -> Result<()> {
+async fn handle_connection(tcp_stream: TcpStream, registry: Arc<ShareRegistry>) -> Result<()> {
     let tcp_stream = TokioIo::new(tcp_stream);
     let service = hyper::service::service_fn(move |req| forward(req, registry.clone()));
     http1_server::Builder::new()
@@ -331,36 +330,36 @@ async fn handle_connection(tcp_stream: TcpStream, registry: Arc<CircleRegistry>)
 
 async fn forward(
     mut req: hyper::Request<Incoming>,
-    registry: Arc<CircleRegistry>,
+    registry: Arc<ShareRegistry>,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
-    // Determine the circle and share...
+    // Determine the share and app...
     let Ok(host) = extract_host(&req) else {
         return Ok(error_response(
             StatusCode::BAD_REQUEST,
             "missing host header",
         ));
     };
-    let (share, circle) = match extract_target(&host) {
+    let (app, share) = match extract_target(&host) {
         Ok(target) => target,
         Err(e) => return Ok(error_response(StatusCode::NOT_FOUND, &e.to_string())),
     };
-    let circle = match registry.get(&circle) {
-        Lookup::Live(circle) => circle,
+    let share = match registry.get(&share) {
+        Lookup::Live(share) => share,
         Lookup::Dead(state) => return Ok(gone(state)),
         Lookup::Unknown => {
             return Ok(error_response(
                 StatusCode::NOT_FOUND,
-                &format!("unknown circle '{}' (see 'waclient list')", circle),
+                &format!("unknown share '{}' (see 'waclient list')", share),
             ));
         }
     };
 
-    // ... and open a DATA stream to it, naming the share.
-    let fwd_stream = match circle.open_data_stream(&share).await {
+    // ... and open a DATA stream to it, naming the app.
+    let fwd_stream = match share.open_data_stream(&app).await {
         Ok(s) => s,
         Err(TransportError::Terminal(state)) => return Ok(gone(state)),
         Err(TransportError::Transient(e)) => {
-            eprintln!("[{}] open_stream failed: {:#}", circle.label(), e);
+            eprintln!("[{}] open_stream failed: {:#}", share.label(), e);
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Wispers Access server unavailable",
@@ -371,7 +370,7 @@ async fn forward(
     let (mut sender, conn) = match http1_client::handshake(fwd_io).await {
         Ok(hs) => hs,
         Err(e) => {
-            eprintln!("[{}] client handshake failed: {:#}", circle.label(), e);
+            eprintln!("[{}] client handshake failed: {:#}", share.label(), e);
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Wispers Access server unavailable",
@@ -411,7 +410,7 @@ async fn forward(
     let mut resp = match sender.send_request(rewritten).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[{}] send_request failed: {:#}", circle.label(), e);
+            eprintln!("[{}] send_request failed: {:#}", share.label(), e);
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Wispers Access server unavailable",
@@ -419,25 +418,25 @@ async fn forward(
         }
     };
 
-    // The server no longer has this share: our list is stale. Refresh it in
+    // The host node no longer has this app: our list is stale. Refresh it in
     // the background and pass the 404 on as it is.
     if resp.status() == StatusCode::NOT_FOUND
         && resp
             .headers()
             .get(ERROR_HEADER)
-            .is_some_and(|v| v == "share-not-found")
+            .is_some_and(|v| v == "app-not-found")
     {
         eprintln!(
-            "[{}] share '{}' is gone; refreshing the share list",
-            circle.label(),
-            share
+            "[{}] app '{}' is gone; refreshing the app list",
+            share.label(),
+            app
         );
-        let circle = circle.clone();
+        let share = share.clone();
         tokio::spawn(async move {
-            if let Err(e) = circle.refresh().await {
+            if let Err(e) = share.refresh().await {
                 eprintln!(
-                    "[{}] could not refresh the share list: {:#}",
-                    circle.label(),
+                    "[{}] could not refresh the app list: {:#}",
+                    share.label(),
                     e
                 );
             }
@@ -453,8 +452,8 @@ async fn forward(
                 tokio::spawn(splice_upgrade(peer_upgrade, upstream_upgrade));
             }
             None => eprintln!(
-                "[{}] server returned 101 without an upgrade request",
-                circle.label()
+                "[{}] the app returned 101 without an upgrade request",
+                share.label()
             ),
         }
         let (mut parts, _body) = resp.into_parts();
@@ -508,7 +507,7 @@ fn extract_host(req: &hyper::Request<Incoming>) -> Result<String> {
 /// the proxy can be told from one the app sent.
 const ERROR_HEADER: &str = "x-wispers-access-error";
 
-/// `<share>.<circle>.localhost[:port]` → (share, circle).
+/// `<app>.<share>.localhost[:port]` → (app, share).
 fn extract_target(host: &str) -> Result<(String, String)> {
     let host = host.rsplit_once(':').map_or(host, |(h, port)| {
         if port.chars().all(|c| c.is_ascii_digit()) {
@@ -518,11 +517,11 @@ fn extract_target(host: &str) -> Result<(String, String)> {
         }
     });
     match host.split('.').collect::<Vec<_>>().as_slice() {
-        [share, circle, "localhost"] if !share.is_empty() && !circle.is_empty() => {
-            Ok(((*share).to_owned(), (*circle).to_owned()))
+        [app, share, "localhost"] if !app.is_empty() && !share.is_empty() => {
+            Ok(((*app).to_owned(), (*share).to_owned()))
         }
         _ => anyhow::bail!(
-            "unknown host {}: shares are served at http://<share>.<circle>.localhost:<port> (see 'waclient list')",
+            "unknown host {}: apps are served at http://<app>.<share>.localhost:<port> (see 'waclient list')",
             host
         ),
     }
@@ -598,14 +597,14 @@ fn error_response(status: hyper::StatusCode, msg: &str) -> hyper::Response<Boxed
 }
 
 /// Why a share is permanently unusable. `Removed` = the hub rejected our
-/// credentials outright (share deleted server-side); `Revoked` = this device
-/// was revoked from the share's roster.
+/// credentials outright (share deleted on the host node); `Revoked` = this
+/// device was revoked from the share's roster.
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn targets_are_share_dot_circle() {
+    fn targets_are_app_dot_share() {
         assert_eq!(
             extract_target("echo.round-trip.localhost:8000").unwrap(),
             ("echo".to_owned(), "round-trip".to_owned())
@@ -623,20 +622,20 @@ mod tests {
     }
 
     #[test]
-    fn share_descriptions_skip_redundant_names() {
-        let shares = vec![
-            wire::Share {
+    fn app_descriptions_skip_redundant_names() {
+        let apps = vec![
+            wire::App {
                 id: "echo".into(),
                 name: "echo".into(),
-                kind: wire::ShareKind::Web,
+                kind: wire::AppKind::Web,
             },
-            wire::Share {
+            wire::App {
                 id: "jf".into(),
                 name: "Jellyfin".into(),
-                kind: wire::ShareKind::Jellyfin,
+                kind: wire::AppKind::Jellyfin,
             },
         ];
-        assert_eq!(describe_shares(&shares), "echo, jf (Jellyfin)");
-        assert_eq!(describe_shares(&[]), "none yet");
+        assert_eq!(describe_apps(&apps), "echo, jf (Jellyfin)");
+        assert_eq!(describe_apps(&[]), "none yet");
     }
 }

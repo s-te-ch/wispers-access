@@ -28,8 +28,8 @@ pub struct Server {
 
 #[cfg(unix)]
 impl Server {
-    pub async fn bind(circle: &str) -> Result<Self> {
-        let path = ipc_path(circle);
+    pub async fn bind(share: &str) -> Result<Self> {
+        let path = ipc_path(share);
 
         // Check for a stale socket.
         if path.exists() {
@@ -84,10 +84,10 @@ pub struct Server {
 
 #[cfg(windows)]
 impl Server {
-    pub async fn bind(circle: &str) -> Result<Self> {
+    pub async fn bind(share: &str) -> Result<Self> {
         use rand::distr::SampleString;
 
-        let path = ipc_path(circle);
+        let path = ipc_path(share);
 
         // Check for a stale socket.
         if path.exists() {
@@ -187,9 +187,9 @@ pub struct StatusData {
     /// Reachable by guests: connected to the hub (Wispers Connect), or
     /// online with a home relay (iroh).
     pub reachable: bool,
-    /// The shares as currently served, in config order.
-    pub shares: Vec<ShareData>,
-    /// Hash of the served share list. Differs from the file's when a
+    /// The apps as currently served, in config order.
+    pub apps: Vec<AppData>,
+    /// Hash of the served app list. Differs from the file's when a
     /// `reload` is pending.
     pub config_hash: u64,
     // TODO: This is optional for backewards compat. Remove with the next version.
@@ -199,7 +199,7 @@ pub struct StatusData {
     pub started_at: Option<String>, // RFC 3339
     #[serde(default)]
     pub connected_since: Option<String>, // RFC 3339
-    /// Guests with a live P2P connection to this server right now.
+    /// Guests with a live P2P connection to this host node right now.
     #[serde(default)]
     pub connected_guests: Option<Vec<GuestData>>,
 }
@@ -215,11 +215,11 @@ pub struct GuestData {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct ShareData {
+pub struct AppData {
     pub id: String,
     pub name: String,
     #[serde(default)]
-    pub kind: crate::config::ShareKind,
+    pub kind: crate::config::AppKind,
     pub upstream: String,
 }
 
@@ -232,7 +232,7 @@ pub struct InviteData {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ReloadData {
     pub changed: bool,
-    pub shares: Vec<ShareData>,
+    pub apps: Vec<AppData>,
 }
 
 impl Response {
@@ -299,7 +299,7 @@ async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
     let config = handle.config().await;
     Response::success(ResponseData::Status(StatusData {
         reachable: handle.reachable().await,
-        shares: share_data(&config),
+        apps: app_data(&config),
         config_hash: config.config_hash(),
         pid: Some(std::process::id()),
         started_at: Some(fmt_rfc3339(handle.started_at())),
@@ -308,11 +308,11 @@ async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
     }))
 }
 
-fn share_data(config: &crate::config::CircleConfig) -> Vec<ShareData> {
+fn app_data(config: &crate::config::ShareConfig) -> Vec<AppData> {
     config
-        .shares
+        .apps
         .iter()
-        .map(|s| ShareData {
+        .map(|s| AppData {
             id: s.id.clone(),
             name: s.name.clone(),
             kind: s.kind,
@@ -342,9 +342,9 @@ async fn handle_invite(
 fn invite_error_message(e: &anyhow::Error) -> String {
     match e.downcast_ref::<crate::wcbe::QuotaExceeded>() {
         Some(q) if q.quota == "nodes_per_group" => format!(
-            "the circle is full: {} of {} node quota used (this server, guests and pending \
+            "the share is full: {} of {} node quota used (this host, guests and pending \
              invites). Revoke nodes with `waserver revoke` or wait for a pending
-             invite to expire. `waserver status <circle>` shows the available quota.",
+             invite to expire. `waserver status <share>` shows the available quota.",
             q.current, q.limit
         ),
         _ => format!("error generating registration token: {}", e),
@@ -355,7 +355,7 @@ async fn handle_reload(handle: &crate::serving::ServingHandle) -> Response {
     match handle.reload().await {
         Ok(outcome) => Response::success(ResponseData::Reload(ReloadData {
             changed: outcome.changed,
-            shares: share_data(&outcome.config),
+            apps: app_data(&outcome.config),
         })),
         Err(e) => Response::error(format!("{:#}", e)),
     }
@@ -391,8 +391,8 @@ pub struct Client {
 
 impl Client {
     #[cfg(unix)]
-    pub async fn connect(circle: &str) -> Result<Self> {
-        let path = ipc_path(circle);
+    pub async fn connect(share: &str) -> Result<Self> {
+        let path = ipc_path(share);
         let stream = UnixStream::connect(&path).await.with_context(|| {
             format!("failed to connect to server at {:?} (is it running?)", path)
         })?;
@@ -404,8 +404,8 @@ impl Client {
     }
 
     #[cfg(windows)]
-    pub async fn connect(circle: &str) -> Result<Self> {
-        let path = ipc_path(circle);
+    pub async fn connect(share: &str) -> Result<Self> {
+        let path = ipc_path(share);
         let contents = fs::read_to_string(&path)
             .with_context(|| format!("daemon not running (no port file {:?})", path))?;
         let (port, password) = parse_port_file(&contents).context("invalid daemon port file")?;
@@ -438,17 +438,17 @@ impl Client {
 }
 
 #[cfg(unix)]
-fn ipc_path(circle: &str) -> PathBuf {
+fn ipc_path(share: &str) -> PathBuf {
     let base = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
     let dir = base.join(".waserver").join("sockets");
-    dir.join(format!("{}.sock", circle))
+    dir.join(format!("{}.sock", share))
 }
 
 #[cfg(windows)]
-fn ipc_path(circle: &str) -> PathBuf {
+fn ipc_path(share: &str) -> PathBuf {
     let base = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
     let dir = base.join(".waserver").join("ports");
-    return dir.join(format!("{}.port", circle));
+    return dir.join(format!("{}.port", share));
 }
 
 #[cfg(windows)]

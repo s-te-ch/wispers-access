@@ -21,11 +21,11 @@ type BoxedBody = BoxBody<Bytes, std::io::Error>;
 #[derive(Clone)]
 pub enum Target {
     Upstream(Arc<str>),
-    /// The circle has no shares configured.
-    NoShares,
-    /// The stream named a share the circle does not have (any more). The
-    /// hash lets the client skip a CIRCLE round trip if it already caught up.
-    UnknownShare {
+    /// The share has no apps configured.
+    NoApps,
+    /// The stream named an app the share does not have (any more). The
+    /// hash lets the client skip a `GET /v1/share` round trip if it already caught up.
+    UnknownApp {
         config_hash: u64,
     },
 }
@@ -33,7 +33,7 @@ pub enum Target {
 /// Names the reason for a locally generated error, so clients can tell it
 /// from an upstream's own 404 or 503.
 pub const ERROR_HEADER: &str = "x-wispers-access-error";
-/// The circle's current config hash, on errors that mean "your share list
+/// The share's current config hash, on errors that mean "your app list
 /// is stale".
 pub const CONFIG_HASH_HEADER: &str = "x-wispers-access-config-hash";
 
@@ -65,24 +65,24 @@ async fn forward(
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
     let upstream = match target {
         Target::Upstream(upstream) => upstream,
-        Target::NoShares => {
-            warn!(uri = %req.uri(), "no share configured; rejecting");
+        Target::NoApps => {
+            warn!(uri = %req.uri(), "no app configured; rejecting");
             let mut resp = error_response(
                 hyper::StatusCode::SERVICE_UNAVAILABLE,
-                "no share configured on this server",
+                "no app configured on this host node",
             );
             resp.headers_mut().insert(
                 ERROR_HEADER,
-                hyper::header::HeaderValue::from_static("no-shares"),
+                hyper::header::HeaderValue::from_static("no-apps"),
             );
             return Ok(resp);
         }
-        Target::UnknownShare { config_hash } => {
-            let mut resp = error_response(hyper::StatusCode::NOT_FOUND, "share not found");
+        Target::UnknownApp { config_hash } => {
+            let mut resp = error_response(hyper::StatusCode::NOT_FOUND, "app not found");
             let headers = resp.headers_mut();
             headers.insert(
                 ERROR_HEADER,
-                hyper::header::HeaderValue::from_static("share-not-found"),
+                hyper::header::HeaderValue::from_static("app-not-found"),
             );
             headers.insert(
                 CONFIG_HASH_HEADER,

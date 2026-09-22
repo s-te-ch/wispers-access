@@ -11,25 +11,25 @@ use std::pin::Pin;
 
 pub async fn up(
     api_key: Option<&str>,
-    circle: &str,
+    share: &str,
     display_name: &str,
     transport: &TransportConfig,
 ) -> Result<()> {
-    let dir = storage::CircleDir::new(circle)?;
+    let dir = storage::ShareDir::new(share)?;
     if dir.exists() {
-        anyhow::bail!("Circle {} already exists", circle);
+        anyhow::bail!("Share {} already exists", share);
     }
 
     // Nothing may be left behind on failure: `init` refuses to run on an
     // existing directory, and an orphaned group would consume quota.
     let mut rollback = Rollback::new();
-    match create_circle(&mut rollback, &dir, api_key, display_name, transport).await {
+    match create_share(&mut rollback, &dir, api_key, display_name, transport).await {
         Ok(()) => {
             println!(
-                "Circle {} initialised. Add its shares to {} and run `waserver serve {}`.",
-                circle,
+                "Share {} initialised. Add its apps to {} and run `waserver serve {}`.",
+                share,
                 dir.config_path().display(),
-                circle
+                share
             );
             Ok(())
         }
@@ -40,11 +40,11 @@ pub async fn up(
     }
 }
 
-/// Creates the circle the way its transport needs: the directory with
+/// Creates the share the way its transport needs: the directory with
 /// config and state, plus whatever the transport keeps beyond this machine.
-async fn create_circle(
+async fn create_share(
     rollback: &mut Rollback,
-    dir: &storage::CircleDir,
+    dir: &storage::ShareDir,
     api_key: Option<&str>,
     display_name: &str,
     transport: &TransportConfig,
@@ -97,17 +97,17 @@ impl Rollback {
     }
 }
 
-pub async fn down(circle: &str) -> Result<()> {
-    let dir = storage::CircleDir::new(circle)?;
+pub async fn down(share: &str) -> Result<()> {
+    let dir = storage::ShareDir::new(share)?;
     let cfg = dir.load_config()?;
     let wcs = dir.open_state()?.wispers_connect_state()?;
 
-    // Refuse to tear down a circle while its server is still running.
-    if let Ok(mut client) = ipc::Client::connect(circle).await {
-        // A reachable socket means a daemon is serving this circle. Name its
-        // shares in the message if it answers promptly, but don't hang on a
+    // Refuse to tear down a share while its server is still running.
+    if let Ok(mut client) = ipc::Client::connect(share).await {
+        // A reachable socket means a daemon is serving this share. Name its
+        // apps in the message if it answers promptly, but don't hang on a
         // wedged daemon.
-        let shares_hint = match tokio::time::timeout(
+        let apps_hint = match tokio::time::timeout(
             std::time::Duration::from_secs(2),
             client.request(&ipc::Request::Status),
         )
@@ -119,7 +119,7 @@ pub async fn down(circle: &str) -> Result<()> {
             })) => format!(
                 " serving {}",
                 status
-                    .shares
+                    .apps
                     .iter()
                     .map(|s| s.id.as_str())
                     .collect::<Vec<_>>()
@@ -128,15 +128,15 @@ pub async fn down(circle: &str) -> Result<()> {
             _ => String::new(),
         };
         anyhow::bail!(
-            "circle '{}' has a running server{}; stop it first with `waserver stop {}`",
-            circle,
-            shares_hint,
-            circle
+            "share '{}' has a running server{}; stop it first with `waserver stop {}`",
+            share,
+            apps_hint,
+            share
         );
     }
 
     // Whatever the transport keeps beyond this machine goes first, so a
-    // failure there leaves the circle intact to try again.
+    // failure there leaves the share intact to try again.
     match &cfg.transport {
         TransportConfig::WispersConnect { backend } => {
             wispers_connect_transport::deinit(wcs, backend.as_deref()).await?

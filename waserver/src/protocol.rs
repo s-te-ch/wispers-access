@@ -1,9 +1,9 @@
 //! The server side of the wire protocol (see the `wispers-access-wire` crate).
-//! DATA streams go to the proxy for the share they name, CTRL streams to the
+//! DATA streams go to the proxy for the app they name, CTRL streams to the
 //! guest API, and raw HTTP from clients that predate the framing to the default
-//! share.
+//! app.
 
-use crate::config::CircleConfig;
+use crate::config::ShareConfig;
 use crate::guest_api;
 use crate::http::{self, Target};
 use crate::storage;
@@ -22,7 +22,7 @@ use wispers_access_wire as wire;
 /// a new config hash on every reload, for guests holding an events stream.
 #[derive(Clone)]
 pub struct StreamContext {
-    pub config: Arc<CircleConfig>,
+    pub config: Arc<ShareConfig>,
     pub events: broadcast::Sender<u64>,
     pub db: storage::StateDb,
 }
@@ -32,8 +32,8 @@ pub struct StreamContext {
 pub struct Peer {
     /// The transport's identifier for the peer, as authenticated by the
     /// handshake: the iroh endpoint ID in hex, or the Wispers Connect node
-    /// number, which the library checks against the signed roster. What
-    /// `POST /v1/activation` binds to an invite.
+    /// number, which the library checks against the group's cryptographic
+    /// roster. What `POST /v1/activation` binds to an invite.
     pub peer_id: String,
     /// The guest's identity, carried to the app in the identity header.
     /// `None` means the peer is not a guest yet, only its key is known: the
@@ -69,9 +69,9 @@ where
                 return Ok(StreamOutcome::Refused);
             };
             if kind == FirstByte::LegacyHttp {
-                let target = match ctx.config.default_share() {
-                    Some(share) => Target::Upstream(share.upstream.as_str().into()),
-                    None => Target::NoShares,
+                let target = match ctx.config.default_app() {
+                    Some(app) => Target::Upstream(app.upstream.as_str().into()),
+                    None => Target::NoApps,
                 };
                 // The byte was the start of the request; hand it back.
                 http::serve(Prefixed::new(vec![first], stream), target, user_id).await?;
@@ -79,7 +79,7 @@ where
                 let preamble: HttpPreamble = wire::read_message(&mut stream)
                     .await
                     .context("reading DATA preamble")?;
-                let target = share_target(&ctx.config, &preamble.share_id);
+                let target = app_target(&ctx.config, &preamble.app_id);
                 http::serve(stream, target, user_id).await?;
             }
         }
@@ -103,16 +103,13 @@ async fn read_stream_type<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Option
     }
 }
 
-fn share_target(config: &CircleConfig, share_id: &str) -> Target {
-    match config.shares.iter().find(|s| s.id == share_id) {
-        Some(share) => Target::Upstream(share.upstream.as_str().into()),
-        None if config.shares.is_empty() => Target::NoShares,
+fn app_target(config: &ShareConfig, app_id: &str) -> Target {
+    match config.apps.iter().find(|s| s.id == app_id) {
+        Some(app) => Target::Upstream(app.upstream.as_str().into()),
+        None if config.apps.is_empty() => Target::NoApps,
         None => {
-            warn!(
-                share = share_id,
-                "request for a share this circle does not have"
-            );
-            Target::UnknownShare {
+            warn!(app = app_id, "request for an app this share does not have");
+            Target::UnknownApp {
                 config_hash: config.config_hash(),
             }
         }
@@ -176,7 +173,7 @@ impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::ShareKind;
+    use crate::config::AppKind;
     use bytes::Bytes;
     use http_body_util::Full;
     use hyper::server::conn::http1;
@@ -184,23 +181,23 @@ mod tests {
     use std::convert::Infallible;
     use std::time::Duration;
     use tokio::net::TcpListener;
-    use wire::{CircleInfo, ConfigHash};
+    use wire::{ConfigHash, ShareInfo};
 
     const CONFIG: &str = r#"
 name = "Family"
-[[share]]
+[[app]]
 id = "jf"
 name = "Jellyfin"
 kind = "jellyfin"
 upstream = "UPSTREAM"
-[[share]]
+[[app]]
 id = "photos"
 upstream = ":1"
 "#;
 
     fn context(config: &str) -> StreamContext {
         StreamContext {
-            config: Arc::new(CircleConfig::parse(config).unwrap()),
+            config: Arc::new(ShareConfig::parse(config).unwrap()),
             events: broadcast::channel(4).0,
             db: storage::StateDb::open_in_memory().unwrap(),
         }
@@ -258,9 +255,9 @@ upstream = ":1"
         response
     }
 
-    fn data_stream(share_id: &str, request: &[u8]) -> Vec<u8> {
+    fn data_stream(app_id: &str, request: &[u8]) -> Vec<u8> {
         let body = serde_json::to_vec(&HttpPreamble {
-            share_id: share_id.to_owned(),
+            app_id: app_id.to_owned(),
         })
         .unwrap();
         let mut out = vec![StreamType::Data as u8];
@@ -286,7 +283,7 @@ upstream = ":1"
     const GET: &[u8] = b"GET /x HTTP/1.1\r\nHost: a\r\n\r\n";
 
     #[tokio::test]
-    async fn legacy_request_goes_to_the_default_share_with_identity() {
+    async fn legacy_request_goes_to_the_default_app_with_identity() {
         let upstream = echo_upstream().await;
         let response = exchange(
             context_with_upstream(&upstream),
@@ -300,7 +297,7 @@ upstream = ":1"
     }
 
     #[tokio::test]
-    async fn data_stream_is_routed_by_share_id() {
+    async fn data_stream_is_routed_by_app_id() {
         let upstream = echo_upstream().await;
         let response = exchange(
             context_with_upstream(&upstream),
@@ -314,14 +311,14 @@ upstream = ":1"
     }
 
     #[tokio::test]
-    async fn unknown_share_gets_a_typed_404_with_the_config_hash() {
+    async fn unknown_app_gets_a_typed_404_with_the_config_hash() {
         let ctx = context_with_upstream("127.0.0.1:1");
         let hash = ctx.config.config_hash();
         let response = exchange(ctx, Some("bob"), data_stream("gone", GET)).await;
         let (head, _) = split_response(&response);
         assert!(head.starts_with("http/1.1 404"), "{head}");
         assert!(
-            head.contains(&format!("{}: share-not-found", http::ERROR_HEADER)),
+            head.contains(&format!("{}: app-not-found", http::ERROR_HEADER)),
             "{head}"
         );
         assert!(
@@ -331,46 +328,46 @@ upstream = ":1"
     }
 
     #[tokio::test]
-    async fn no_shares_gets_a_503() {
+    async fn no_apps_gets_a_503() {
         let response = exchange(context("name = \"x\"\n"), Some("bob"), GET.to_vec()).await;
         let (head, _) = split_response(&response);
         assert!(head.starts_with("http/1.1 503"), "{head}");
         assert!(
-            head.contains(&format!("{}: no-shares", http::ERROR_HEADER)),
+            head.contains(&format!("{}: no-apps", http::ERROR_HEADER)),
             "{head}"
         );
     }
 
     #[tokio::test]
-    async fn get_circle_returns_the_info_with_an_etag() {
+    async fn get_share_returns_the_info_with_an_etag() {
         let ctx = context_with_upstream("127.0.0.1:1");
         let hash = ConfigHash(ctx.config.config_hash());
-        let request = format!("GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
+        let request = format!("GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::SHARE_PATH);
         let response = exchange(ctx, Some("bob"), ctrl_stream(&request)).await;
         let (head, body) = split_response(&response);
         assert!(head.starts_with("http/1.1 200"), "{head}");
         assert!(head.contains("content-type: application/json"), "{head}");
         assert!(head.contains(&format!("etag: {}", hash.etag())), "{head}");
-        let info: CircleInfo = serde_json::from_slice(&body).unwrap();
+        let info: ShareInfo = serde_json::from_slice(&body).unwrap();
         assert_eq!(info.config_hash, hash);
         assert_eq!(info.name, "Family");
         assert_eq!(info.transport, "wispers-connect");
-        assert_eq!(info.shares.len(), 2);
-        assert_eq!(info.shares[0].id, "jf");
-        assert_eq!(info.shares[0].kind, ShareKind::Jellyfin);
-        assert_eq!(info.shares[1].name, "photos");
-        assert_eq!(info.shares[1].kind, ShareKind::Web);
+        assert_eq!(info.apps.len(), 2);
+        assert_eq!(info.apps[0].id, "jf");
+        assert_eq!(info.apps[0].kind, AppKind::Jellyfin);
+        assert_eq!(info.apps[1].name, "photos");
+        assert_eq!(info.apps[1].kind, AppKind::Web);
         // Upstreams never reach a guest.
         assert!(!String::from_utf8_lossy(&body).contains("127.0.0.1"));
     }
 
     #[tokio::test]
-    async fn get_circle_is_conditional() {
+    async fn get_share_is_conditional() {
         let ctx = context_with_upstream("127.0.0.1:1");
         let etag = ConfigHash(ctx.config.config_hash()).etag();
         let request = format!(
             "GET {} HTTP/1.1\r\nHost: w\r\nIf-None-Match: {}\r\n\r\n",
-            wire::CIRCLE_PATH,
+            wire::SHARE_PATH,
             etag
         );
         let response = exchange(ctx, Some("bob"), ctrl_stream(&request)).await;
@@ -390,7 +387,7 @@ upstream = ":1"
         )
         .await;
         assert!(split_response(&response).0.starts_with("http/1.1 404"));
-        let request = format!("DELETE {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
+        let request = format!("DELETE {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::SHARE_PATH);
         let response = exchange(ctx, Some("bob"), ctrl_stream(&request)).await;
         assert!(split_response(&response).0.starts_with("http/1.1 405"));
     }
@@ -416,7 +413,7 @@ upstream = ":1"
 
         events.send(0xabc).unwrap();
         let event = read_until(&mut client, "\n\n").await;
-        assert!(event.contains("event: circle-changed\n"), "{event}");
+        assert!(event.contains("event: share-changed\n"), "{event}");
         assert!(
             event.contains("data: {\"config_hash\":\"0000000000000abc\"}\n"),
             "{event}"
@@ -478,7 +475,7 @@ upstream = ":1"
     }
 
     #[tokio::test]
-    async fn activation_binds_the_handshake_peer_and_answers_with_the_circle() {
+    async fn activation_binds_the_handshake_peer_and_answers_with_the_share() {
         use crate::storage::NewInvite;
         let ctx = context_with_upstream(":1");
         let db = ctx.db.clone();
@@ -514,12 +511,12 @@ upstream = ":1"
         assert!(db.guest_by_peer("peer-a").unwrap().is_none());
 
         // The right one binds the peer the connection authenticated and
-        // returns the circle, so the join has nothing left to fetch.
+        // returns the share, so the join has nothing left to fetch.
         let raw = exchange_as(ctx.clone(), peer.clone(), activation_request(&secret)).await;
         let (status, body) = split_response(&raw);
         assert!(status.starts_with("http/1.1 200"), "{status}");
         assert!(status.contains("etag:"), "{status}");
-        let info: CircleInfo = serde_json::from_slice(&body).unwrap();
+        let info: ShareInfo = serde_json::from_slice(&body).unwrap();
         assert_eq!(info.name, "Family");
         let guest = db.guest_by_peer("peer-a").unwrap().expect("bound");
         assert_eq!(guest.user_id, "alice");
@@ -534,7 +531,7 @@ upstream = ":1"
         let (status, _) = split_response(&raw);
         assert!(status.starts_with("http/1.1 400"), "{status}");
 
-        // The guest can leave: the server forgets it.
+        // The guest can leave: the host node forgets it.
         let raw = exchange_as(
             ctx.clone(),
             Peer {
@@ -570,10 +567,10 @@ upstream = ":1"
         };
 
         // A CTRL stream is served, but only activation is allowed: nothing
-        // about the circle leaks to a key that is not a guest.
+        // about the share leaks to a key that is not a guest.
         let (server, mut client) = tokio::io::duplex(64 * 1024);
         let task = tokio::spawn(handle(server, ctx.clone(), peer.clone()));
-        let request = format!("\x01GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::CIRCLE_PATH);
+        let request = format!("\x01GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::SHARE_PATH);
         client.write_all(request.as_bytes()).await.unwrap();
         client.shutdown().await.unwrap();
         let mut response = Vec::new();
