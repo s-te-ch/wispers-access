@@ -1,5 +1,6 @@
 //! The iroh transport implementation.
 
+use crate::initialization::Rollback;
 use crate::ipc;
 use crate::protocol::{self, Peer, StreamOutcome};
 use crate::serving::{BoxFuture, Closer, ExitReason, Server, ServingHandle, shutdown_signal};
@@ -296,10 +297,13 @@ fn join(send: SendStream, recv: RecvStream) -> tokio::io::Join<RecvStream, SendS
 
 //-- CLI without the daemon ----------------------------------------------------
 
-/// `init`: the directory with config and state, and a freshly generated
-/// endpoint key. Nothing beyond this machine, so nothing to undo.
-pub fn init(dir: &storage::ShareDir, config_text: &str) -> Result<()> {
+/// `init` sets up a new share with iroh as the transport.
+pub fn init(rollback: &mut Rollback, dir: &storage::ShareDir, config_text: &str) -> Result<()> {
     let state = dir.create(config_text)?;
+    rollback.push("share directory", {
+        let dir = dir.clone();
+        async move { dir.delete().map_err(Into::into) }
+    });
     let secret = iroh::SecretKey::generate();
     state.set_iroh_secret(&secret.to_bytes())?;
     println!("Endpoint ID: {}", secret.public());
