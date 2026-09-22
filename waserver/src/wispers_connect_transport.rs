@@ -147,9 +147,13 @@ impl Server for Node {
         })
     }
 
-    /// The hub keeps the roster; `waserver revoke` talks to it directly.
+    /// Not used on this transport: `waserver revoke` restores its own copy of
+    /// the host node and signs the roster revocation there (see `revoke`
+    /// below), rather than asking the daemon. The daemon does not learn of
+    /// it: its cached roster stays stale and the guest's live connection is
+    /// not closed. To be fixed together with close codes on this transport.
     fn revoke_guest(&self, _number: i64) -> Result<storage::GuestNode> {
-        anyhow::bail!("revoke goes through the hub on this transport")
+        anyhow::bail!("on this transport, revocation does not go through the daemon")
     }
 
     fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
@@ -194,9 +198,10 @@ async fn handle_quic_conn(
             Ok(stream) => {
                 let peer = Peer {
                     // The node number, authenticated by the library against
-                    // the signed roster. Activation refuses every secret on
-                    // this transport until waserver records invites of its
-                    // own here (the hub-path equalisation).
+                    // the group's cryptographic roster. `POST /v1/activation`
+                    // is unused here: the library's own activation (node 1
+                    // endorsing the guest) makes the node a guest, so every
+                    // secret is refused.
                     peer_id: peer.to_string(),
                     user_id: Some(user_id.clone()),
                 };
@@ -218,7 +223,12 @@ async fn handle_quic_conn(
     serving_handle.unregister_connection(registration).await;
 }
 
-/// Best-effort lookup of the peer's `user_id` from its node metadata, via the hub.
+/// The peer's `user_id` from its node metadata, fetched from the hub. `None`
+/// (no metadata, no user ID, or the hub unreachable) means the guest is not
+/// served. The metadata is what `invite` attached to the registration token,
+/// so identity is trusted to the hub here while membership is not; binding it
+/// at endorsement instead needs the library to report which node used which
+/// code.
 async fn resolve_identity(node: &wc::Node, peer: i32) -> Option<String> {
     let group = match node.group_info().await {
         Ok(g) => g,

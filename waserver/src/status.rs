@@ -977,13 +977,13 @@ mod tests {
         let quota = |limit, current| wcbe::NodeQuota { limit, current };
         assert_eq!(
             fmt_quota(&quota(Some(12), 11), 8),
-            "11 of 12 used (this host + 8 guests + 2 pending invites)"
+            "11 of 12 used (this host + 8 guest nodes + 2 pending invites)"
         );
         // No pending invites: the guest count would just repeat the table.
         assert_eq!(fmt_quota(&quota(Some(12), 9), 8), "9 of 12 used");
         assert_eq!(
             fmt_quota(&quota(Some(12), 3), 1),
-            "3 of 12 used (this host + 1 guest + 1 pending invite)"
+            "3 of 12 used (this host + 1 guest node + 1 pending invite)"
         );
         assert_eq!(fmt_quota(&quota(None, 3), 2), "3 used (no limit)");
     }

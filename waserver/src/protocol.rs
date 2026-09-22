@@ -32,8 +32,8 @@ pub struct StreamContext {
 pub struct Peer {
     /// The transport's identifier for the peer, as authenticated by the
     /// handshake: the iroh endpoint ID in hex, or the Wispers Connect node
-    /// number, which the library checks against the signed roster. What
-    /// `POST /v1/activation` binds to an invite.
+    /// number, which the library checks against the group's cryptographic
+    /// roster. What `POST /v1/activation` binds to an invite.
     pub peer_id: String,
     /// The guest's identity, carried to the app in the identity header.
     /// `None` means the peer is not a guest yet, only its key is known: the

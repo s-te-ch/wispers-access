@@ -132,7 +132,8 @@ pub fn mint_invite(
 /// How long shutdown waits for guests to acknowledge the close.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Grace for an unknown key to activate before its connection is closed.
+/// How long a non-activated guest node may sit on a connection without
+/// activating. This isn't security-relevant, just hygiene.
 const ACTIVATION_WINDOW: Duration = Duration::from_secs(10);
 
 /// How long to let a refused guest read its error before the connection is
