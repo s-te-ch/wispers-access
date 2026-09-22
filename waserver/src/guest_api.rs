@@ -61,7 +61,7 @@ async fn route(
 
     // Handle unauthorised peers first. They're only allowed to activate.
     if !(peer.is_authorized() || req.uri().path() == wire::ACTIVATION_PATH) {
-        error(StatusCode::FORBIDDEN, "not-activated")
+        return Ok(error(StatusCode::FORBIDDEN, "not-activated"));
     }
 
     let response = match (req.method(), req.uri().path()) {
@@ -106,7 +106,7 @@ fn share_response(
     builder: hyper::http::response::Builder,
     config: &ShareConfig,
 ) -> Response<BoxedBody> {
-    let share_info = share_info(config)
+    let share_info = share_info(config);
     let body = serde_json::to_vec(&share_info).expect("ShareInfo serialises");
     builder
         .status(StatusCode::OK)
