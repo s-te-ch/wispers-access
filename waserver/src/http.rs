@@ -17,12 +17,12 @@ use tracing::{info, warn};
 /// either the upstream's streamed body or a locally-generated error body.
 type BoxedBody = BoxBody<Bytes, std::io::Error>;
 
-/// Where an HTTP stream's requests go.
+/// Resolved target of an HTTP stream.
 #[derive(Clone)]
 pub enum Target {
     Upstream(Arc<str>),
-    /// The share has no apps configured.
-    NoApps,
+    /// A legacy request on a share with no apps.
+    NoDefaultApp,
     /// The stream named an app the share does not have (any more). The
     /// hash lets the client skip a `GET /v1/share` round trip if it already caught up.
     UnknownApp {
@@ -65,17 +65,12 @@ async fn forward(
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
     let upstream = match target {
         Target::Upstream(upstream) => upstream,
-        Target::NoApps => {
+        Target::NoDefaultApp => {
             warn!(uri = %req.uri(), "no app configured; rejecting");
-            let mut resp = error_response(
+            return Ok(error_response(
                 hyper::StatusCode::SERVICE_UNAVAILABLE,
                 "no app configured on this host node",
-            );
-            resp.headers_mut().insert(
-                ERROR_HEADER,
-                hyper::header::HeaderValue::from_static("no-apps"),
-            );
-            return Ok(resp);
+            ));
         }
         Target::UnknownApp { config_hash } => {
             let mut resp = error_response(hyper::StatusCode::NOT_FOUND, "app not found");

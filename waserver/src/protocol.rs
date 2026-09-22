@@ -41,6 +41,12 @@ pub struct Peer {
     pub user_id: Option<String>,
 }
 
+impl Peer {
+    pub fn is_authorized(&self) -> bool {
+        self.user_id.is_some()
+    }
+}
+
 /// What became of a stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamOutcome {
@@ -71,7 +77,7 @@ where
             if kind == FirstByte::LegacyHttp {
                 let target = match ctx.config.default_app() {
                     Some(app) => Target::Upstream(app.upstream.as_str().into()),
-                    None => Target::NoApps,
+                    None => Target::NoDefaultApp,
                 };
                 // The byte was the start of the request; hand it back.
                 http::serve(Prefixed::new(vec![first], stream), target, user_id).await?;
@@ -106,7 +112,6 @@ async fn read_stream_type<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Option
 fn app_target(config: &ShareConfig, app_id: &str) -> Target {
     match config.apps.iter().find(|s| s.id == app_id) {
         Some(app) => Target::Upstream(app.upstream.as_str().into()),
-        None if config.apps.is_empty() => Target::NoApps,
         None => {
             warn!(app = app_id, "request for an app this share does not have");
             Target::UnknownApp {
@@ -328,12 +333,29 @@ upstream = ":1"
     }
 
     #[tokio::test]
-    async fn no_apps_gets_a_503() {
+    async fn legacy_request_on_an_empty_share_gets_a_plain_503() {
         let response = exchange(context("name = \"x\"\n"), Some("bob"), GET.to_vec()).await;
         let (head, _) = split_response(&response);
         assert!(head.starts_with("http/1.1 503"), "{head}");
+        // A page for the person; legacy clients know no error header.
+        assert!(!head.contains(http::ERROR_HEADER), "{head}");
+    }
+
+    #[tokio::test]
+    async fn data_request_on_an_empty_share_is_an_unknown_app() {
+        // The guest's list is stale (the last app was removed): same answer
+        // as for any other app the share does not have, hash included.
+        let ctx = context("name = \"x\"\n");
+        let hash = ctx.config.config_hash();
+        let response = exchange(ctx, Some("bob"), data_stream("gone", GET)).await;
+        let (head, _) = split_response(&response);
+        assert!(head.starts_with("http/1.1 404"), "{head}");
         assert!(
-            head.contains(&format!("{}: no-apps", http::ERROR_HEADER)),
+            head.contains(&format!("{}: app-not-found", http::ERROR_HEADER)),
+            "{head}"
+        );
+        assert!(
+            head.contains(&format!("{}: {:016x}", http::CONFIG_HASH_HEADER, hash)),
             "{head}"
         );
     }
