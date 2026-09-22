@@ -285,7 +285,7 @@ impl Row {
                 Ok(App {
                     id: r.get(0)?,
                     name: r.get(1)?,
-                    kind: parse_app_kind(&r.get::<_, String>(2)?),
+                    kind: AppKind::parse_or_web(&r.get::<_, String>(2)?),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -327,11 +327,6 @@ impl Row {
         conn.execute("DELETE FROM shares WHERE id = ?1", [self.id])?;
         Ok(())
     }
-}
-
-/// A kind this build does not know reads as `web`: the host may be newer.
-fn parse_app_kind(s: &str) -> AppKind {
-    serde_json::from_value(serde_json::Value::String(s.to_owned())).unwrap_or_default()
 }
 
 fn is_unique_violation(e: &rusqlite::Error) -> bool {

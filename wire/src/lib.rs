@@ -465,12 +465,16 @@ pub struct App {
     pub id: String,
     /// Display name.
     pub name: String,
-    #[serde(default)]
+    /// Absent means `web`, and so does a kind this build does not know: a
+    /// host may add kinds before its guests learn them.
+    #[serde(default, deserialize_with = "AppKind::deserialize_or_web")]
     pub kind: AppKind,
 }
 
 /// What kind of app is being shared: a generic web app, or one of the apps that
-/// integrating clients know how to talk to.
+/// integrating clients know how to talk to. Strict on its own (a config file
+/// must not silently accept a typo); the guest-facing [`App`] reads unknown
+/// kinds as `web`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppKind {
@@ -488,6 +492,16 @@ impl AppKind {
             AppKind::Jellyfin => "jellyfin",
             AppKind::Immich => "immich",
         }
+    }
+
+    /// The kind named by `s`, or `web` when this build does not know it.
+    pub fn parse_or_web(s: &str) -> AppKind {
+        serde_json::from_value(serde_json::Value::String(s.to_owned())).unwrap_or_default()
+    }
+
+    fn deserialize_or_web<'de, D: serde::Deserializer<'de>>(d: D) -> Result<AppKind, D::Error> {
+        let s = String::deserialize(d)?;
+        Ok(AppKind::parse_or_web(&s))
     }
 }
 
@@ -908,8 +922,11 @@ mod tests {
         // An app without a kind is a web app; unknown fields are ignored.
         let app: App = serde_json::from_str(r#"{"id":"x","name":"X","future_field":1}"#).unwrap();
         assert_eq!(app.kind, AppKind::Web);
-        // An unknown kind is a contract violation.
-        assert!(serde_json::from_str::<App>(r#"{"id":"x","name":"X","kind":"plex"}"#).is_err());
+        // An unknown kind reads as web: a host may add kinds before its guests.
+        let app: App = serde_json::from_str(r#"{"id":"x","name":"X","kind":"plex"}"#).unwrap();
+        assert_eq!(app.kind, AppKind::Web);
+        // The kind on its own stays strict, for config files.
+        assert!(serde_json::from_str::<AppKind>(r#""plex""#).is_err());
     }
 
     #[test]
