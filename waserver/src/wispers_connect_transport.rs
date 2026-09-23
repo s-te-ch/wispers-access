@@ -60,95 +60,16 @@ pub async fn bind(
 }
 
 impl serving::HostNode for HostNode {
-    /// Connects to the hub and serves until the session ends or a signal.
     fn run(&self, serving_handle: ServingHandle) -> BoxFuture<'_, Result<ExitReason>> {
-        Box::pin(async move {
-            let (session_handle, session, mut incoming) = self
-                .node
-                .start_serving()
-                .await
-                .context("starting Wispers node serving loop")?;
-            *self.hub_session.write().await = Some(session_handle);
-            serving_handle.set_reachable().await;
-            info!("Connected to hub");
-
-            // Run the Wispers serving session.
-            let mut session_task = tokio::spawn(async move { session.run().await });
-
-            // Resolves on SIGTERM/SIGINT so we tear the hub session down
-            // cleanly instead of being killed mid-flight (e.g. by a container
-            // supervisor).
-            let shutdown = shutdown_signal();
-            tokio::pin!(shutdown);
-
-            // Main serving loop. Accept connections from the peer nodes or
-            // from IPC.
-            loop {
-                tokio::select! {
-                    // Incoming QUIC connection.
-                    Some(result) = incoming.quic.recv() => {
-                        tokio::spawn(handle_quic_conn(
-                            result,
-                            self.node.clone(),
-                            serving_handle.clone(),
-                        ));
-                    },
-                    // Session end.
-                    result = &mut session_task => {
-                        break handle_session_end(result).map(|()| ExitReason::Stopped)
-                    }
-                    // Shutdown signal: stop the session the same way
-                    // `waserver stop` does, drain it, then exit cleanly. This
-                    // stop was intended, so we report success (exit 0)
-                    // regardless of how the session terminates.
-                    _ = &mut shutdown => {
-                        info!("shutdown signal received; shutting down gracefully");
-                        if let Err(e) = serving_handle.shutdown().await {
-                            warn!(error = format!("{:#}", e), "error during graceful shutdown");
-                        }
-                        let _ = (&mut session_task).await;
-                        break Ok(ExitReason::Signal);
-                    }
-                }
-            }
-        })
+        Box::pin(self.serve(serving_handle))
     }
 
-    /// A registration token from the hub plus an activation code from the
-    /// live session.
     fn invite<'a>(
         &'a self,
         node_name: &'a str,
         user_id: &'a str,
     ) -> BoxFuture<'a, Result<wire::Invite>> {
-        Box::pin(async move {
-            let metadata = wcbe::NodeMetadata {
-                user_id: user_id.to_owned(),
-            };
-            let registration_token = self
-                .wcbe_client
-                .get_registration_token(
-                    &self.connectivity_group_id,
-                    Some(node_name),
-                    Some(&metadata),
-                )
-                .await?;
-            let Some(session) = self.hub_session.read().await.clone() else {
-                anyhow::bail!("Not connected to hub");
-            };
-            // Invites are delivered out-of-band (chat, email, QR), so use
-            // the long-lived profile; the interactive one expires in two
-            // minutes.
-            let activation_code = session
-                .generate_activation_code_with_ttl(wc::TtlProfile::Asynchronous)
-                .await?
-                .format();
-            Ok(wire::Invite::WispersConnect {
-                registration_token,
-                activation_code,
-                backend: self.backend.clone(),
-            })
-        })
+        Box::pin(self.mint_invite(node_name, user_id))
     }
 
     /// Not used on this transport: `waserver revoke` restores its own copy of
@@ -161,12 +82,99 @@ impl serving::HostNode for HostNode {
     }
 
     fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move {
-            match self.hub_session.read().await.clone() {
-                Some(session) => session.shutdown().await.context("shutdown failed"),
-                None => Ok(()),
+        Box::pin(self.stop_hub_session())
+    }
+}
+
+impl HostNode {
+    /// Connects to the hub and serves until the session ends or a signal.
+    async fn serve(&self, serving_handle: ServingHandle) -> Result<ExitReason> {
+        let (session_handle, session, mut incoming) = self
+            .node
+            .start_serving()
+            .await
+            .context("starting Wispers node serving loop")?;
+        *self.hub_session.write().await = Some(session_handle);
+        serving_handle.set_reachable().await;
+        info!("Connected to hub");
+
+        // Run the Wispers serving session.
+        let mut session_task = tokio::spawn(async move { session.run().await });
+
+        // Resolves on SIGTERM/SIGINT so we tear the hub session down
+        // cleanly instead of being killed mid-flight (e.g. by a container
+        // supervisor).
+        let shutdown = shutdown_signal();
+        tokio::pin!(shutdown);
+
+        // Main serving loop. Accept connections from the peer nodes or
+        // from IPC.
+        loop {
+            tokio::select! {
+                // Incoming QUIC connection.
+                Some(result) = incoming.quic.recv() => {
+                    tokio::spawn(handle_quic_conn(
+                        result,
+                        self.node.clone(),
+                        serving_handle.clone(),
+                    ));
+                },
+                // Session end.
+                result = &mut session_task => {
+                    break handle_session_end(result).map(|()| ExitReason::Stopped)
+                }
+                // Shutdown signal: stop the session the same way
+                // `waserver stop` does, drain it, then exit cleanly. This
+                // stop was intended, so we report success (exit 0)
+                // regardless of how the session terminates.
+                _ = &mut shutdown => {
+                    info!("shutdown signal received; shutting down gracefully");
+                    if let Err(e) = serving_handle.shutdown().await {
+                        warn!(error = format!("{:#}", e), "error during graceful shutdown");
+                    }
+                    let _ = (&mut session_task).await;
+                    break Ok(ExitReason::Signal);
+                }
             }
+        }
+    }
+
+    /// A registration token from the hub plus an activation code from the
+    /// live session.
+    async fn mint_invite(&self, node_name: &str, user_id: &str) -> Result<wire::Invite> {
+        let metadata = wcbe::NodeMetadata {
+            user_id: user_id.to_owned(),
+        };
+        let registration_token = self
+            .wcbe_client
+            .get_registration_token(
+                &self.connectivity_group_id,
+                Some(node_name),
+                Some(&metadata),
+            )
+            .await?;
+        let Some(session) = self.hub_session.read().await.clone() else {
+            anyhow::bail!("Not connected to hub");
+        };
+        // Invites are delivered out-of-band (chat, email, QR), so use
+        // the long-lived profile; the interactive one expires in two
+        // minutes.
+        let activation_code = session
+            .generate_activation_code_with_ttl(wc::TtlProfile::Asynchronous)
+            .await?
+            .format();
+        Ok(wire::Invite::WispersConnect {
+            registration_token,
+            activation_code,
+            backend: self.backend.clone(),
         })
+    }
+
+    async fn stop_hub_session(&self) -> Result<()> {
+        match self.hub_session.read().await.clone() {
+            Some(session) => session.shutdown().await.context("shutdown failed"),
+            None => Ok(()),
+        }
     }
 }
 

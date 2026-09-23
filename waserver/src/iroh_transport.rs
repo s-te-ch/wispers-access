@@ -38,46 +38,8 @@ pub async fn bind(share: &str, state: storage::StateDb) -> Result<HostNode> {
 }
 
 impl serving::HostNode for HostNode {
-    /// Accepts connections until the endpoint is closed or a signal.
     fn run(&self, serving_handle: ServingHandle) -> BoxFuture<'_, Result<ExitReason>> {
-        Box::pin(async move {
-            // Reachable once a home relay is up and the address record is out.
-            tokio::spawn({
-                let (endpoint, handle) = (self.endpoint.clone(), serving_handle.clone());
-                async move {
-                    endpoint.online().await;
-                    info!("iroh endpoint online");
-                    handle.set_reachable().await;
-                }
-            });
-
-            let shutdown = shutdown_signal();
-            tokio::pin!(shutdown);
-            loop {
-                tokio::select! {
-                    incoming = self.endpoint.accept() => {
-                        let Some(incoming) = incoming else {
-                            // `None`: the endpoint was closed, by `waserver stop`.
-                            break Ok(ExitReason::Stopped);
-                        };
-                        tokio::spawn(
-                            handle_incoming(
-                                incoming,
-                                serving_handle.clone(),
-                                self.db.clone(),
-                            ),
-                        );
-                    }
-                    _ = &mut shutdown => {
-                        info!("shutdown signal received; shutting down gracefully");
-                        if let Err(e) = serving_handle.shutdown().await {
-                            warn!(error = format!("{:#}", e), "error during graceful shutdown");
-                        }
-                        break Ok(ExitReason::Signal);
-                    }
-                }
-            }
-        })
+        Box::pin(self.serve(serving_handle))
     }
 
     fn invite<'a>(
@@ -85,7 +47,7 @@ impl serving::HostNode for HostNode {
         node_name: &'a str,
         user_id: &'a str,
     ) -> BoxFuture<'a, Result<wire::Invite>> {
-        Box::pin(async move { mint_invite(&self.db, self.endpoint.id(), node_name, user_id) })
+        Box::pin(async move { self.mint_invite(node_name, user_id) })
     }
 
     fn revoke_guest(&self, number: i64) -> Result<GuestNode> {
@@ -94,41 +56,81 @@ impl serving::HostNode for HostNode {
             .revoke_guest(number, chrono::Utc::now().timestamp())?)
     }
 
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.close_endpoint())
+    }
+}
+
+impl HostNode {
+    /// Accepts connections until the endpoint is closed or a signal.
+    async fn serve(&self, serving_handle: ServingHandle) -> Result<ExitReason> {
+        // Reachable once a home relay is up and the address record is out.
+        tokio::spawn({
+            let (endpoint, handle) = (self.endpoint.clone(), serving_handle.clone());
+            async move {
+                endpoint.online().await;
+                info!("iroh endpoint online");
+                handle.set_reachable().await;
+            }
+        });
+
+        let shutdown = shutdown_signal();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                incoming = self.endpoint.accept() => {
+                    let Some(incoming) = incoming else {
+                        // `None`: the endpoint was closed, by `waserver stop`.
+                        break Ok(ExitReason::Stopped);
+                    };
+                    tokio::spawn(
+                        handle_incoming(
+                            incoming,
+                            serving_handle.clone(),
+                            self.db.clone(),
+                        ),
+                    );
+                }
+                _ = &mut shutdown => {
+                    info!("shutdown signal received; shutting down gracefully");
+                    if let Err(e) = serving_handle.shutdown().await {
+                        warn!(error = format!("{:#}", e), "error during graceful shutdown");
+                    }
+                    break Ok(ExitReason::Signal);
+                }
+            }
+        }
+    }
+
+    /// Records a one-time invite and composes its code.
+    fn mint_invite(&self, node_name: &str, user_id: &str) -> Result<wire::Invite> {
+        let secret = wire::InviteSecret(rand::random());
+        let now = chrono::Utc::now();
+        self.db.create_invite(
+            storage::NewInvite {
+                secret: &secret,
+                user_id,
+                node_name,
+                expires_at: (now + INVITE_VALIDITY).timestamp(),
+            },
+            now.timestamp(),
+        )?;
+        Ok(wire::Invite::Iroh {
+            endpoint_id: wire::EndpointId(*self.endpoint.id().as_bytes()),
+            secret,
+        })
+    }
+
     /// Shutdown, but wait for guests to acknowledge the close, so they see an
     /// orderly close.
-    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move {
-            let _ = tokio::time::timeout(CLOSE_TIMEOUT, self.endpoint.close()).await;
-            Ok(())
-        })
+    async fn close_endpoint(&self) -> Result<()> {
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, self.endpoint.close()).await;
+        Ok(())
     }
 }
 
 /// How long an iroh invite can be redeemed.
 const INVITE_VALIDITY: chrono::Duration = chrono::Duration::hours(24);
-
-pub fn mint_invite(
-    db: &storage::StateDb,
-    endpoint_id: iroh::EndpointId,
-    node_name: &str,
-    user_id: &str,
-) -> Result<wire::Invite> {
-    let secret = wire::InviteSecret(rand::random());
-    let now = chrono::Utc::now();
-    db.create_invite(
-        storage::NewInvite {
-            secret: &secret,
-            user_id,
-            node_name,
-            expires_at: (now + INVITE_VALIDITY).timestamp(),
-        },
-        now.timestamp(),
-    )?;
-    Ok(wire::Invite::Iroh {
-        endpoint_id: wire::EndpointId(*endpoint_id.as_bytes()),
-        secret,
-    })
-}
 
 /// How long shutdown waits for guests to acknowledge the close.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
