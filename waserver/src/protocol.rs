@@ -1,7 +1,7 @@
 //! The server side of the wire protocol (see the `wispers-access-wire` crate).
-//! DATA streams go to the proxy for the app they name, CTRL streams to the
-//! guest API, and raw HTTP from clients that predate the framing to the default
-//! app.
+//! Data plane streams get proxied to the app they name, control plane streams
+//! get routed to the guest API. For backward compatibility, raw HTTP from
+//! legacy clients get proxied to the default app.
 
 use crate::config::ShareConfig;
 use crate::guest_api;
@@ -17,27 +17,26 @@ use tracing::warn;
 use wire::{FirstByte, HttpPreamble, StreamType};
 use wispers_access_wire as wire;
 
-/// What one stream is served against: the config as of when it was opened
-/// (a reload applies from the next stream on) and the channel that carries
-/// a new config hash on every reload, for guests holding an events stream.
+/// Context needed to serve an incoming stream.
 #[derive(Clone)]
 pub struct StreamContext {
+    /// Config of the share being served, frozen at the time the stream got
+    /// opened to make reloads safe.
     pub config: Arc<ShareConfig>,
+    /// Event source, used to serve `/v1/events`.
     pub events: broadcast::Sender<u64>,
+    /// The served share's state DB.
     pub db: storage::StateDb,
 }
 
-/// Who is on the other end of a stream, as far as serving it is concerned.
+/// Info about the authenticated peer.
 #[derive(Clone)]
 pub struct Peer {
-    /// The transport's identifier for the peer, as authenticated by the
-    /// handshake: the iroh endpoint ID in hex, or the Wispers Connect node
-    /// number, which the library checks against the group's cryptographic
-    /// roster. What `POST /v1/activation` binds to an invite.
+    /// The transport's identifier for the peer - the iroh endpoint ID in hex,
+    /// or the Wispers Connect node number.
     pub peer_id: String,
-    /// The guest's identity, carried to the app in the identity header.
-    /// `None` means the peer is not a guest yet, only its key is known: the
-    /// control plane is all it gets, activation being what it is there for.
+    /// The user ID set for the guest node at invite time, or None if the peer
+    /// hasn't been authorized (i.e. activated) yet.
     pub user_id: Option<String>,
 }
 
@@ -47,70 +46,71 @@ impl Peer {
     }
 }
 
-/// What became of a stream.
+/// Result of serving a stream, used for closing the QUIC connection with the
+/// appropriate code.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamOutcome {
     Served,
-    /// A peer without an identity opened a data-plane stream. The contract
-    /// gives an unbound key one thing, an activation attempt, and ends the
-    /// connection with `unknown` on anything else; only the caller holds
-    /// the connection, so it does the closing.
+    /// An unauthorised peer tried to open a data-plane stream.
     Refused,
 }
 
-/// Serves one stream a peer opened.
+/// Handle a stream accepted by the HostNode.
 pub async fn handle<S>(mut stream: S, ctx: StreamContext, peer: Peer) -> Result<StreamOutcome>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let Some((first, kind)) = read_stream_type(&mut stream).await? else {
-        return Ok(StreamOutcome::Served);
-    };
-    match kind {
-        FirstByte::Typed(StreamType::Ctrl) => {
+    match read_stream_type(&mut stream).await? {
+        Some(FirstByte::Typed(StreamType::Ctrl)) => {
             guest_api::serve(stream, ctx, peer).await?;
         }
-        FirstByte::LegacyHttp | FirstByte::Typed(StreamType::Data) => {
-            let Some(user_id) = peer.user_id else {
+        Some(FirstByte::Typed(StreamType::Data)) => {
+            if !peer.is_authorized() {
                 return Ok(StreamOutcome::Refused);
             };
-            if kind == FirstByte::LegacyHttp {
-                let target = match ctx.config.default_app() {
-                    Some(app) => Target::Upstream(app.upstream.as_str().into()),
-                    None => Target::NoDefaultApp,
-                };
-                // The byte was the start of the request; hand it back.
-                http::serve(Prefixed::new(vec![first], stream), target, user_id).await?;
-            } else {
-                let preamble: HttpPreamble = wire::read_message(&mut stream)
-                    .await
-                    .context("reading DATA preamble")?;
-                let target = app_target(&ctx.config, &preamble.app_id);
-                http::serve(stream, target, user_id).await?;
-            }
+            let user_id = peer.user_id.unwrap();
+            let preamble: HttpPreamble = wire::read_message(&mut stream)
+                .await
+                .context("reading DATA preamble")?;
+            let target = app_target(&ctx.config, &preamble.app_id);
+            http::serve(stream, target, user_id).await?;
         }
-        FirstByte::Unknown(byte) => {
-            warn!(byte, "unknown stream type; closing");
+        Some(FirstByte::LegacyHttp(raw_byte)) => {
+            if !peer.is_authorized() {
+                return Ok(StreamOutcome::Refused);
+            };
+            let user_id = peer.user_id.unwrap();
+            let target = match ctx.config.default_app() {
+                Some(app) => Target::Upstream(app.upstream.as_str().into()),
+                None => Target::NoDefaultApp,
+            };
+            // Prepend the first byte again, then serve the stream.
+            http::serve(Prefixed::new(vec![raw_byte], stream), target, user_id).await?;
+        }
+        Some(FirstByte::Unknown(raw_byte)) => {
+            warn!(raw_byte, "unknown stream type, closing");
             stream.shutdown().await.ok();
+        }
+        None => {
+            // No-op. The peer closed the stream before sending any data.
         }
     }
     Ok(StreamOutcome::Served)
 }
 
-/// Reads the type byte that opens every stream, returning it raw and
-/// classified. `None` when the stream was opened and closed without a byte,
-/// which carries no request.
-async fn read_stream_type<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Option<(u8, FirstByte)>> {
+/// Reads the type byte that opens every stream, returning it classified. `None`
+/// when the stream was opened and closed without a byte.
+async fn read_stream_type<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Option<FirstByte>> {
     let mut first = [0u8; 1];
     match stream.read_exact(&mut first).await {
-        Ok(_) => Ok(Some((first[0], FirstByte::from(first[0])))),
+        Ok(_) => Ok(Some(FirstByte::from(first[0]))),
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
         Err(e) => Err(e).context("reading stream type"),
     }
 }
 
 fn app_target(config: &ShareConfig, app_id: &str) -> Target {
-    match config.apps.iter().find(|s| s.id == app_id) {
+    match config.find_app(app_id) {
         Some(app) => Target::Upstream(app.upstream.as_str().into()),
         None => {
             warn!(app = app_id, "request for an app this share does not have");

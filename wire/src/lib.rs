@@ -321,7 +321,7 @@ pub enum StreamType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FirstByte {
     Typed(StreamType),
-    LegacyHttp,
+    LegacyHttp(u8),
     Unknown(u8),
 }
 
@@ -331,7 +331,7 @@ impl From<u8> for FirstByte {
             0x00 => FirstByte::Typed(StreamType::Data),
             0x01 => FirstByte::Typed(StreamType::Ctrl),
             // Every HTTP method starts with an ASCII letter.
-            b'A'..=b'Z' | b'a'..=b'z' => FirstByte::LegacyHttp,
+            b'A'..=b'Z' | b'a'..=b'z' => FirstByte::LegacyHttp(first),
             other => FirstByte::Unknown(other),
         }
     }
@@ -889,7 +889,10 @@ mod tests {
         assert_eq!(FirstByte::from(0x00), FirstByte::Typed(StreamType::Data));
         assert_eq!(FirstByte::from(0x01), FirstByte::Typed(StreamType::Ctrl));
         for method in ["GET", "POST", "OPTIONS", "get"] {
-            assert_eq!(FirstByte::from(method.as_bytes()[0]), FirstByte::LegacyHttp);
+            assert_eq!(
+                FirstByte::from(method.as_bytes()[0]),
+                FirstByte::LegacyHttp(method.as_bytes()[0])
+            );
         }
         assert_eq!(FirstByte::from(0x02), FirstByte::Unknown(0x02));
         assert_eq!(FirstByte::from(b' '), FirstByte::Unknown(b' '));

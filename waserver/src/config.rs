@@ -140,6 +140,11 @@ impl ShareConfig {
         Ok(cfg)
     }
 
+    /// Finds and returns the AppConfig for the given ID.
+    pub fn find_app(&self, app_id: &str) -> Option<&AppConfig> {
+        self.apps.iter().find(|app| app.id == app_id)
+    }
+
     /// The app used for requests that name no app.
     ///
     /// TODO: Clean this up once old clients are gone and everyone specifies the
