@@ -11,7 +11,7 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Body type used in responses we send back to the peer. Boxed so we can return
 /// either the upstream's streamed body or a locally-generated error body.
@@ -44,15 +44,24 @@ where
     let io = TokioIo::new(io);
     let service =
         hyper::service::service_fn(move |req| handle_request(req, target.clone(), user_id.clone()));
-    http1_server::Builder::new()
+    let served = http1_server::Builder::new()
         // One request per stream: the client may FIN its side right after the
         // request and wait for the response on the other half.
         .half_close(true)
         .serve_connection(io, service)
         // Allow a 101 to hand the stream over for raw relaying (WebSocket).
         .with_upgrades()
-        .await
-        .context("HTTP/1 connection error")
+        .await;
+    match served {
+        Ok(()) => Ok(()),
+        // The guest node gave up on the response (a reload, a closed tab) and the
+        // transport tore the stream down. Routine, not a fault.
+        Err(e) if peer_went_away(&e) => {
+            debug!(error = %e, "guest abandoned the request");
+            Ok(())
+        }
+        Err(e) => Err(e).context("HTTP/1 connection error"),
+    }
 }
 
 /// Handle an HTTP request. This is the hyper service entry point (see
@@ -262,4 +271,27 @@ fn error_response(status: hyper::StatusCode, msg: &str) -> hyper::Response<Boxed
         .header("content-type", "text/plain; charset=utf-8")
         .body(body)
         .expect("static error response is always valid")
+}
+
+/// Whether a hyper connection error just means the other side stopped
+/// reading or writing - it closed mid-message, or the transport reported the
+/// stream reset or stopped underneath hyper.
+fn peer_went_away(e: &hyper::Error) -> bool {
+    if e.is_incomplete_message() || e.is_body_write_aborted() {
+        return true;
+    }
+    let mut source = std::error::Error::source(e);
+    while let Some(err) = source {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::NotConnected
+            );
+        }
+        source = err.source();
+    }
+    false
 }
