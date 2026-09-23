@@ -1,8 +1,4 @@
-//! Serving: the daemon's startup sequence and the per-share state shared
-//! by the transports, the IPC server and the stream handlers. A transport
-//! (`wispers_connect_transport.rs`, `iroh_transport.rs`) contributes a
-//! `bind` that returns its node or endpoint and a `run` that drives its loop;
-//! `serve` calls them in order and owns everything in between.
+//! waserver's serving setup and loop.
 
 use crate::config::{ShareConfig, TransportConfig};
 use crate::ipc;
@@ -22,19 +18,25 @@ use tracing::{info, warn};
 use wispers_access_wire as wire;
 
 pub async fn serve(share: &str) -> Result<()> {
+    // Locate and read the share's configuration.
     let dir = storage::ShareDir::new(share)?;
     let cfg = dir.load_config()?;
-    match cfg.default_app() {
-        Some(s) => info!(app = %s.id, upstream = %s.upstream, "default app"),
-        None => warn!("no apps configured; guests get 503 until `waserver reload`"),
-    }
     let state = dir.open_state()?;
+
+    // Warn if there are no apps configured.
+    if cfg.apps.is_empty() {
+        warn!("no apps configured, guests will get 503 until `waserver reload`");
+    }
+
+    // Instantiate the host node for the appropriate transport.
     let host_node: Arc<dyn HostNode> = match cfg.transport.clone() {
         TransportConfig::WispersConnect { backend } => {
             Arc::new(wispers_connect_transport::bind(share, state.clone(), backend).await?)
         }
         TransportConfig::Iroh {} => Arc::new(iroh_transport::bind(share, state.clone()).await?),
     };
+
+    // Start the local IPC interface.
     let handle = ServingHandle::new(dir, cfg, state, host_node.clone());
     let ipc_server = match ipc::Server::bind(share).await {
         Ok(ipc_server) => ipc_server,
@@ -45,6 +47,8 @@ pub async fn serve(share: &str) -> Result<()> {
         }
     };
     let mut ipc_task = tokio::spawn(ipc_server.run(handle.clone()));
+
+    // Run the serving loop.
     let reason = host_node.run(handle).await?;
     if reason == ExitReason::Stopped {
         // `waserver stop` ended the loop. Give some time to answer the request.
@@ -86,8 +90,7 @@ pub enum ExitReason {
     Stopped,
 }
 
-/// How long the exit waits for the IPC server to answer the `stop` that
-/// ended the loop.
+/// How long to wait for the IPC server to answer a `stop` command.
 const IPC_REPLY_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
@@ -97,15 +100,12 @@ pub struct ServingHandle {
 
 struct Inner {
     host_node: Arc<dyn HostNode>,
-    /// The share's state database, which activation writes to.
     db: storage::StateDb,
-
-    // Time or creation and time since being reachable, respectively.
     started_at: chrono::DateTime<chrono::Utc>,
     reachable_since: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
 
-    /// Live connections from guests, keyed by a per-connection ID.
-    connections: RwLock<HashMap<u64, GuestConnection>>,
+    /// Live connections from guest nodes, keyed by a per-connection ID.
+    connections: RwLock<HashMap<u64, GuestNodeConnection>>,
     next_connection_id: AtomicU64,
 
     /// Config location.
@@ -122,7 +122,7 @@ pub struct ReloadOutcome {
     pub config: Arc<ShareConfig>,
 }
 
-struct GuestConnection {
+struct GuestNodeConnection {
     number: i32,
     user_id: String,
     connected_since: chrono::DateTime<chrono::Utc>,
@@ -257,7 +257,7 @@ impl ServingHandle {
             .fetch_add(1, Ordering::Relaxed);
         self.inner.connections.write().await.insert(
             id,
-            GuestConnection {
+            GuestNodeConnection {
                 number,
                 user_id,
                 connected_since: chrono::Utc::now(),
@@ -295,7 +295,7 @@ impl ServingHandle {
 
     async fn close_connections(
         &self,
-        which: impl Fn(&GuestConnection) -> bool,
+        which: impl Fn(&GuestNodeConnection) -> bool,
         code: wire::CloseCode,
     ) {
         for c in self.inner.connections.read().await.values() {
@@ -310,9 +310,9 @@ impl ServingHandle {
 
 //-- Shared plumbing -----------------------------------------------------------
 
-/// Resolves when the process receives a shutdown signal (`SIGTERM` or `SIGINT`)
-/// If the handlers can't be installed, this never resolves, so the server
-/// keeps running rather than shutting down spuriously.
+/// Produces a future that resolves if the process receives a shutdown signal
+/// (`SIGTERM` or `SIGINT`). If the handlers can't be installed, produces a
+/// future that never resolves.
 pub(crate) async fn shutdown_signal() {
     #[cfg(unix)]
     {
