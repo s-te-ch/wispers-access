@@ -19,24 +19,24 @@ use tabwriter::TabWriter;
 
 const UPSTREAM_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub async fn run(share: Option<&str>, json: bool) -> Result<()> {
-    let report = match share {
-        Some(share) => {
-            if !storage::ShareDir::new(share)?.exists() {
-                anyhow::bail!("Share {} is not initialised", share);
-            }
-            let loaded = load_share(share).map_err(|e| format!("{:#}", e));
-            StatusReport {
-                shares: vec![gather_share(share, loaded).await],
-                groups_quota: None,
-            }
-        }
-        None => gather_fleet().await?,
-    };
+pub async fn report_on_share(share: &str, json: bool) -> Result<()> {
+    if !storage::ShareDir::new(share)?.exists() {
+        anyhow::bail!("Share {} is not initialised", share);
+    }
+    let loaded = load_share(share).map_err(|e| format!("{:#}", e));
+    let share_status = gather_share(share, loaded).await;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&share_status)?);
+    } else {
+        print_share_details(&share_status);
+    }
+    Ok(())
+}
+
+pub async fn report_on_fleet(json: bool) -> Result<()> {
+    let report = gather_fleet().await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if share.is_some() {
-        print_share_details(&report.shares[0]);
     } else {
         print_fleet(&report);
     }

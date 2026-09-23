@@ -162,7 +162,10 @@ async fn async_main(command: Command) -> Result<()> {
         }
         Command::Stop { share } => stop(&share).await,
         Command::Reload { share } => reload(&share).await,
-        Command::Status { share, json } => status::run(share.as_deref(), json).await,
+        Command::Status { share, json } => match share {
+            Some(share) => status::report_on_share(&share, json).await,
+            None => status::report_on_fleet(json).await,
+        },
         Command::Logs { follow, share } => logs(follow, &share),
         Command::Invite {
             share,
