@@ -2,7 +2,7 @@
 
 use crate::initialization::Rollback;
 use crate::protocol::{self, Peer};
-use crate::serving::{BoxFuture, ExitReason, Server, ServingHandle, shutdown_signal};
+use crate::serving::{self, BoxFuture, ExitReason, ServingHandle, shutdown_signal};
 use crate::status::{GuestStatus, InviteStatus, TransportReport, TransportStatus, invite_status};
 use crate::storage;
 use crate::wcbe;
@@ -14,12 +14,92 @@ use tracing::{error, info, warn};
 use wispers_access_wire as wire;
 use wispers_connect as wc;
 
+//-- Share initialisation ------------------------------------------------------
+
+/// `init` sets up a new share with Wispers Connect as the transport.
+pub async fn init(
+    rollback: &mut Rollback,
+    dir: &storage::ShareDir,
+    config_text: &str,
+    api_key: Option<&str>,
+    display_name: &str,
+    backend: Option<&str>,
+) -> Result<()> {
+    let Some(api_key) = api_key else {
+        anyhow::bail!("--api-key (or WC_API_KEY) is required for wispers-connect");
+    };
+    let wcbe_client = wcbe::Client::new(api_key, &wcbe::api_base(backend));
+
+    let cg_id = wcbe_client
+        .add_connectivity_group(display_name)
+        .await
+        .map_err(explain_group_quota)?;
+    rollback.push("connectivity group", {
+        let (client, cg_id) = (wcbe_client.clone(), cg_id.clone());
+        async move { client.remove_connectivity_group(&cg_id).await }
+    });
+
+    let state = dir.create(config_text)?;
+    rollback.push("share directory", {
+        let dir = dir.clone();
+        async move { dir.delete().map_err(Into::into) }
+    });
+    state.set_wispers_connect_state(&storage::WispersConnectState {
+        api_key: api_key.to_owned(),
+        connectivity_group_id: cg_id.clone(),
+    })?;
+
+    // Create the serving Wispers node and register it with the backend. The
+    // registration goes away with the group, so it needs no undo of its own.
+    let node_storage = wc::NodeStorage::new(state);
+    if let Some(backend) = backend {
+        node_storage.override_hub_addr(backend);
+    }
+    let mut node = node_storage.restore_or_init_node().await?;
+    let token = wcbe_client
+        .get_registration_token(&cg_id, Some("Host"), None /* metadata */)
+        .await?;
+    node.register(&token).await.context("registration failed")?;
+    Ok(())
+}
+
+/// Group creation is where the plan's connectivity-group quota bites.
+/// Make the error actionable.
+fn explain_group_quota(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast_ref::<wcbe::QuotaExceeded>() {
+        Some(q) if q.quota == "groups_per_domain" => anyhow::anyhow!(
+            "cannot create a new share: your plan's connectivity-group quota \
+             is used up ({} of {}). Delete an unused share with `waserver \
+             deinit <share>` or upgrade your plan.",
+            q.current,
+            q.limit
+        ),
+        _ => e,
+    }
+}
+
+/// Removes the connectivity group, which deregisters every node. A share
+/// whose `init` never got that far has nothing to remove.
+pub async fn deinit(
+    wcs: Option<storage::WispersConnectState>,
+    backend: Option<&str>,
+) -> Result<()> {
+    let Some(wcs) = wcs else {
+        return Ok(());
+    };
+    wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend))
+        .remove_connectivity_group(&wcs.connectivity_group_id)
+        .await
+}
+
+//-- HostNode implementation ---------------------------------------------------
+
 /// The host node is always the first node of its connectivity group: `init`
 /// registers it before any invite exists. Guests dial it by this number.
-pub const SERVER_NODE_NUMBER: i32 = 1;
+pub const HOST_NODE_NUMBER: i32 = 1;
 
-/// The node restored from the share's state, ready to connect to the hub.
-pub struct Node {
+/// Host node implementation for Wispers Connect.
+pub struct HostNode {
     node: Arc<wc::Node>,
     wcbe_client: wcbe::Client,
     connectivity_group_id: String,
@@ -31,7 +111,11 @@ pub struct Node {
     hub_session: RwLock<Option<wc::ServingHandle>>,
 }
 
-pub async fn bind(share: &str, state: storage::StateDb, backend: Option<String>) -> Result<Node> {
+pub async fn bind(
+    share: &str,
+    state: storage::StateDb,
+    backend: Option<String>,
+) -> Result<HostNode> {
     let Some(wcs) = state.wispers_connect_state()? else {
         anyhow::bail!("Share {} has no Wispers Connect credentials", share);
     };
@@ -46,7 +130,7 @@ pub async fn bind(share: &str, state: storage::StateDb, backend: Option<String>)
     let Some(cg_id) = node.connectivity_group_id() else {
         anyhow::bail!("host node not registered");
     };
-    Ok(Node {
+    Ok(HostNode {
         connectivity_group_id: cg_id.to_string(),
         wcbe_client: wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref())),
         backend,
@@ -55,96 +139,17 @@ pub async fn bind(share: &str, state: storage::StateDb, backend: Option<String>)
     })
 }
 
-impl Server for Node {
-    /// Connects to the hub and serves until the session ends or a signal.
+impl serving::HostNode for HostNode {
     fn run(&self, serving_handle: ServingHandle) -> BoxFuture<'_, Result<ExitReason>> {
-        Box::pin(async move {
-            let (session_handle, session, mut incoming) = self
-                .node
-                .start_serving()
-                .await
-                .context("starting Wispers node serving loop")?;
-            *self.hub_session.write().await = Some(session_handle);
-            serving_handle.set_reachable().await;
-            info!("Connected to hub");
-
-            // Run the Wispers serving session.
-            let mut session_task = tokio::spawn(async move { session.run().await });
-
-            // Resolves on SIGTERM/SIGINT so we tear the hub session down
-            // cleanly instead of being killed mid-flight (e.g. by a container
-            // supervisor).
-            let shutdown = shutdown_signal();
-            tokio::pin!(shutdown);
-
-            // Main serving loop. Accept connections from the peer nodes or
-            // from IPC.
-            loop {
-                tokio::select! {
-                    // Incoming QUIC connection.
-                    Some(result) = incoming.quic.recv() => {
-                        tokio::spawn(handle_quic_conn(
-                            result,
-                            self.node.clone(),
-                            serving_handle.clone(),
-                        ));
-                    },
-                    // Session end.
-                    result = &mut session_task => {
-                        break handle_session_end(result).map(|()| ExitReason::Stopped)
-                    }
-                    // Shutdown signal: stop the session the same way
-                    // `waserver stop` does, drain it, then exit cleanly. This
-                    // stop was intended, so we report success (exit 0)
-                    // regardless of how the session terminates.
-                    _ = &mut shutdown => {
-                        info!("shutdown signal received; shutting down gracefully");
-                        if let Err(e) = serving_handle.shutdown().await {
-                            warn!(error = format!("{:#}", e), "error during graceful shutdown");
-                        }
-                        let _ = (&mut session_task).await;
-                        break Ok(ExitReason::Signal);
-                    }
-                }
-            }
-        })
+        Box::pin(self.serve(serving_handle))
     }
 
-    /// A registration token from the hub plus an activation code from the
-    /// live session.
     fn invite<'a>(
         &'a self,
         node_name: &'a str,
         user_id: &'a str,
     ) -> BoxFuture<'a, Result<wire::Invite>> {
-        Box::pin(async move {
-            let metadata = wcbe::NodeMetadata {
-                user_id: user_id.to_owned(),
-            };
-            let registration_token = self
-                .wcbe_client
-                .get_registration_token(
-                    &self.connectivity_group_id,
-                    Some(node_name),
-                    Some(&metadata),
-                )
-                .await?;
-            let Some(session) = self.hub_session.read().await.clone() else {
-                anyhow::bail!("Not connected to hub");
-            };
-            // Invites are delivered out-of-band (chat, email, QR), so use
-            // the long-lived profile; the interactive one expires in two
-            // minutes.
-            let activation_code = session
-                .generate_activation_code_with_ttl(wc::TtlProfile::Asynchronous)
-                .await?
-                .format();
-            Ok(wire::Invite::WispersConnect {
-                registration_token,
-                activation_code,
-                backend: self.backend.clone(),
-            })
-        })
+        Box::pin(self.mint_invite(node_name, user_id))
     }
 
     /// Not used on this transport: `waserver revoke` restores its own copy of
@@ -157,12 +162,99 @@ impl Server for Node {
     }
 
     fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move {
-            match self.hub_session.read().await.clone() {
-                Some(session) => session.shutdown().await.context("shutdown failed"),
-                None => Ok(()),
+        Box::pin(self.stop_hub_session())
+    }
+}
+
+impl HostNode {
+    /// Connects to the hub and serves until the session ends or a signal.
+    async fn serve(&self, serving_handle: ServingHandle) -> Result<ExitReason> {
+        let (session_handle, session, mut incoming) = self
+            .node
+            .start_serving()
+            .await
+            .context("starting Wispers node serving loop")?;
+        *self.hub_session.write().await = Some(session_handle);
+        serving_handle.set_reachable().await;
+        info!("Connected to hub");
+
+        // Run the Wispers serving session.
+        let mut session_task = tokio::spawn(async move { session.run().await });
+
+        // Resolves on SIGTERM/SIGINT so we tear the hub session down
+        // cleanly instead of being killed mid-flight (e.g. by a container
+        // supervisor).
+        let shutdown = shutdown_signal();
+        tokio::pin!(shutdown);
+
+        // Main serving loop. Accept connections from the peer nodes or
+        // from IPC.
+        loop {
+            tokio::select! {
+                // Incoming QUIC connection.
+                Some(result) = incoming.quic.recv() => {
+                    tokio::spawn(handle_quic_conn(
+                        result,
+                        self.node.clone(),
+                        serving_handle.clone(),
+                    ));
+                },
+                // Session end.
+                result = &mut session_task => {
+                    break handle_session_end(result).map(|()| ExitReason::Stopped)
+                }
+                // Shutdown signal: stop the session the same way
+                // `waserver stop` does, drain it, then exit cleanly. This
+                // stop was intended, so we report success (exit 0)
+                // regardless of how the session terminates.
+                _ = &mut shutdown => {
+                    info!("shutdown signal received; shutting down gracefully");
+                    if let Err(e) = serving_handle.shutdown().await {
+                        warn!(error = format!("{:#}", e), "error during graceful shutdown");
+                    }
+                    let _ = (&mut session_task).await;
+                    break Ok(ExitReason::Signal);
+                }
             }
+        }
+    }
+
+    /// A registration token from the hub plus an activation code from the
+    /// live session.
+    async fn mint_invite(&self, node_name: &str, user_id: &str) -> Result<wire::Invite> {
+        let metadata = wcbe::NodeMetadata {
+            user_id: user_id.to_owned(),
+        };
+        let registration_token = self
+            .wcbe_client
+            .get_registration_token(
+                &self.connectivity_group_id,
+                Some(node_name),
+                Some(&metadata),
+            )
+            .await?;
+        let Some(session) = self.hub_session.read().await.clone() else {
+            anyhow::bail!("Not connected to hub");
+        };
+        // Invites are delivered out-of-band (chat, email, QR), so use
+        // the long-lived profile; the interactive one expires in two
+        // minutes.
+        let activation_code = session
+            .generate_activation_code_with_ttl(wc::TtlProfile::Asynchronous)
+            .await?
+            .format();
+        Ok(wire::Invite::WispersConnect {
+            registration_token,
+            activation_code,
+            backend: self.backend.clone(),
         })
+    }
+
+    async fn stop_hub_session(&self) -> Result<()> {
+        match self.hub_session.read().await.clone() {
+            Some(session) => session.shutdown().await.context("shutdown failed"),
+            None => Ok(()),
+        }
     }
 }
 
@@ -259,85 +351,7 @@ fn handle_session_end(
     Ok(())
 }
 
-//-- CLI without the daemon ----------------------------------------------------
-
-/// The steps of `init`, each pushing its undo before the next runs: the
-/// backend group, the share directory with config and state, the node and
-/// its registration.
-pub async fn init(
-    rollback: &mut Rollback,
-    dir: &storage::ShareDir,
-    config_text: &str,
-    api_key: Option<&str>,
-    display_name: &str,
-    backend: Option<&str>,
-) -> Result<()> {
-    let Some(api_key) = api_key else {
-        anyhow::bail!("--api-key (or WC_API_KEY) is required for the wispers-connect transport");
-    };
-    let wcbe_client = wcbe::Client::new(api_key, &wcbe::api_base(backend));
-
-    let cg_id = wcbe_client
-        .add_connectivity_group(display_name)
-        .await
-        .map_err(explain_group_quota)?;
-    rollback.push("connectivity group", {
-        let (client, cg_id) = (wcbe_client.clone(), cg_id.clone());
-        async move { client.remove_connectivity_group(&cg_id).await }
-    });
-
-    let state = dir.create(config_text)?;
-    rollback.push("share directory", {
-        let dir = dir.clone();
-        async move { dir.delete().map_err(Into::into) }
-    });
-    state.set_wispers_connect_state(&storage::WispersConnectState {
-        api_key: api_key.to_owned(),
-        connectivity_group_id: cg_id.clone(),
-    })?;
-
-    // Create the serving Wispers node and register it with the backend. The
-    // registration goes away with the group, so it needs no undo of its own.
-    let node_storage = wc::NodeStorage::new(state);
-    if let Some(backend) = backend {
-        node_storage.override_hub_addr(backend);
-    }
-    let mut node = node_storage.restore_or_init_node().await?;
-    let token = wcbe_client
-        .get_registration_token(&cg_id, Some("Host"), None /* metadata */)
-        .await?;
-    node.register(&token).await.context("registration failed")?;
-    Ok(())
-}
-
-/// Group creation is where the plan's connectivity-group quota bites.
-/// Make the error actionable.
-fn explain_group_quota(e: anyhow::Error) -> anyhow::Error {
-    match e.downcast_ref::<wcbe::QuotaExceeded>() {
-        Some(q) if q.quota == "groups_per_domain" => anyhow::anyhow!(
-            "cannot create a new share: your plan's connectivity-group quota \
-             is used up ({} of {}). Delete an unused share with `waserver \
-             deinit <share>` or upgrade your plan.",
-            q.current,
-            q.limit
-        ),
-        _ => e,
-    }
-}
-
-/// Removes the connectivity group, which deregisters every node. A share
-/// whose `init` never got that far has nothing to remove.
-pub async fn deinit(
-    wcs: Option<storage::WispersConnectState>,
-    backend: Option<&str>,
-) -> Result<()> {
-    let Some(wcs) = wcs else {
-        return Ok(());
-    };
-    wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend))
-        .remove_connectivity_group(&wcs.connectivity_group_id)
-        .await
-}
+//-- `waserver revoke` implementation ------------------------------------------
 
 /// Revokes on the hub, then deregisters the node there.
 pub async fn revoke(
@@ -346,7 +360,7 @@ pub async fn revoke(
     backend: Option<String>,
     node_number: i32,
 ) -> Result<()> {
-    if node_number == SERVER_NODE_NUMBER {
+    if node_number == HOST_NODE_NUMBER {
         anyhow::bail!("Node {node_number} is the host and cannot be revoked");
     }
 
@@ -440,14 +454,14 @@ fn to_guests(group: &wcbe::GroupDetail) -> Vec<GuestStatus> {
     let mut guests: Vec<GuestStatus> = group
         .nodes
         .iter()
-        .filter(|n| n.node_number != SERVER_NODE_NUMBER)
+        .filter(|n| n.node_number != HOST_NODE_NUMBER)
         .map(|n| GuestStatus {
             node_number: n.node_number,
             name: n.name.clone(),
             user_id: n.metadata.as_deref().and_then(parse_user_id),
             created_at: n.created_at.clone(),
             last_seen_at: n.last_seen_at.clone(),
-            connected_to_server: None,
+            connected_to_host: None,
             connected_since: None,
             // waserver revokes *and* removes nodes, so a revoked node never
             // shows up in the roster.

@@ -1,7 +1,7 @@
 //! The per-share config file.
 //!
-//! These files are generated once, then edited by the user. After this they're
-//! only read, at start and on `reload`.
+//! These files are generated once, then edited by the user. After that, waserver
+//! only reads them, at start and on `reload`.
 
 use serde::Deserialize;
 use std::path::Path;
@@ -13,36 +13,35 @@ pub const FILENAME: &str = "share.toml";
 pub struct ShareConfig {
     /// Display name, shown to guests.
     pub name: String,
-    /// The transport for this share, with that transport's own settings.
     #[serde(default)]
     pub transport: TransportConfig,
-    /// The apps served to this share, in the order found in the config file.
+    /// The shared apps, in the order found in the config file.
     #[serde(default, rename = "app")]
     pub apps: Vec<AppConfig>,
 }
 
-/// Peer-to-peer communications transport types.
+/// Peer-to-peer transport config.
 ///
-/// Each type can have its own parameters. In the file that looks like this:
+/// Each transport type can have its own parameters. In the file, that looks
+/// like this:
 ///
 /// ```toml
 /// [transport]
 /// kind = "wispers-connect"
 /// backend = "https://hub.example"
-///     ```
-///
-/// Parameters used with the wrong type result in parse errors.
+/// ```
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum TransportConfig {
     WispersConnect {
-        /// Base URL of a self-hosted backend. `None` = the managed backend.
+        /// Optional base URL of a self-hosted backend.
         #[serde(default)]
         backend: Option<String>,
     },
     Iroh {},
 }
 
+/// If not specified the transport defaults to Wispers Connect with the managed backend.
 impl Default for TransportConfig {
     fn default() -> Self {
         TransportConfig::WispersConnect { backend: None }
@@ -74,25 +73,25 @@ impl TransportKind {
     }
 }
 
+/// Use the wire protocol's definition of AppKind.
+pub use wispers_access_wire::AppKind;
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
-    /// Stable key.
+    /// Stable identifier, used by guest nodes when accessing a shared app.
     pub id: String,
     /// Display name, defaults to the ID.
     #[serde(default)]
     pub name: String,
-    /// Which app this is. `web` (the default) is any web app browsed as is.
-    /// Other values target specific integrators, like Jellyfin clients.
+    /// Custom integrations (e.g. Jellyfin) use a specific identifiers here,
+    /// so the clients can find the shared apps they know how to work with.
+    /// `web` (the default) is any web app browsed as is.
     #[serde(default)]
     pub kind: AppKind,
     /// `host:port`, or `:port` for localhost.
     pub upstream: String,
 }
-
-/// The app kinds are the wire crate's: the config file and the messages
-/// guests receive use one vocabulary.
-pub use wispers_access_wire::AppKind;
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -117,7 +116,7 @@ impl ShareConfig {
         Self::parse(&text)
     }
 
-    /// Parses, normalises (app names, upstream form) and validates.
+    /// Parse, normalise, and validate.
     pub fn parse(text: &str) -> Result<Self, Error> {
         let mut cfg: ShareConfig = toml::from_str(text)?;
         if cfg.name.trim().is_empty() {
@@ -141,14 +140,21 @@ impl ShareConfig {
         Ok(cfg)
     }
 
+    /// Finds and returns the AppConfig for the given ID.
+    pub fn find_app(&self, app_id: &str) -> Option<&AppConfig> {
+        self.apps.iter().find(|app| app.id == app_id)
+    }
+
     /// The app used for requests that name no app.
+    ///
+    /// TODO: Clean this up once old clients are gone and everyone specifies the
+    /// app to talk to.
     pub fn default_app(&self) -> Option<&AppConfig> {
         self.apps.first()
     }
 
-    /// Hash of everything a guest can observe about the app list. Used by
-    /// guest nodes to detect whether they need to update their cached view of
-    /// the share config.
+    /// Hash of the (observable parts of the) config, used to detect config
+    /// updates without having to compare the entire data structure.
     pub fn config_hash(&self) -> u64 {
         let mut h = Fnv1a::new();
         h.write(self.name.as_bytes());
@@ -162,12 +168,11 @@ impl ShareConfig {
     }
 }
 
-/// Renders the `share.toml` that `init` writes: the share's name and
-/// transport, and a commented-out app block to copy from.
+/// Renders the `share.toml` written by `init`.
 pub fn render_template(name: &str, transport: &TransportConfig) -> String {
     let mut out = String::new();
     out.push_str("# This share's config. Edit freely and apply with `waserver reload`.\n");
-    out.push_str("# Reference: one [[app]] block per app served to the share.\n\n");
+    out.push_str("# Reference: one [[app]] block per shared app.\n\n");
     out.push_str(&format!("name = {}\n\n", quote(name)));
     out.push_str("[transport]\n");
     out.push_str(&format!("kind = {}\n", quote(transport.kind().as_str())));
@@ -181,12 +186,9 @@ pub fn render_template(name: &str, transport: &TransportConfig) -> String {
         TransportConfig::Iroh {} => {}
     }
     out.push_str(
-        "\n# One [[app]] block per app. `id` is what guests persist: keep it stable\n\
-         # and rename via `name`. `upstream` is host:port, or :port for localhost.\n\
-         # `kind` is web (default), jellyfin or immich; it tells integrating clients\n\
-         # which app this is.\n\
-         # The first app is the default for clients that predate the DATA framing.\n\
-         #\n# [[app]]\n# id = \"myapp\"\n# name = \"My App\"\n# kind = \"jellyfin\"\n# upstream = \":3000\"\n",
+        "\n# One [[app]] block per app. Keep `id` stable, guest nodes refer to it.\n\
+         # `upstream` is host:port, or :port for localhost.\n\
+         #\n# [[app]]\n# id = \"myapp\"\n# name = \"My App\"\n# upstream = \":3000\"\n",
     );
     out
 }
@@ -195,7 +197,7 @@ fn quote(s: &str) -> String {
     toml::Value::String(s.to_owned()).to_string()
 }
 
-/// Share and app IDs, file-system and DNS-label safe.
+/// Validate share or app ID. They need to be file-system and DNS-label safe.
 pub fn is_valid_id(s: &str) -> bool {
     !s.is_empty()
         && s.len() <= 64
@@ -206,12 +208,10 @@ pub fn is_valid_id(s: &str) -> bool {
 }
 
 /// Parse an upstream dial target in `host:port` form into a normalized
-/// `host:port` string. An empty host (`:3000`) means `localhost`, as in
-/// other tools' bind/dial syntax. `localhost` rather than `127.0.0.1` so the
-/// dial tries both address families — modern Node dev servers (e.g. Vite)
-/// often listen on `::1` only. A non-numeric or out-of-range port is
-/// rejected. IPv6 literals would need bracket form (`[::1]:3000`) and aren't
-/// handled here.
+/// `host:port` string. An empty host (`:3000`) means `localhost`. It's
+/// `localhost` rather than `127.0.0.1` so the dial tries both IPv4 and IPv6
+/// addresses families if available. IPv6 literals would need bracket form
+/// (`[::1]:3000`) and aren't handled.
 pub fn parse_upstream(s: &str) -> Result<String, String> {
     let s = s.trim();
     if s.is_empty() {
@@ -232,7 +232,7 @@ pub fn parse_upstream(s: &str) -> Result<String, String> {
     Ok(format!("{}:{}", host, port))
 }
 
-/// 64-bit FNV-1a hash. Deterministic across processes and Rust versions, unlike
+/// 64-bit FNV-1a hash, deterministic across processes and Rust versions, unlike
 /// `DefaultHasher`. Fields are separated so shifting bytes between them changes
 /// the hash.
 struct Fnv1a(u64);

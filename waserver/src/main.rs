@@ -25,88 +25,67 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Initialise a new share: a group of guests and the apps they see.
-    /// Writes its `share.toml`, creates its identity and registers it with
-    /// the backend.
+    /// Initialise a new share.
     Init {
         /// Wispers Connect API key (can also be set via WC_API_KEY env var).
-        /// Required for the wispers-connect transport; unused on iroh.
+        /// Required when using Wispers Connect, unused otherwise.
         #[arg(long, env = "WC_API_KEY", hide_env_values = true)]
         api_key: Option<String>,
-        /// Base URL of a custom Wispers Connect backend (e.g.
-        /// `https://myhub.example.com`). Omit to use the managed backend. Must
-        /// be https. Pinned into the share and carried in its invite codes.
-        /// Wispers Connect only.
+        /// Optional override for the Wispers Connect backend (e.g.
+        /// `https://myhub.example.com`. Allows using a self-hosted backend
         #[arg(long, env = "WC_BACKEND")]
         backend: Option<String>,
-        /// Transport every guest node of this share uses.
+        /// Which peer-to-peer transport library to use for this share.
         #[arg(long, default_value = "wispers-connect")]
         transport: config::TransportKind,
-        /// Name of the share (letters, digits, '-' or '_').
+        /// Share identifier (use letters, digits, '-' or '_').
         share: String,
-        /// Display name of the share, shown to guests.
+        /// Human readable name of the share, shown to users.
         display_name: String,
     },
-    /// Destroy a share: removes its backend group (and with it every
-    /// guest's access) and its local state. Irreversible.
+    /// De-initialise a share. Irreversible.
     Deinit {
         /// Name of the share.
         share: String,
     },
-    /// Runs the server for a share in the foreground. What it serves comes
-    /// from the share's `share.toml`.
-    Serve {
-        /// Name of the share.
-        share: String,
-    },
-    /// Runs the server for a share in the background.
-    Start {
-        /// Name of the share.
-        share: String,
-    },
-    /// Stops a server that is running in the background.
-    Stop {
-        /// Name of the share.
-        share: String,
-    },
-    /// Re-reads a running server's `share.toml`. A broken file leaves the
-    /// running config in place.
-    Reload {
-        /// Name of the share.
-        share: String,
-    },
+    /// Run the server for the given share in the foreground.
+    Serve { share: String },
+    /// Runs the server for the given share in the background.
+    Start { share: String },
+    /// Stop the server for the given share.
+    Stop { share: String },
+    /// Reload a share's configuration (`share.toml`). A broken configuration
+    /// leaves the running config in place.
+    Reload { share: String },
     /// Shows the status of all shares, or a detailed view of one share.
     Status {
-        /// Name of a share to show in detail. Omit for a one-line-per-share
-        /// fleet overview.
+        /// ID of a share to show in detail.
         share: Option<String>,
-        /// Output a JSON document instead of the human-readable rendering.
-        /// The JSON shape is the stable interface.
+        /// Write stable, machine-readable JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Prints the logs of the given server to stdout.
+    /// Print the logs of the given server to stdout.
     Logs {
-        /// Don't stop at EOF. Instead, wait for more logs to be written.
+        /// Don't stop at EOF, follow log entries as they're written.
         #[arg(short = 'f', long)]
         follow: bool,
         share: String,
     },
-    /// Generates a guest device invite code.
+    /// Generate a guest node invite code.
     Invite {
-        /// Name of the share.
+        /// Share ID.
         share: String,
-        /// Name of the new node.
+        /// Name of the new node (e.g. "Alice's phone").
         node_name: String,
-        /// User identification (e.g. email address) of the user.
+        /// User ID (e.g. email address) tied to the invite.
         user_id: String,
-        /// Also write the invite QR code as a PNG (for emailing) to this path.
+        /// Also write the invite QR code as a PNG to this path, for emailing.
         #[arg(long, value_name = "PATH")]
         png: Option<std::path::PathBuf>,
     },
     /// Revoke access.
     Revoke {
-        /// Name of the share.
         share: String,
         /// The node's number in `waserver status`.
         number: i64,
@@ -122,6 +101,7 @@ fn main() -> Result<()> {
     unsafe {
         libc::umask(0o077);
     }
+
     // De-conflict rustls. reqwest pulls it in via the aws-lc-rs provider
     // feature, and wispers-connect via the ring feature. We have to choose one.
     rustls::crypto::aws_lc_rs::default_provider()
@@ -145,6 +125,8 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(command: Command) -> Result<()> {
+    use crate::config::{TransportConfig, TransportKind};
+
     match command {
         Command::Init {
             api_key,
@@ -154,14 +136,14 @@ async fn async_main(command: Command) -> Result<()> {
             display_name,
         } => {
             let transport = match transport {
-                config::TransportKind::WispersConnect => config::TransportConfig::WispersConnect {
+                TransportKind::WispersConnect => TransportConfig::WispersConnect {
                     backend: normalize_backend(backend.as_deref())?,
                 },
-                config::TransportKind::Iroh => {
+                TransportKind::Iroh => {
                     if normalize_backend(backend.as_deref())?.is_some() {
-                        anyhow::bail!("--backend applies to the wispers-connect transport only");
+                        anyhow::bail!("--transport iroh doesn't take --backend");
                     }
-                    config::TransportConfig::Iroh {}
+                    TransportConfig::Iroh {}
                 }
             };
             initialization::up(api_key.as_deref(), &share, &display_name, &transport).await
@@ -180,7 +162,10 @@ async fn async_main(command: Command) -> Result<()> {
         }
         Command::Stop { share } => stop(&share).await,
         Command::Reload { share } => reload(&share).await,
-        Command::Status { share, json } => status::run(share.as_deref(), json).await,
+        Command::Status { share, json } => match share {
+            Some(share) => status::report_on_share(&share, json).await,
+            None => status::report_on_fleet(json).await,
+        },
         Command::Logs { follow, share } => logs(follow, &share),
         Command::Invite {
             share,
@@ -195,8 +180,7 @@ async fn async_main(command: Command) -> Result<()> {
 #[cfg(unix)]
 fn start_daemon() -> Result<()> {
     let daemonizer = daemonize::Daemonize::new()
-        // The daemonize crate defaults to 0o027 post-fork, which would loosen
-        // the 0o077 we set in main().
+        // daemonize defaults to 0o027 post-fork. Set the same mask as in main().
         .umask(0o077);
     daemonizer.start().context("failed to daemonize")?;
     Ok(())
@@ -345,8 +329,6 @@ async fn invite(
     user_id: &str,
     png: Option<&std::path::Path>,
 ) -> Result<()> {
-    // The daemon mints invites on every transport: an invite is only good
-    // once it can be redeemed there.
     let Ok(mut client) = ipc::Client::connect(share).await else {
         anyhow::bail!("cannot connect to server for share {}", share);
     };
@@ -446,8 +428,7 @@ fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
     Ok(Some(trimmed.to_owned()))
 }
 
-/// Revokes a guest's access. Where the roster lives, and whether a daemon
-/// is needed, is the transport's business.
+/// Revokes a guest node's access.
 async fn revoke(share: &str, number: i64) -> Result<()> {
     let dir = storage::ShareDir::new(share)?;
     match dir.load_config()?.transport {

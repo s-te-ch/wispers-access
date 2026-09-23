@@ -20,10 +20,30 @@ pub async fn up(
         anyhow::bail!("Share {} already exists", share);
     }
 
-    // Nothing may be left behind on failure: `init` refuses to run on an
-    // existing directory, and an orphaned group would consume quota.
+    // Make sure we roll back failed init runs, so retries don't get stuck.
     let mut rollback = Rollback::new();
-    match create_share(&mut rollback, &dir, api_key, display_name, transport).await {
+
+    // Generate the `share.toml` contents.
+    let config_text = config::render_template(display_name, transport);
+
+    // Run the transport-specific parts.
+    let result = match transport {
+        TransportConfig::WispersConnect { backend } => {
+            wispers_connect_transport::init(
+                &mut rollback,
+                &dir,
+                &config_text,
+                api_key,
+                display_name,
+                backend.as_deref(),
+            )
+            .await
+        }
+        TransportConfig::Iroh {} => iroh_transport::init(&mut rollback, &dir, &config_text),
+    };
+
+    // Handle success/error.
+    match result {
         Ok(()) => {
             println!(
                 "Share {} initialised. Add its apps to {} and run `waserver serve {}`.",
@@ -40,35 +60,60 @@ pub async fn up(
     }
 }
 
-/// Creates the share the way its transport needs: the directory with
-/// config and state, plus whatever the transport keeps beyond this machine.
-async fn create_share(
-    rollback: &mut Rollback,
-    dir: &storage::ShareDir,
-    api_key: Option<&str>,
-    display_name: &str,
-    transport: &TransportConfig,
-) -> Result<()> {
-    let config_text = config::render_template(display_name, transport);
-    match transport {
-        TransportConfig::WispersConnect { backend } => {
-            wispers_connect_transport::init(
-                rollback,
-                dir,
-                &config_text,
-                api_key,
-                display_name,
-                backend.as_deref(),
-            )
-            .await
-        }
-        TransportConfig::Iroh {} => iroh_transport::init(dir, &config_text),
+pub async fn down(share: &str) -> Result<()> {
+    let dir = storage::ShareDir::new(share)?;
+    let cfg = dir.load_config()?;
+    let wcs = dir.open_state()?.wispers_connect_state()?;
+
+    // Refuse to tear down a share while its server is still running.
+    if let Ok(mut client) = ipc::Client::connect(share).await {
+        // A reachable socket means a daemon is serving this share. Name its
+        // apps in the message if it answers promptly, but don't hang on a
+        // wedged daemon.
+        let status = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client.request(&ipc::Request::Status),
+        )
+        .await;
+
+        let apps_hint = match status {
+            Ok(Ok(ipc::Response::Success {
+                data: ipc::ResponseData::Status(status),
+                ..
+            })) => format!(
+                " serving {}",
+                status
+                    .apps
+                    .iter()
+                    .map(|s| s.id.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            _ => String::new(),
+        };
+        anyhow::bail!(
+            "share '{}' has a running server{}; stop it first with `waserver stop {}`",
+            share,
+            apps_hint,
+            share
+        );
     }
+
+    // Run transport-specific deinit.
+    match &cfg.transport {
+        TransportConfig::WispersConnect { backend } => {
+            wispers_connect_transport::deinit(wcs, backend.as_deref()).await?
+        }
+        TransportConfig::Iroh {} => {
+            // iroh has nothing beyond what dir.delete() below removes.
+        }
+    }
+    // Remove the directory incl. config file and state database.
+    dir.delete()?;
+    Ok(())
 }
 
-/// Undo actions for the steps of `init` that have succeeded so far, run in
-/// reverse when a later step fails. Each failure to undo is reported and the
-/// rest still run.
+/// Undo stack that allows rolling back `init` steps if a later one failed.
 pub(crate) struct Rollback {
     steps: Vec<(&'static str, Undo)>,
 }
@@ -95,57 +140,4 @@ impl Rollback {
             }
         }
     }
-}
-
-pub async fn down(share: &str) -> Result<()> {
-    let dir = storage::ShareDir::new(share)?;
-    let cfg = dir.load_config()?;
-    let wcs = dir.open_state()?.wispers_connect_state()?;
-
-    // Refuse to tear down a share while its server is still running.
-    if let Ok(mut client) = ipc::Client::connect(share).await {
-        // A reachable socket means a daemon is serving this share. Name its
-        // apps in the message if it answers promptly, but don't hang on a
-        // wedged daemon.
-        let apps_hint = match tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            client.request(&ipc::Request::Status),
-        )
-        .await
-        {
-            Ok(Ok(ipc::Response::Success {
-                data: ipc::ResponseData::Status(status),
-                ..
-            })) => format!(
-                " serving {}",
-                status
-                    .apps
-                    .iter()
-                    .map(|s| s.id.as_str())
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ),
-            _ => String::new(),
-        };
-        anyhow::bail!(
-            "share '{}' has a running server{}; stop it first with `waserver stop {}`",
-            share,
-            apps_hint,
-            share
-        );
-    }
-
-    // Whatever the transport keeps beyond this machine goes first, so a
-    // failure there leaves the share intact to try again.
-    match &cfg.transport {
-        TransportConfig::WispersConnect { backend } => {
-            wispers_connect_transport::deinit(wcs, backend.as_deref()).await?
-        }
-        // Nothing beyond this machine: guests that are offline now will
-        // find the endpoint gone, which is all they can know.
-        TransportConfig::Iroh {} => {}
-    }
-    // Remove the directory: config file and state database.
-    dir.delete()?;
-    Ok(())
 }

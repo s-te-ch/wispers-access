@@ -19,24 +19,24 @@ use tabwriter::TabWriter;
 
 const UPSTREAM_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
-pub async fn run(share: Option<&str>, json: bool) -> Result<()> {
-    let report = match share {
-        Some(share) => {
-            if !storage::ShareDir::new(share)?.exists() {
-                anyhow::bail!("Share {} is not initialised", share);
-            }
-            let loaded = load_share(share).map_err(|e| format!("{:#}", e));
-            StatusReport {
-                shares: vec![gather_share(share, loaded).await],
-                groups_quota: None,
-            }
-        }
-        None => gather_fleet().await?,
-    };
+pub async fn report_on_share(share: &str, json: bool) -> Result<()> {
+    if !storage::ShareDir::new(share)?.exists() {
+        anyhow::bail!("Share {} is not initialised", share);
+    }
+    let loaded = load_share(share).map_err(|e| format!("{:#}", e));
+    let share_status = gather_share(share, loaded).await;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&share_status)?);
+    } else {
+        print_share_details(&share_status);
+    }
+    Ok(())
+}
+
+pub async fn report_on_fleet(json: bool) -> Result<()> {
+    let report = gather_fleet().await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&report)?);
-    } else if share.is_some() {
-        print_share_details(&report.shares[0]);
     } else {
         print_fleet(&report);
     }
@@ -179,7 +179,7 @@ pub(crate) struct GuestStatus {
     pub(crate) created_at: String,           // RFC 3339
     pub(crate) last_seen_at: Option<String>, // RFC 3339
     /// Does the guest have a live P2P connection to this host node right now?
-    pub(crate) connected_to_server: Option<bool>,
+    pub(crate) connected_to_host: Option<bool>,
     pub(crate) connected_since: Option<String>, // RFC 3339
     /// The host node revoked the guest; its key is never served again. A guest
     /// that left is simply gone. iroh only: the hub's integrator API does not
@@ -309,7 +309,7 @@ async fn gather_share(name: &str, loaded: Result<Loaded, String>) -> ShareStatus
         // A stopped server has no connections.
         (Some(guests), None) if server.state == "offline" => {
             for g in guests.iter_mut() {
-                g.connected_to_server = Some(false);
+                g.connected_to_host = Some(false);
             }
         }
         _ => {}
@@ -402,10 +402,10 @@ fn apply_live_connections(guests: &mut [GuestStatus], connected: &[ipc::GuestDat
     for g in guests.iter_mut().filter(|g| !g.revoked) {
         match connected.iter().find(|c| c.node_number == g.node_number) {
             Some(c) => {
-                g.connected_to_server = Some(true);
+                g.connected_to_host = Some(true);
                 g.connected_since = c.connected_since.clone();
             }
-            None => g.connected_to_server = Some(false),
+            None => g.connected_to_host = Some(false),
         }
     }
 }
@@ -432,8 +432,8 @@ async fn query_server(
                 state: if s.reachable { "serving" } else { "connecting" },
                 error: None,
                 reachable: Some(s.reachable),
-                pid: s.pid,
-                started_at: s.started_at,
+                pid: Some(s.pid),
+                started_at: Some(s.started_at),
                 connected_since: s.connected_since,
                 reload_pending: config.map(|c| c.config_hash() != s.config_hash),
             };
@@ -546,12 +546,12 @@ fn print_fleet(report: &StatusReport) {
         };
         let nodes = match &c.guests {
             // Live server view: connected guests / total guests.
-            Some(m) if m.iter().any(|m| m.connected_to_server.is_some()) => {
+            Some(m) if m.iter().any(|m| m.connected_to_host.is_some()) => {
                 let connected = m
                     .iter()
-                    .filter(|m| m.connected_to_server == Some(true))
+                    .filter(|m| m.connected_to_host == Some(true))
                     .count();
-                let guests = m.iter().filter(|m| m.connected_to_server.is_some()).count();
+                let guests = m.iter().filter(|m| m.connected_to_host.is_some()).count();
                 format!("{}/{} connected", connected, guests)
             }
             Some(g) => format!("{} guests", g.len()),
@@ -695,7 +695,7 @@ fn print_share_details(c: &ShareStatus) {
         (Some(guests), _) => {
             writeln!(&mut tw, "  #\tNAME\tUSER\tLAST SEEN\tSTATUS").unwrap();
             for g in guests {
-                let last_seen = if g.connected_to_server == Some(true) {
+                let last_seen = if g.connected_to_host == Some(true) {
                     "now".to_owned()
                 } else {
                     match g.last_seen_at.as_deref() {
@@ -703,7 +703,7 @@ fn print_share_details(c: &ShareStatus) {
                         None => "-".to_owned(),
                     }
                 };
-                let status = match (g.revoked, &g.revoked_at, g.connected_to_server) {
+                let status = match (g.revoked, &g.revoked_at, g.connected_to_host) {
                     (true, Some(at), _) => format!("revoked ({})", fmt_ago(at)),
                     (true, None, _) => "revoked".to_owned(),
                     (false, _, Some(true)) => match &g.connected_since {
@@ -728,7 +728,7 @@ fn print_share_details(c: &ShareStatus) {
                 writeln!(
                     &mut tw,
                     "  (node {} is the host)",
-                    wispers_connect_transport::SERVER_NODE_NUMBER
+                    wispers_connect_transport::HOST_NODE_NUMBER
                 )
                 .unwrap();
             }
@@ -996,7 +996,7 @@ mod tests {
             user_id: None,
             created_at: "2026-07-01T00:00:00Z".to_owned(),
             last_seen_at: None,
-            connected_to_server: None,
+            connected_to_host: None,
             connected_since: None,
             revoked: false,
             revoked_at: None,
@@ -1010,13 +1010,13 @@ mod tests {
         apply_live_connections(&mut guests, &connected);
 
         // A live guest gets the connection and its start time.
-        assert_eq!(guests[0].connected_to_server, Some(true));
+        assert_eq!(guests[0].connected_to_host, Some(true));
         assert_eq!(
             guests[0].connected_since.as_deref(),
             Some("2026-07-20T10:00:00Z")
         );
         // A guest without a connection is authoritatively not connected.
-        assert_eq!(guests[1].connected_to_server, Some(false));
+        assert_eq!(guests[1].connected_to_host, Some(false));
     }
 
     #[test]

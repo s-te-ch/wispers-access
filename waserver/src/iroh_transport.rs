@@ -1,8 +1,9 @@
 //! The iroh transport implementation.
 
+use crate::initialization::Rollback;
 use crate::ipc;
 use crate::protocol::{self, Peer, StreamOutcome};
-use crate::serving::{BoxFuture, Closer, ExitReason, Server, ServingHandle, shutdown_signal};
+use crate::serving::{self, BoxFuture, Closer, ExitReason, ServingHandle, shutdown_signal};
 use crate::status::{GuestStatus, InviteStatus, TransportReport, TransportStatus, invite_status};
 use crate::storage::{self, GuestNode};
 use anyhow::{Context, Result};
@@ -13,13 +14,30 @@ use tracing::{error, info, warn};
 use wire::CloseCode;
 use wispers_access_wire as wire;
 
-/// The endpoint, bound and keyed by the share's secret.
-pub struct Endpoint {
+//-- Share initialisation ------------------------------------------------------
+
+/// `init` sets up a new share with iroh as the transport.
+pub fn init(rollback: &mut Rollback, dir: &storage::ShareDir, config_text: &str) -> Result<()> {
+    let state = dir.create(config_text)?;
+    rollback.push("share directory", {
+        let dir = dir.clone();
+        async move { dir.delete().map_err(Into::into) }
+    });
+    let secret = iroh::SecretKey::generate();
+    state.set_iroh_secret(&secret.to_bytes())?;
+    println!("Endpoint ID: {}", secret.public());
+    Ok(())
+}
+
+//-- HostNode implementation ---------------------------------------------------
+
+/// Host node implementation for iroh.
+pub struct HostNode {
     endpoint: iroh::Endpoint,
     db: storage::StateDb,
 }
 
-pub async fn bind(share: &str, state: storage::StateDb) -> Result<Endpoint> {
+pub async fn bind(share: &str, state: storage::StateDb) -> Result<HostNode> {
     let Some(secret) = state.iroh_secret()? else {
         anyhow::bail!("Share {} has no iroh key", share);
     };
@@ -30,53 +48,15 @@ pub async fn bind(share: &str, state: storage::StateDb) -> Result<Endpoint> {
         .await
         .context("binding the iroh endpoint")?;
     info!(endpoint_id = %endpoint.id(), "iroh endpoint bound");
-    Ok(Endpoint {
+    Ok(HostNode {
         endpoint,
         db: state,
     })
 }
 
-impl Server for Endpoint {
-    /// Accepts connections until the endpoint is closed or a signal.
+impl serving::HostNode for HostNode {
     fn run(&self, serving_handle: ServingHandle) -> BoxFuture<'_, Result<ExitReason>> {
-        Box::pin(async move {
-            // Reachable once a home relay is up and the address record is out.
-            tokio::spawn({
-                let (endpoint, handle) = (self.endpoint.clone(), serving_handle.clone());
-                async move {
-                    endpoint.online().await;
-                    info!("iroh endpoint online");
-                    handle.set_reachable().await;
-                }
-            });
-
-            let shutdown = shutdown_signal();
-            tokio::pin!(shutdown);
-            loop {
-                tokio::select! {
-                    incoming = self.endpoint.accept() => {
-                        let Some(incoming) = incoming else {
-                            // `None`: the endpoint was closed, by `waserver stop`.
-                            break Ok(ExitReason::Stopped);
-                        };
-                        tokio::spawn(
-                            handle_incoming(
-                                incoming,
-                                serving_handle.clone(),
-                                self.db.clone(),
-                            ),
-                        );
-                    }
-                    _ = &mut shutdown => {
-                        info!("shutdown signal received; shutting down gracefully");
-                        if let Err(e) = serving_handle.shutdown().await {
-                            warn!(error = format!("{:#}", e), "error during graceful shutdown");
-                        }
-                        break Ok(ExitReason::Signal);
-                    }
-                }
-            }
-        })
+        Box::pin(self.serve(serving_handle))
     }
 
     fn invite<'a>(
@@ -84,50 +64,88 @@ impl Server for Endpoint {
         node_name: &'a str,
         user_id: &'a str,
     ) -> BoxFuture<'a, Result<wire::Invite>> {
-        Box::pin(async move { mint_invite(&self.db, self.endpoint.id(), node_name, user_id) })
+        Box::pin(async move { self.mint_invite(node_name, user_id) })
     }
 
     fn revoke_guest(&self, number: i64) -> Result<GuestNode> {
-        Ok(self
-            .db
-            .revoke_guest(number, chrono::Utc::now().timestamp())?)
+        Ok(self.db.revoke_guest(number, Utc::now())?)
+    }
+
+    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
+        Box::pin(self.close_endpoint())
+    }
+}
+
+impl HostNode {
+    /// Accepts connections until the endpoint is closed or a signal.
+    async fn serve(&self, serving_handle: ServingHandle) -> Result<ExitReason> {
+        // Reachable once a home relay is up and the address record is out.
+        tokio::spawn({
+            let (endpoint, handle) = (self.endpoint.clone(), serving_handle.clone());
+            async move {
+                endpoint.online().await;
+                info!("iroh endpoint online");
+                handle.set_reachable().await;
+            }
+        });
+
+        let shutdown = shutdown_signal();
+        tokio::pin!(shutdown);
+        loop {
+            tokio::select! {
+                incoming = self.endpoint.accept() => {
+                    let Some(incoming) = incoming else {
+                        // `None`: the endpoint was closed, by `waserver stop`.
+                        break Ok(ExitReason::Stopped);
+                    };
+                    tokio::spawn(
+                        handle_incoming(
+                            incoming,
+                            serving_handle.clone(),
+                            self.db.clone(),
+                        ),
+                    );
+                }
+                _ = &mut shutdown => {
+                    info!("shutdown signal received; shutting down gracefully");
+                    if let Err(e) = serving_handle.shutdown().await {
+                        warn!(error = format!("{:#}", e), "error during graceful shutdown");
+                    }
+                    break Ok(ExitReason::Signal);
+                }
+            }
+        }
+    }
+
+    /// Records a one-time invite and composes its code.
+    fn mint_invite(&self, node_name: &str, user_id: &str) -> Result<wire::Invite> {
+        let secret = wire::InviteSecret(rand::random());
+        let now = chrono::Utc::now();
+        self.db.create_invite(
+            storage::NewInvite {
+                secret,
+                user_id: user_id.to_owned(),
+                node_name: node_name.to_owned(),
+                expires_at: now + INVITE_VALIDITY,
+            },
+            now,
+        )?;
+        Ok(wire::Invite::Iroh {
+            endpoint_id: wire::EndpointId(*self.endpoint.id().as_bytes()),
+            secret,
+        })
     }
 
     /// Shutdown, but wait for guests to acknowledge the close, so they see an
     /// orderly close.
-    fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
-        Box::pin(async move {
-            let _ = tokio::time::timeout(CLOSE_TIMEOUT, self.endpoint.close()).await;
-            Ok(())
-        })
+    async fn close_endpoint(&self) -> Result<()> {
+        let _ = tokio::time::timeout(CLOSE_TIMEOUT, self.endpoint.close()).await;
+        Ok(())
     }
 }
 
 /// How long an iroh invite can be redeemed.
 const INVITE_VALIDITY: chrono::Duration = chrono::Duration::hours(24);
-
-pub fn mint_invite(
-    db: &storage::StateDb,
-    endpoint_id: iroh::EndpointId,
-    node_name: &str,
-    user_id: &str,
-) -> Result<wire::Invite> {
-    let secret = wire::InviteSecret(rand::random());
-    let now = chrono::Utc::now();
-    db.create_invite(
-        storage::NewInvite {
-            secret: &secret,
-            user_id,
-            node_name,
-            expires_at: (now + INVITE_VALIDITY).timestamp(),
-        },
-        now.timestamp(),
-    )?;
-    Ok(wire::Invite::Iroh {
-        endpoint_id: wire::EndpointId(*endpoint_id.as_bytes()),
-        secret,
-    })
-}
 
 /// How long shutdown waits for guests to acknowledge the close.
 const CLOSE_TIMEOUT: Duration = Duration::from_secs(3);
@@ -248,7 +266,7 @@ async fn serve_guest(
 ) {
     let peer_id = guest.peer_id.clone();
     info!(peer_id, guest = guest.number, user_id = %guest.user_id, "serving guest");
-    if let Err(e) = state.touch_guest(&peer_id, chrono::Utc::now().timestamp()) {
+    if let Err(e) = state.touch_guest(&peer_id, Utc::now()) {
         warn!(peer_id, error = %e, "could not record last seen");
     }
     let closer: Closer = {
@@ -294,21 +312,11 @@ fn join(send: SendStream, recv: RecvStream) -> tokio::io::Join<RecvStream, SendS
     tokio::io::join(recv, send)
 }
 
-//-- CLI without the daemon ----------------------------------------------------
+//-- `waserver revoke` implementation ------------------------------------------
 
-/// `init`: the directory with config and state, and a freshly generated
-/// endpoint key. Nothing beyond this machine, so nothing to undo.
-pub fn init(dir: &storage::ShareDir, config_text: &str) -> Result<()> {
-    let state = dir.create(config_text)?;
-    let secret = iroh::SecretKey::generate();
-    state.set_iroh_secret(&secret.to_bytes())?;
-    println!("Endpoint ID: {}", secret.public());
-    Ok(())
-}
-
-/// Through the daemon when it runs, so the guest's live connections get the
-/// `revoked` close; straight into the state database otherwise, and the
-/// guest learns on its next dial.
+/// Revoke the given guest node from the share. Use the daemon if it runs, so
+/// the guest's live connections get the `revoked` close. Otherwise, go straight
+/// to the state database, and the guest node learns about it on its next dial.
 pub async fn revoke(share: &str, dir: storage::ShareDir, number: i64) -> Result<()> {
     match ipc::Client::connect(share).await {
         Ok(mut client) => match client.request(&ipc::Request::RevokeGuest { number }).await {
@@ -317,8 +325,7 @@ pub async fn revoke(share: &str, dir: storage::ShareDir, number: i64) -> Result<
             Err(e) => anyhow::bail!("error sending command to server: {e}"),
         },
         Err(_) => {
-            dir.open_state()?
-                .revoke_guest(number, chrono::Utc::now().timestamp())?;
+            dir.open_state()?.revoke_guest(number, Utc::now())?;
         }
     }
     println!("Guest {number} is now revoked");
@@ -344,7 +351,7 @@ pub fn report(state: Option<&storage::StateDb>) -> TransportReport {
             .map(|guests| guests.iter().map(guest_status).collect())
             .map_err(|e| format!("{:#}", e)),
         invites: state
-            .invites()
+            .recent_invites(now)
             .map(|invites| invites.iter().map(|i| invite_row_status(i, now)).collect())
             .map_err(|e| format!("{:#}", e)),
         transport: Some(TransportStatus::Iroh {
@@ -362,30 +369,28 @@ fn guest_status(g: &storage::GuestNode) -> GuestStatus {
         node_number: g.number as i32,
         name: Some(g.display_name.clone()),
         user_id: Some(g.user_id.clone()),
-        created_at: fmt_unix(g.activated_at),
-        last_seen_at: g.last_seen_at.map(fmt_unix),
-        connected_to_server: None,
+        created_at: fmt_rfc3339(g.activated_at),
+        last_seen_at: g.last_seen_at.map(fmt_rfc3339),
+        connected_to_host: None,
         connected_since: None,
         revoked: g.revoked_at.is_some(),
-        revoked_at: g.revoked_at.map(fmt_unix),
+        revoked_at: g.revoked_at.map(fmt_rfc3339),
     }
 }
 
 fn invite_row_status(i: &storage::InviteRow, now: DateTime<Utc>) -> InviteStatus {
-    let expires_at = fmt_unix(i.expires_at);
-    let used_at = i.consumed_at.map(fmt_unix);
+    let expires_at = fmt_rfc3339(i.expires_at);
+    let used_at = i.consumed_at.map(fmt_rfc3339);
     InviteStatus {
         status: invite_status(used_at.as_deref(), &expires_at, now),
         node_name: Some(i.node_name.clone()),
         user_id: Some(i.user_id.clone()),
-        created_at: fmt_unix(i.created_at),
+        created_at: fmt_rfc3339(i.created_at),
         expires_at,
         used_at,
     }
 }
 
-fn fmt_unix(secs: i64) -> String {
-    DateTime::<Utc>::from_timestamp(secs, 0)
-        .unwrap_or_default()
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+fn fmt_rfc3339(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
