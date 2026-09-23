@@ -14,6 +14,86 @@ use tracing::{error, info, warn};
 use wispers_access_wire as wire;
 use wispers_connect as wc;
 
+//-- Share initialisation ------------------------------------------------------
+
+/// `init` sets up a new share with Wispers Connect as the transport.
+pub async fn init(
+    rollback: &mut Rollback,
+    dir: &storage::ShareDir,
+    config_text: &str,
+    api_key: Option<&str>,
+    display_name: &str,
+    backend: Option<&str>,
+) -> Result<()> {
+    let Some(api_key) = api_key else {
+        anyhow::bail!("--api-key (or WC_API_KEY) is required for wispers-connect");
+    };
+    let wcbe_client = wcbe::Client::new(api_key, &wcbe::api_base(backend));
+
+    let cg_id = wcbe_client
+        .add_connectivity_group(display_name)
+        .await
+        .map_err(explain_group_quota)?;
+    rollback.push("connectivity group", {
+        let (client, cg_id) = (wcbe_client.clone(), cg_id.clone());
+        async move { client.remove_connectivity_group(&cg_id).await }
+    });
+
+    let state = dir.create(config_text)?;
+    rollback.push("share directory", {
+        let dir = dir.clone();
+        async move { dir.delete().map_err(Into::into) }
+    });
+    state.set_wispers_connect_state(&storage::WispersConnectState {
+        api_key: api_key.to_owned(),
+        connectivity_group_id: cg_id.clone(),
+    })?;
+
+    // Create the serving Wispers node and register it with the backend. The
+    // registration goes away with the group, so it needs no undo of its own.
+    let node_storage = wc::NodeStorage::new(state);
+    if let Some(backend) = backend {
+        node_storage.override_hub_addr(backend);
+    }
+    let mut node = node_storage.restore_or_init_node().await?;
+    let token = wcbe_client
+        .get_registration_token(&cg_id, Some("Host"), None /* metadata */)
+        .await?;
+    node.register(&token).await.context("registration failed")?;
+    Ok(())
+}
+
+/// Group creation is where the plan's connectivity-group quota bites.
+/// Make the error actionable.
+fn explain_group_quota(e: anyhow::Error) -> anyhow::Error {
+    match e.downcast_ref::<wcbe::QuotaExceeded>() {
+        Some(q) if q.quota == "groups_per_domain" => anyhow::anyhow!(
+            "cannot create a new share: your plan's connectivity-group quota \
+             is used up ({} of {}). Delete an unused share with `waserver \
+             deinit <share>` or upgrade your plan.",
+            q.current,
+            q.limit
+        ),
+        _ => e,
+    }
+}
+
+/// Removes the connectivity group, which deregisters every node. A share
+/// whose `init` never got that far has nothing to remove.
+pub async fn deinit(
+    wcs: Option<storage::WispersConnectState>,
+    backend: Option<&str>,
+) -> Result<()> {
+    let Some(wcs) = wcs else {
+        return Ok(());
+    };
+    wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend))
+        .remove_connectivity_group(&wcs.connectivity_group_id)
+        .await
+}
+
+//-- HostNode implementation ---------------------------------------------------
+
 /// The host node is always the first node of its connectivity group: `init`
 /// registers it before any invite exists. Guests dial it by this number.
 pub const HOST_NODE_NUMBER: i32 = 1;
@@ -271,85 +351,7 @@ fn handle_session_end(
     Ok(())
 }
 
-//-- CLI without the daemon ----------------------------------------------------
-
-/// The steps of `init`, each pushing its undo before the next runs: the
-/// backend group, the share directory with config and state, the node and
-/// its registration.
-pub async fn init(
-    rollback: &mut Rollback,
-    dir: &storage::ShareDir,
-    config_text: &str,
-    api_key: Option<&str>,
-    display_name: &str,
-    backend: Option<&str>,
-) -> Result<()> {
-    let Some(api_key) = api_key else {
-        anyhow::bail!("--api-key (or WC_API_KEY) is required for the wispers-connect transport");
-    };
-    let wcbe_client = wcbe::Client::new(api_key, &wcbe::api_base(backend));
-
-    let cg_id = wcbe_client
-        .add_connectivity_group(display_name)
-        .await
-        .map_err(explain_group_quota)?;
-    rollback.push("connectivity group", {
-        let (client, cg_id) = (wcbe_client.clone(), cg_id.clone());
-        async move { client.remove_connectivity_group(&cg_id).await }
-    });
-
-    let state = dir.create(config_text)?;
-    rollback.push("share directory", {
-        let dir = dir.clone();
-        async move { dir.delete().map_err(Into::into) }
-    });
-    state.set_wispers_connect_state(&storage::WispersConnectState {
-        api_key: api_key.to_owned(),
-        connectivity_group_id: cg_id.clone(),
-    })?;
-
-    // Create the serving Wispers node and register it with the backend. The
-    // registration goes away with the group, so it needs no undo of its own.
-    let node_storage = wc::NodeStorage::new(state);
-    if let Some(backend) = backend {
-        node_storage.override_hub_addr(backend);
-    }
-    let mut node = node_storage.restore_or_init_node().await?;
-    let token = wcbe_client
-        .get_registration_token(&cg_id, Some("Host"), None /* metadata */)
-        .await?;
-    node.register(&token).await.context("registration failed")?;
-    Ok(())
-}
-
-/// Group creation is where the plan's connectivity-group quota bites.
-/// Make the error actionable.
-fn explain_group_quota(e: anyhow::Error) -> anyhow::Error {
-    match e.downcast_ref::<wcbe::QuotaExceeded>() {
-        Some(q) if q.quota == "groups_per_domain" => anyhow::anyhow!(
-            "cannot create a new share: your plan's connectivity-group quota \
-             is used up ({} of {}). Delete an unused share with `waserver \
-             deinit <share>` or upgrade your plan.",
-            q.current,
-            q.limit
-        ),
-        _ => e,
-    }
-}
-
-/// Removes the connectivity group, which deregisters every node. A share
-/// whose `init` never got that far has nothing to remove.
-pub async fn deinit(
-    wcs: Option<storage::WispersConnectState>,
-    backend: Option<&str>,
-) -> Result<()> {
-    let Some(wcs) = wcs else {
-        return Ok(());
-    };
-    wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend))
-        .remove_connectivity_group(&wcs.connectivity_group_id)
-        .await
-}
+//-- `waserver revoke` implementation ------------------------------------------
 
 /// Revokes on the hub, then deregisters the node there.
 pub async fn revoke(

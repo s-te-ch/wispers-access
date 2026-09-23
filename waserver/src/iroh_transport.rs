@@ -14,6 +14,23 @@ use tracing::{error, info, warn};
 use wire::CloseCode;
 use wispers_access_wire as wire;
 
+//-- Share initialisation ------------------------------------------------------
+
+/// `init` sets up a new share with iroh as the transport.
+pub fn init(rollback: &mut Rollback, dir: &storage::ShareDir, config_text: &str) -> Result<()> {
+    let state = dir.create(config_text)?;
+    rollback.push("share directory", {
+        let dir = dir.clone();
+        async move { dir.delete().map_err(Into::into) }
+    });
+    let secret = iroh::SecretKey::generate();
+    state.set_iroh_secret(&secret.to_bytes())?;
+    println!("Endpoint ID: {}", secret.public());
+    Ok(())
+}
+
+//-- HostNode implementation ---------------------------------------------------
+
 /// Host node implementation for iroh.
 pub struct HostNode {
     endpoint: iroh::Endpoint,
@@ -297,24 +314,11 @@ fn join(send: SendStream, recv: RecvStream) -> tokio::io::Join<RecvStream, SendS
     tokio::io::join(recv, send)
 }
 
-//-- CLI without the daemon ----------------------------------------------------
+//-- `waserver revoke` implementation ------------------------------------------
 
-/// `init` sets up a new share with iroh as the transport.
-pub fn init(rollback: &mut Rollback, dir: &storage::ShareDir, config_text: &str) -> Result<()> {
-    let state = dir.create(config_text)?;
-    rollback.push("share directory", {
-        let dir = dir.clone();
-        async move { dir.delete().map_err(Into::into) }
-    });
-    let secret = iroh::SecretKey::generate();
-    state.set_iroh_secret(&secret.to_bytes())?;
-    println!("Endpoint ID: {}", secret.public());
-    Ok(())
-}
-
-/// Through the daemon when it runs, so the guest's live connections get the
-/// `revoked` close; straight into the state database otherwise, and the
-/// guest learns on its next dial.
+/// Revoke the given guest node from the share. Use the daemon if it runs, so
+/// the guest's live connections get the `revoked` close. Otherwise, go straight
+/// to the state database, and the guest node learns about it on its next dial.
 pub async fn revoke(share: &str, dir: storage::ShareDir, number: i64) -> Result<()> {
     match ipc::Client::connect(share).await {
         Ok(mut client) => match client.request(&ipc::Request::RevokeGuest { number }).await {
