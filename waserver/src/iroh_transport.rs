@@ -68,9 +68,7 @@ impl serving::HostNode for HostNode {
     }
 
     fn revoke_guest(&self, number: i64) -> Result<GuestNode> {
-        Ok(self
-            .db
-            .revoke_guest(number, chrono::Utc::now().timestamp())?)
+        Ok(self.db.revoke_guest(number, Utc::now())?)
     }
 
     fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
@@ -125,12 +123,12 @@ impl HostNode {
         let now = chrono::Utc::now();
         self.db.create_invite(
             storage::NewInvite {
-                secret: &secret,
-                user_id,
-                node_name,
-                expires_at: (now + INVITE_VALIDITY).timestamp(),
+                secret,
+                user_id: user_id.to_owned(),
+                node_name: node_name.to_owned(),
+                expires_at: now + INVITE_VALIDITY,
             },
-            now.timestamp(),
+            now,
         )?;
         Ok(wire::Invite::Iroh {
             endpoint_id: wire::EndpointId(*self.endpoint.id().as_bytes()),
@@ -268,7 +266,7 @@ async fn serve_guest(
 ) {
     let peer_id = guest.peer_id.clone();
     info!(peer_id, guest = guest.number, user_id = %guest.user_id, "serving guest");
-    if let Err(e) = state.touch_guest(&peer_id, chrono::Utc::now().timestamp()) {
+    if let Err(e) = state.touch_guest(&peer_id, Utc::now()) {
         warn!(peer_id, error = %e, "could not record last seen");
     }
     let closer: Closer = {
@@ -327,8 +325,7 @@ pub async fn revoke(share: &str, dir: storage::ShareDir, number: i64) -> Result<
             Err(e) => anyhow::bail!("error sending command to server: {e}"),
         },
         Err(_) => {
-            dir.open_state()?
-                .revoke_guest(number, chrono::Utc::now().timestamp())?;
+            dir.open_state()?.revoke_guest(number, Utc::now())?;
         }
     }
     println!("Guest {number} is now revoked");
@@ -354,7 +351,7 @@ pub fn report(state: Option<&storage::StateDb>) -> TransportReport {
             .map(|guests| guests.iter().map(guest_status).collect())
             .map_err(|e| format!("{:#}", e)),
         invites: state
-            .invites()
+            .recent_invites(now)
             .map(|invites| invites.iter().map(|i| invite_row_status(i, now)).collect())
             .map_err(|e| format!("{:#}", e)),
         transport: Some(TransportStatus::Iroh {
@@ -372,30 +369,28 @@ fn guest_status(g: &storage::GuestNode) -> GuestStatus {
         node_number: g.number as i32,
         name: Some(g.display_name.clone()),
         user_id: Some(g.user_id.clone()),
-        created_at: fmt_unix(g.activated_at),
-        last_seen_at: g.last_seen_at.map(fmt_unix),
+        created_at: fmt_rfc3339(g.activated_at),
+        last_seen_at: g.last_seen_at.map(fmt_rfc3339),
         connected_to_host: None,
         connected_since: None,
         revoked: g.revoked_at.is_some(),
-        revoked_at: g.revoked_at.map(fmt_unix),
+        revoked_at: g.revoked_at.map(fmt_rfc3339),
     }
 }
 
 fn invite_row_status(i: &storage::InviteRow, now: DateTime<Utc>) -> InviteStatus {
-    let expires_at = fmt_unix(i.expires_at);
-    let used_at = i.consumed_at.map(fmt_unix);
+    let expires_at = fmt_rfc3339(i.expires_at);
+    let used_at = i.consumed_at.map(fmt_rfc3339);
     InviteStatus {
         status: invite_status(used_at.as_deref(), &expires_at, now),
         node_name: Some(i.node_name.clone()),
         user_id: Some(i.user_id.clone()),
-        created_at: fmt_unix(i.created_at),
+        created_at: fmt_rfc3339(i.created_at),
         expires_at,
         used_at,
     }
 }
 
-fn fmt_unix(secs: i64) -> String {
-    DateTime::<Utc>::from_timestamp(secs, 0)
-        .unwrap_or_default()
-        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+fn fmt_rfc3339(t: DateTime<Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }

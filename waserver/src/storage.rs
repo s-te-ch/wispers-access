@@ -4,6 +4,7 @@
 //! `share.toml` (the user's, see `config`) and `state.db` (the daemon's).
 
 use crate::config::{self, ShareConfig};
+use chrono::{DateTime, Utc};
 use rusqlite_migration::{M, Migrations};
 use std::fs;
 use std::io::{self, Write};
@@ -117,13 +118,13 @@ impl ShareDir {
 
 //-- State database ------------------------------------------------------------
 
-/// The daemon-owned SQLite file. Cheap to clone. Clones share one connection.
+/// Connection to the SQLite file for a share. Cheap to clone.
 #[derive(Clone)]
 pub struct StateDb {
     conn: Arc<Mutex<rusqlite::Connection>>,
 }
 
-/// What the Wispers Connect transport needs to talk to its backend.
+/// State specific to the Wispers Connect transport.
 #[derive(Clone)]
 pub struct WispersConnectState {
     pub api_key: String,
@@ -137,11 +138,11 @@ const KEY_REGISTRATION: &str = "registration";
 const KEY_IROH_SECRET: &str = "iroh_secret";
 
 impl StateDb {
-    /// `ShareDir` opens the real file; tests open one in a temp dir.
+    /// For testing. `ShareDir` opens the real file.
     pub(crate) fn open(path: PathBuf) -> Result<Self, Error> {
         let conn = rusqlite::Connection::open(&path).map_err(Error::Db)?;
-        // The daemon and the CLI (or two CLI tasks) may open the file at the
-        // same time; wait for a short lock instead of failing.
+        // If two processes open the file at the same time (e.g. the daemon and
+        // the cli), wait briefly instead of failing.
         conn.busy_timeout(std::time::Duration::from_secs(5))
             .map_err(Error::Db)?;
         #[cfg(unix)]
@@ -192,8 +193,6 @@ impl StateDb {
         )
     }
 
-    /// The iroh endpoint's secret key; its public key is the share's
-    /// endpoint ID in every invite.
     pub fn iroh_secret(&self) -> Result<Option<[u8; 32]>, Error> {
         match self.get(KEY_IROH_SECRET)? {
             Some(bytes) => Ok(Some(bytes.try_into().map_err(|_| Error::CorruptKey)?)),
@@ -241,34 +240,16 @@ impl StateDb {
 //-- Invites and guest nodes ---------------------------------------------------
 
 /// An invite to be recorded.
-pub struct NewInvite<'a> {
-    /// Only its SHA-256 is stored, so a copied database grants no access;
-    /// the secret is high-entropy random, so no slow hash is needed.
-    pub secret: &'a wire::InviteSecret,
-    /// The label the app sees in the identity header.
-    pub user_id: &'a str,
-    /// What the host calls the guest's device; becomes the guest node's
-    /// display name.
-    pub node_name: &'a str,
-    pub expires_at: i64,
-}
-
-/// A guest's node: a transport identity bound to this share by redeeming
-/// an invite. A revoked node keeps its row so its key is never bound again.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct GuestNode {
-    /// How the CLI addresses it (`waserver revoke <share> <number>`).
-    pub number: i64,
-    /// The transport's stable identifier for the node, if used (Wispers Connect
-    /// doesn't).
-    pub peer_id: String,
-    /// The label the app sees in the identity header.
+pub struct NewInvite {
+    /// The invite secret sent to the invitee. We only store its SHA-256.
+    pub secret: wire::InviteSecret,
+    /// The user ID that will later be sent to proxied web apps in the identity
+    /// header.
     pub user_id: String,
-    /// What the host calls this guest's device.
-    pub display_name: String,
-    pub activated_at: i64,
-    pub last_seen_at: Option<i64>,
-    pub revoked_at: Option<i64>,
+    /// Display name of the guest node, used only on the host side.
+    pub node_name: String,
+    /// When the invite stops being redeemable.
+    pub expires_at: DateTime<Utc>,
 }
 
 /// An invite as recorded, for `status`.
@@ -277,10 +258,13 @@ pub struct InviteRow {
     pub id: i64,
     pub user_id: String,
     pub node_name: String,
-    pub created_at: i64,
-    pub expires_at: i64,
-    pub consumed_at: Option<i64>,
+    pub created_at: DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
+    pub consumed_at: Option<DateTime<Utc>>,
 }
+
+/// How long a consumed or expired invite stays in `recent_invites`.
+const INVITE_HISTORY: chrono::Duration = chrono::Duration::days(7);
 
 /// The outcome of redeeming an invite.
 #[derive(Debug, PartialEq, Eq)]
@@ -289,44 +273,68 @@ pub enum Redemption {
     Refused(wire::ActivationError),
 }
 
-/// Times are Unix seconds; callers pass `now` so the rules are testable.
+/// A guest node - a transport identity bound to this share by redeeming an
+/// invite. A revoked node keeps its row so its key is never bound again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GuestNode {
+    /// How the CLI addresses it (`waserver revoke <share> <number>`).
+    pub number: i64,
+    /// The transport's stable identifier for the node.
+    pub peer_id: String,
+    /// The user identity associated with the node.
+    pub user_id: String,
+    /// The node's name, shown in waserver status output (e.g. "Alice's phone").
+    pub display_name: String,
+    /// Time the invite was redeemed.
+    pub activated_at: DateTime<Utc>,
+    /// Time the node last connected.
+    pub last_seen_at: Option<DateTime<Utc>>,
+    /// Time the host revoked this node.
+    pub revoked_at: Option<DateTime<Utc>>,
+}
+
 impl StateDb {
-    /// Records an invite, returns its id.
-    pub fn create_invite(&self, invite: NewInvite<'_>, now: i64) -> Result<i64, Error> {
+    /// Records an invite, returns its ID.
+    pub fn create_invite(&self, invite: NewInvite, now: DateTime<Utc>) -> Result<i64, Error> {
         let conn = self.conn.lock().expect("unpoisoned db lock");
         conn.execute(
             "INSERT INTO invites (secret_hash, user_id, node_name, created_at, expires_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
-                hash_secret(invite.secret),
+                hash_secret(&invite.secret),
                 invite.user_id,
                 invite.node_name,
-                now,
-                invite.expires_at
+                to_secs(now),
+                to_secs(invite.expires_at)
             ],
         )
         .map_err(Error::Db)?;
         Ok(conn.last_insert_rowid())
     }
 
-    /// Every invite, newest first.
-    pub fn invites(&self) -> Result<Vec<InviteRow>, Error> {
+    /// The invites worth showing, newest first: those still redeemable at
+    /// `now`, plus those created within [`INVITE_HISTORY`]. Older consumed
+    /// and expired invites stay in the table (guests reference the invite
+    /// they redeemed) but are not listed, mirroring the hub's token listing.
+    pub fn recent_invites(&self, now: DateTime<Utc>) -> Result<Vec<InviteRow>, Error> {
         let conn = self.conn.lock().expect("unpoisoned db lock");
         let mut stmt = conn
             .prepare(
                 "SELECT id, user_id, node_name, created_at, expires_at, consumed_at
-                 FROM invites ORDER BY id DESC",
+                 FROM invites
+                 WHERE (consumed_at IS NULL AND expires_at > ?1) OR created_at > ?2
+                 ORDER BY id DESC",
             )
             .map_err(Error::Db)?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map([to_secs(now), to_secs(now - INVITE_HISTORY)], |r| {
                 Ok(InviteRow {
                     id: r.get(0)?,
                     user_id: r.get(1)?,
                     node_name: r.get(2)?,
-                    created_at: r.get(3)?,
-                    expires_at: r.get(4)?,
-                    consumed_at: r.get(5)?,
+                    created_at: from_secs(r.get(3)?),
+                    expires_at: from_secs(r.get(4)?),
+                    consumed_at: r.get::<_, Option<i64>>(5)?.map(from_secs),
                 })
             })
             .map_err(Error::Db)?;
@@ -334,25 +342,26 @@ impl StateDb {
     }
 
     /// Redeem the invite code, binding `peer_id` to the metadata (user ID, node
-    /// name, etc) the operator added when generating the invite. The binding
-    /// happens at most once. Two guests racing for one invite serialise and the
-    /// second is refused. The same peer redeeming the same invite again
-    /// indicates a lost response being retried, and we return the same data
-    /// again.
+    /// name, etc) the operator added when generating the invite.
     pub fn redeem_invite(
         &self,
         secret: &wire::InviteSecret,
         peer_id: &str,
-        now: i64,
+        now: DateTime<Utc>,
     ) -> Result<Redemption, Error> {
         use rusqlite::OptionalExtension;
         use wire::ActivationError::*;
+        let now_secs = to_secs(now);
         let secret_hash = hash_secret(secret);
         let mut conn = self.conn.lock().expect("unpoisoned db lock");
         let tx = conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(Error::Db)?;
 
+        // Check whether the peer is allowed to redeem an invite (i.e isn't
+        // already a guest node, or revoked). One special case: if the peer is
+        // is trying to redeem the same invite again, the last response probably
+        // got lost, so we return the same response again.
         let existing: Option<(GuestNode, Vec<u8>)> = tx
             .query_row(
                 &format!(
@@ -374,6 +383,7 @@ impl StateDb {
             });
         }
 
+        // Check invite validity.
         let invite: Option<(i64, String, String, i64, Option<i64>)> = tx
             .query_row(
                 "SELECT id, user_id, node_name, expires_at, consumed_at
@@ -389,35 +399,38 @@ impl StateDb {
         if consumed_at.is_some() {
             return Ok(Redemption::Refused(InviteConsumed));
         }
-        if expires_at <= now {
+        if expires_at <= now_secs {
             return Ok(Redemption::Refused(InviteExpired));
         }
 
+        // Finally, redeem the invite.
         tx.execute(
             "INSERT INTO guests (peer_id, user_id, display_name, invite_id, activated_at)
              VALUES (?1, ?2, ?3, ?4, ?5)",
-            rusqlite::params![peer_id, user_id, node_name, invite_id, now],
+            rusqlite::params![peer_id, user_id, node_name, invite_id, now_secs],
         )
         .map_err(Error::Db)?;
         let number = tx.last_insert_rowid();
         tx.execute(
             "UPDATE invites SET consumed_at = ?1 WHERE id = ?2",
-            rusqlite::params![now, invite_id],
+            rusqlite::params![now_secs, invite_id],
         )
         .map_err(Error::Db)?;
         tx.commit().map_err(Error::Db)?;
+
+        // Return the new guest node.
         Ok(Redemption::Activated(GuestNode {
             number,
             peer_id: peer_id.to_owned(),
             user_id,
             display_name: node_name,
-            activated_at: now,
+            activated_at: from_secs(now_secs),
             last_seen_at: None,
             revoked_at: None,
         }))
     }
 
-    /// The identity resolver's lookup. A revoked node is returned as such.
+    /// Look up a GuestNode by its peer_id.
     pub fn guest_by_peer(&self, peer_id: &str) -> Result<Option<GuestNode>, Error> {
         use rusqlite::OptionalExtension;
         let conn = self.conn.lock().expect("unpoisoned db lock");
@@ -430,7 +443,7 @@ impl StateDb {
         .map_err(Error::Db)
     }
 
-    /// Every guest node, revoked ones included, by number.
+    /// List of guest node, revoked ones included, by number.
     pub fn guests(&self) -> Result<Vec<GuestNode>, Error> {
         let conn = self.conn.lock().expect("unpoisoned db lock");
         let mut stmt = conn
@@ -442,11 +455,12 @@ impl StateDb {
         rows.collect::<Result<Vec<_>, _>>().map_err(Error::Db)
     }
 
-    pub fn touch_guest(&self, peer_id: &str, now: i64) -> Result<(), Error> {
+    /// Set last_seen for the given peer ID to now.
+    pub fn touch_guest(&self, peer_id: &str, now: DateTime<Utc>) -> Result<(), Error> {
         let conn = self.conn.lock().expect("unpoisoned db lock");
         conn.execute(
             "UPDATE guests SET last_seen_at = ?1 WHERE peer_id = ?2",
-            rusqlite::params![now, peer_id],
+            rusqlite::params![to_secs(now), peer_id],
         )
         .map_err(Error::Db)?;
         Ok(())
@@ -465,13 +479,13 @@ impl StateDb {
         Ok(())
     }
 
-    /// Marks a guest node revoked. Revoking twice keeps the first time.
-    pub fn revoke_guest(&self, number: i64, now: i64) -> Result<GuestNode, Error> {
+    /// Marks a guest node revoked. A second revocation is a no-op.
+    pub fn revoke_guest(&self, number: i64, now: DateTime<Utc>) -> Result<GuestNode, Error> {
         use rusqlite::OptionalExtension;
         let conn = self.conn.lock().expect("unpoisoned db lock");
         conn.execute(
             "UPDATE guests SET revoked_at = ?1 WHERE id = ?2 AND revoked_at IS NULL",
-            rusqlite::params![now, number],
+            rusqlite::params![to_secs(now), number],
         )
         .map_err(Error::Db)?;
         conn.query_row(
@@ -499,10 +513,19 @@ fn guest_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<GuestNode> {
         peer_id: r.get(1)?,
         user_id: r.get(2)?,
         display_name: r.get(3)?,
-        activated_at: r.get(4)?,
-        last_seen_at: r.get(5)?,
-        revoked_at: r.get(6)?,
+        activated_at: from_secs(r.get(4)?),
+        last_seen_at: r.get::<_, Option<i64>>(5)?.map(from_secs),
+        revoked_at: r.get::<_, Option<i64>>(6)?.map(from_secs),
     })
+}
+
+/// The `_at` columns hold Unix seconds.
+fn to_secs(t: DateTime<Utc>) -> i64 {
+    t.timestamp()
+}
+
+fn from_secs(secs: i64) -> DateTime<Utc> {
+    DateTime::from_timestamp(secs, 0).expect("a stored timestamp is in range")
 }
 
 /// wispers-connect keeps the node's root key and registration here.
@@ -660,13 +683,64 @@ mod tests {
         assert!(db.wispers_connect_state().unwrap().is_some());
     }
 
-    fn invite<'a>(secret: &'a wire::InviteSecret, user: &'a str) -> NewInvite<'a> {
+    /// A test instant, `secs` after the epoch.
+    fn at(secs: i64) -> DateTime<Utc> {
+        DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    fn invite(secret: &wire::InviteSecret, user: &str) -> NewInvite {
         NewInvite {
-            secret,
-            user_id: user,
-            node_name: "phone",
-            expires_at: 1_000 + 24 * 3600,
+            secret: *secret,
+            user_id: user.to_owned(),
+            node_name: "phone".to_owned(),
+            expires_at: at(1_000 + 24 * 3600),
         }
+    }
+
+    #[test]
+    fn recent_invites_keeps_open_ones_and_a_week_of_history() {
+        let db = StateDb::open_in_memory().unwrap();
+        let day = 24 * 3600;
+        // Consumed long ago: out. Expired long ago, never used: out.
+        let old_used = wire::InviteSecret([1; 16]);
+        db.create_invite(invite(&old_used, "old-used"), at(0))
+            .unwrap();
+        db.redeem_invite(&old_used, "peer-old", at(1)).unwrap();
+        db.create_invite(invite(&wire::InviteSecret([2; 16]), "old-expired"), at(0))
+            .unwrap();
+        // Consumed recently: in, as history.
+        let recent_used = wire::InviteSecret([3; 16]);
+        db.create_invite(invite(&recent_used, "recent-used"), at(29 * day))
+            .unwrap();
+        db.redeem_invite(&recent_used, "peer-recent", at(29 * day + 1))
+            .unwrap();
+        // Created long ago but still open (a long expiry): in.
+        db.create_invite(
+            NewInvite {
+                secret: wire::InviteSecret([4; 16]),
+                user_id: "long-open".to_owned(),
+                node_name: "phone".to_owned(),
+                expires_at: at(100 * day),
+            },
+            at(0),
+        )
+        .unwrap();
+        let now = at(30 * day);
+        let listed: Vec<String> = db
+            .recent_invites(now)
+            .unwrap()
+            .into_iter()
+            .map(|i| i.user_id)
+            .collect();
+        assert_eq!(listed, ["long-open", "recent-used"]);
+        // The table keeps everything.
+        let total: i64 = db
+            .conn
+            .lock()
+            .unwrap()
+            .query_row("SELECT count(*) FROM invites", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 4);
     }
 
     #[test]
@@ -675,41 +749,43 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = StateDb::open(tmp.path().join("state.db")).unwrap();
         let alice = wire::InviteSecret([1; 16]);
-        db.create_invite(invite(&alice, "alice"), 1_000).unwrap();
+        db.create_invite(invite(&alice, "alice"), at(1_000))
+            .unwrap();
 
         // Unknown secret, nothing bound.
         assert_eq!(
-            db.redeem_invite(&wire::InviteSecret([9; 16]), "peer-a", 1_001)
+            db.redeem_invite(&wire::InviteSecret([9; 16]), "peer-a", at(1_001))
                 .unwrap(),
             Redemption::Refused(InviteUnknown)
         );
         assert!(db.guests().unwrap().is_empty());
 
         // First contact binds the peer.
-        let Redemption::Activated(m) = db.redeem_invite(&alice, "peer-a", 1_001).unwrap() else {
+        let Redemption::Activated(m) = db.redeem_invite(&alice, "peer-a", at(1_001)).unwrap()
+        else {
             panic!("expected activation");
         };
         assert_eq!(
             (m.number, m.user_id.as_str(), m.activated_at),
-            (1, "alice", 1_001)
+            (1, "alice", at(1_001))
         );
         assert_eq!(db.guest_by_peer("peer-a").unwrap().as_ref(), Some(&m));
 
         // A lost response: the same peer retries and gets the same node.
         assert_eq!(
-            db.redeem_invite(&alice, "peer-a", 1_002).unwrap(),
+            db.redeem_invite(&alice, "peer-a", at(1_002)).unwrap(),
             Redemption::Activated(m.clone())
         );
         // Another key with the same secret is refused.
         assert_eq!(
-            db.redeem_invite(&alice, "peer-b", 1_002).unwrap(),
+            db.redeem_invite(&alice, "peer-b", at(1_002)).unwrap(),
             Redemption::Refused(InviteConsumed)
         );
         // A guest presenting a fresh invite stays as it is.
         let bob = wire::InviteSecret([2; 16]);
-        db.create_invite(invite(&bob, "bob"), 1_000).unwrap();
+        db.create_invite(invite(&bob, "bob"), at(1_000)).unwrap();
         assert_eq!(
-            db.redeem_invite(&bob, "peer-a", 1_003).unwrap(),
+            db.redeem_invite(&bob, "peer-a", at(1_003)).unwrap(),
             Redemption::Refused(AlreadyGuest)
         );
         assert_eq!(db.guests().unwrap().len(), 1);
@@ -725,39 +801,42 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let db = StateDb::open(tmp.path().join("state.db")).unwrap();
         let secret = wire::InviteSecret([1; 16]);
-        db.create_invite(invite(&secret, "alice"), 1_000).unwrap();
+        db.create_invite(invite(&secret, "alice"), at(1_000))
+            .unwrap();
         assert_eq!(
-            db.redeem_invite(&secret, "peer-a", 1_000 + 24 * 3600)
+            db.redeem_invite(&secret, "peer-a", at(1_000 + 24 * 3600))
                 .unwrap(),
             Redemption::Refused(InviteExpired)
         );
-        let Redemption::Activated(m) = db.redeem_invite(&secret, "peer-a", 1_001).unwrap() else {
+        let Redemption::Activated(m) = db.redeem_invite(&secret, "peer-a", at(1_001)).unwrap()
+        else {
             panic!("expected activation");
         };
 
-        db.touch_guest("peer-a", 1_500).unwrap();
+        db.touch_guest("peer-a", at(1_500)).unwrap();
         assert_eq!(
             db.guest_by_peer("peer-a").unwrap().unwrap().last_seen_at,
-            Some(1_500)
+            Some(at(1_500))
         );
 
         assert!(matches!(
-            db.revoke_guest(99, 2_000),
+            db.revoke_guest(99, at(2_000)),
             Err(Error::NoSuchGuest(99))
         ));
-        let revoked = db.revoke_guest(m.number, 2_000).unwrap();
-        assert_eq!(revoked.revoked_at, Some(2_000));
+        let revoked = db.revoke_guest(m.number, at(2_000)).unwrap();
+        assert_eq!(revoked.revoked_at, Some(at(2_000)));
         // Revoking again keeps the first time; the row stays listed.
         assert_eq!(
-            db.revoke_guest(m.number, 3_000).unwrap().revoked_at,
-            Some(2_000)
+            db.revoke_guest(m.number, at(3_000)).unwrap().revoked_at,
+            Some(at(2_000))
         );
         assert_eq!(db.guests().unwrap().len(), 1);
 
         // A guest that leaves is forgotten outright, invite left consumed.
         let leaver = wire::InviteSecret([3; 16]);
-        db.create_invite(invite(&leaver, "carol"), 2_000).unwrap();
-        let Redemption::Activated(carol) = db.redeem_invite(&leaver, "peer-c", 2_001).unwrap()
+        db.create_invite(invite(&leaver, "carol"), at(2_000))
+            .unwrap();
+        let Redemption::Activated(carol) = db.redeem_invite(&leaver, "peer-c", at(2_001)).unwrap()
         else {
             panic!("expected activation");
         };
@@ -768,20 +847,20 @@ mod tests {
             Err(Error::NoSuchGuest(_))
         ));
         assert_eq!(
-            db.redeem_invite(&leaver, "peer-c2", 2_002).unwrap(),
+            db.redeem_invite(&leaver, "peer-c2", at(2_002)).unwrap(),
             Redemption::Refused(InviteConsumed)
         );
 
         // A revoked key is never re-bound, even with a fresh invite.
         let fresh = wire::InviteSecret([2; 16]);
-        db.create_invite(invite(&fresh, "alice-again"), 2_000)
+        db.create_invite(invite(&fresh, "alice-again"), at(2_000))
             .unwrap();
         assert_eq!(
-            db.redeem_invite(&fresh, "peer-a", 2_001).unwrap(),
+            db.redeem_invite(&fresh, "peer-a", at(2_001)).unwrap(),
             Redemption::Refused(Revoked)
         );
         // A fresh key redeems it, as a new guest number.
-        let Redemption::Activated(again) = db.redeem_invite(&fresh, "peer-a2", 2_001).unwrap()
+        let Redemption::Activated(again) = db.redeem_invite(&fresh, "peer-a2", at(2_001)).unwrap()
         else {
             panic!("expected activation");
         };

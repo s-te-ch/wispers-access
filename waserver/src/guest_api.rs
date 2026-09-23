@@ -153,7 +153,7 @@ async fn post_activation(
     let Ok(request) = serde_json::from_slice::<wire::Activation>(&body) else {
         return refuse_activation(peer_id, ActivationError::Malformed);
     };
-    let now = chrono::Utc::now().timestamp();
+    let now = chrono::Utc::now();
     match db.redeem_invite(&request.secret, peer_id, now) {
         Ok(Redemption::Activated(guest)) => {
             info!(

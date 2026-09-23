@@ -502,13 +502,13 @@ upstream = ":1"
         let ctx = context_with_upstream(":1");
         let db = ctx.db.clone();
         let secret = wire::InviteSecret([7; 16]);
-        let now = chrono::Utc::now().timestamp();
+        let now = chrono::Utc::now();
         db.create_invite(
             NewInvite {
-                secret: &secret,
-                user_id: "alice",
-                node_name: "phone",
-                expires_at: now + 3600,
+                secret,
+                user_id: "alice".to_owned(),
+                node_name: "phone".to_owned(),
+                expires_at: now + chrono::Duration::hours(1),
             },
             now,
         )
