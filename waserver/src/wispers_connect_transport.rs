@@ -2,7 +2,7 @@
 
 use crate::initialization::Rollback;
 use crate::protocol::{self, Peer};
-use crate::serving::{BoxFuture, ExitReason, Server, ServingHandle, shutdown_signal};
+use crate::serving::{self, BoxFuture, ExitReason, ServingHandle, shutdown_signal};
 use crate::status::{GuestStatus, InviteStatus, TransportReport, TransportStatus, invite_status};
 use crate::storage;
 use crate::wcbe;
@@ -16,10 +16,10 @@ use wispers_connect as wc;
 
 /// The host node is always the first node of its connectivity group: `init`
 /// registers it before any invite exists. Guests dial it by this number.
-pub const SERVER_NODE_NUMBER: i32 = 1;
+pub const HOST_NODE_NUMBER: i32 = 1;
 
-/// The node restored from the share's state, ready to connect to the hub.
-pub struct Node {
+/// Host node implementation for Wispers Connect.
+pub struct HostNode {
     node: Arc<wc::Node>,
     wcbe_client: wcbe::Client,
     connectivity_group_id: String,
@@ -31,7 +31,11 @@ pub struct Node {
     hub_session: RwLock<Option<wc::ServingHandle>>,
 }
 
-pub async fn bind(share: &str, state: storage::StateDb, backend: Option<String>) -> Result<Node> {
+pub async fn bind(
+    share: &str,
+    state: storage::StateDb,
+    backend: Option<String>,
+) -> Result<HostNode> {
     let Some(wcs) = state.wispers_connect_state()? else {
         anyhow::bail!("Share {} has no Wispers Connect credentials", share);
     };
@@ -46,7 +50,7 @@ pub async fn bind(share: &str, state: storage::StateDb, backend: Option<String>)
     let Some(cg_id) = node.connectivity_group_id() else {
         anyhow::bail!("host node not registered");
     };
-    Ok(Node {
+    Ok(HostNode {
         connectivity_group_id: cg_id.to_string(),
         wcbe_client: wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref())),
         backend,
@@ -55,7 +59,7 @@ pub async fn bind(share: &str, state: storage::StateDb, backend: Option<String>)
     })
 }
 
-impl Server for Node {
+impl serving::HostNode for HostNode {
     /// Connects to the hub and serves until the session ends or a signal.
     fn run(&self, serving_handle: ServingHandle) -> BoxFuture<'_, Result<ExitReason>> {
         Box::pin(async move {
@@ -346,7 +350,7 @@ pub async fn revoke(
     backend: Option<String>,
     node_number: i32,
 ) -> Result<()> {
-    if node_number == SERVER_NODE_NUMBER {
+    if node_number == HOST_NODE_NUMBER {
         anyhow::bail!("Node {node_number} is the host and cannot be revoked");
     }
 
@@ -440,14 +444,14 @@ fn to_guests(group: &wcbe::GroupDetail) -> Vec<GuestStatus> {
     let mut guests: Vec<GuestStatus> = group
         .nodes
         .iter()
-        .filter(|n| n.node_number != SERVER_NODE_NUMBER)
+        .filter(|n| n.node_number != HOST_NODE_NUMBER)
         .map(|n| GuestStatus {
             node_number: n.node_number,
             name: n.name.clone(),
             user_id: n.metadata.as_deref().and_then(parse_user_id),
             created_at: n.created_at.clone(),
             last_seen_at: n.last_seen_at.clone(),
-            connected_to_server: None,
+            connected_to_host: None,
             connected_since: None,
             // waserver revokes *and* removes nodes, so a revoked node never
             // shows up in the roster.

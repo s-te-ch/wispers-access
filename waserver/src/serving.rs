@@ -29,23 +29,23 @@ pub async fn serve(share: &str) -> Result<()> {
         None => warn!("no apps configured; guests get 503 until `waserver reload`"),
     }
     let state = dir.open_state()?;
-    let server: Arc<dyn Server> = match cfg.transport.clone() {
+    let host_node: Arc<dyn HostNode> = match cfg.transport.clone() {
         TransportConfig::WispersConnect { backend } => {
             Arc::new(wispers_connect_transport::bind(share, state.clone(), backend).await?)
         }
         TransportConfig::Iroh {} => Arc::new(iroh_transport::bind(share, state.clone()).await?),
     };
-    let handle = ServingHandle::new(dir, cfg, state, server.clone());
+    let handle = ServingHandle::new(dir, cfg, state, host_node.clone());
     let ipc_server = match ipc::Server::bind(share).await {
         Ok(ipc_server) => ipc_server,
         Err(e) => {
             // Let the transport go down properly rather than drop it.
-            let _ = server.shutdown().await;
+            let _ = host_node.shutdown().await;
             return Err(e);
         }
     };
     let mut ipc_task = tokio::spawn(ipc_server.run(handle.clone()));
-    let reason = server.run(handle).await?;
+    let reason = host_node.run(handle).await?;
     if reason == ExitReason::Stopped {
         // `waserver stop` ended the loop. Give some time to answer the request.
         let _ = tokio::time::timeout(IPC_REPLY_GRACE, &mut ipc_task).await;
@@ -53,9 +53,9 @@ pub async fn serve(share: &str) -> Result<()> {
     Ok(())
 }
 
-/// A share's server, using the appropriate transport through dynamic dispatch.
-/// Created by that transport's `bind` function.
-pub trait Server: Send + Sync {
+/// The host node of a share, as a trait to be implemented by the individual
+/// transports.
+pub trait HostNode: Send + Sync {
     /// Serves until the transport stops or a signal arrives.
     fn run(&self, handle: ServingHandle) -> BoxFuture<'_, Result<ExitReason>>;
 
@@ -77,7 +77,7 @@ pub trait Server: Send + Sync {
 
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
-/// Why a Server's `run` loop returned.
+/// Why a HostNode's `run` loop returned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ExitReason {
     /// A shutdown signal. Nobody is waiting for a reply.
@@ -96,7 +96,7 @@ pub struct ServingHandle {
 }
 
 struct Inner {
-    server: Arc<dyn Server>,
+    host_node: Arc<dyn HostNode>,
     /// The share's state database, which activation writes to.
     db: storage::StateDb,
 
@@ -147,11 +147,11 @@ impl ServingHandle {
         dir: storage::ShareDir,
         config: ShareConfig,
         db: storage::StateDb,
-        server: Arc<dyn Server>,
+        host_node: Arc<dyn HostNode>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
-                server,
+                host_node,
                 db,
                 reachable_since: RwLock::new(None),
                 connections: RwLock::new(HashMap::new()),
@@ -273,13 +273,13 @@ impl ServingHandle {
 
     /// Mints an invite for a new guest.
     pub async fn invite(&self, node_name: &str, user_id: &str) -> Result<wire::Invite> {
-        self.inner.server.invite(node_name, user_id).await
+        self.inner.host_node.invite(node_name, user_id).await
     }
 
     /// Marks the guest revoked and closes its live connections with the
     /// `revoked` code, so it learns at once.
     pub async fn revoke_guest(&self, number: i64) -> Result<storage::GuestNode> {
-        let guest = self.inner.server.revoke_guest(number)?;
+        let guest = self.inner.host_node.revoke_guest(number)?;
         self.close_connections(|c| i64::from(c.number) == number, wire::CloseCode::Revoked)
             .await;
         Ok(guest)
@@ -290,7 +290,7 @@ impl ServingHandle {
     pub async fn shutdown(&self) -> Result<()> {
         self.close_connections(|_| true, wire::CloseCode::Closing)
             .await;
-        self.inner.server.shutdown().await
+        self.inner.host_node.shutdown().await
     }
 
     async fn close_connections(

@@ -3,7 +3,7 @@
 use crate::initialization::Rollback;
 use crate::ipc;
 use crate::protocol::{self, Peer, StreamOutcome};
-use crate::serving::{BoxFuture, Closer, ExitReason, Server, ServingHandle, shutdown_signal};
+use crate::serving::{self, BoxFuture, Closer, ExitReason, ServingHandle, shutdown_signal};
 use crate::status::{GuestStatus, InviteStatus, TransportReport, TransportStatus, invite_status};
 use crate::storage::{self, GuestNode};
 use anyhow::{Context, Result};
@@ -14,13 +14,13 @@ use tracing::{error, info, warn};
 use wire::CloseCode;
 use wispers_access_wire as wire;
 
-/// The endpoint, bound and keyed by the share's secret.
-pub struct Endpoint {
+/// Host node implementation for iroh.
+pub struct HostNode {
     endpoint: iroh::Endpoint,
     db: storage::StateDb,
 }
 
-pub async fn bind(share: &str, state: storage::StateDb) -> Result<Endpoint> {
+pub async fn bind(share: &str, state: storage::StateDb) -> Result<HostNode> {
     let Some(secret) = state.iroh_secret()? else {
         anyhow::bail!("Share {} has no iroh key", share);
     };
@@ -31,13 +31,13 @@ pub async fn bind(share: &str, state: storage::StateDb) -> Result<Endpoint> {
         .await
         .context("binding the iroh endpoint")?;
     info!(endpoint_id = %endpoint.id(), "iroh endpoint bound");
-    Ok(Endpoint {
+    Ok(HostNode {
         endpoint,
         db: state,
     })
 }
 
-impl Server for Endpoint {
+impl serving::HostNode for HostNode {
     /// Accepts connections until the endpoint is closed or a signal.
     fn run(&self, serving_handle: ServingHandle) -> BoxFuture<'_, Result<ExitReason>> {
         Box::pin(async move {
@@ -368,7 +368,7 @@ fn guest_status(g: &storage::GuestNode) -> GuestStatus {
         user_id: Some(g.user_id.clone()),
         created_at: fmt_unix(g.activated_at),
         last_seen_at: g.last_seen_at.map(fmt_unix),
-        connected_to_server: None,
+        connected_to_host: None,
         connected_since: None,
         revoked: g.revoked_at.is_some(),
         revoked_at: g.revoked_at.map(fmt_unix),
