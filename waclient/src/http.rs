@@ -45,12 +45,18 @@ pub async fn serve(port: u16, registry: Arc<ShareRegistry>) -> Result<()> {
 async fn handle_connection(tcp_stream: TcpStream, registry: Arc<ShareRegistry>) -> Result<()> {
     let tcp_stream = TokioIo::new(tcp_stream);
     let service = hyper::service::service_fn(move |req| forward(req, registry.clone()));
-    http1_server::Builder::new()
+    let served = http1_server::Builder::new()
         .serve_connection(tcp_stream, service)
         // Allow a 101 to hand the browser socket over for raw relaying (WebSocket).
         .with_upgrades()
-        .await
-        .context("HTTP/1 connection error")
+        .await;
+    match served {
+        Ok(()) => Ok(()),
+        // The client gave up on the response (a reload, a closed tab) and
+        // closed its socket. Routine for a browser, not a fault.
+        Err(e) if peer_went_away(&e) => Ok(()),
+        Err(e) => Err(e).context("HTTP/1 connection error"),
+    }
 }
 
 /// Body type used in responses we send back to the peer. Boxed so we can return
@@ -323,6 +329,29 @@ fn error_response(status: hyper::StatusCode, msg: &str) -> hyper::Response<Boxed
         .header("content-type", "text/plain; charset=utf-8")
         .body(body)
         .expect("static error response is always valid")
+}
+
+/// Whether a hyper connection error just means the other side stopped
+/// reading or writing - it closed mid-message, or the transport reported the
+/// stream reset or stopped underneath hyper.
+fn peer_went_away(e: &hyper::Error) -> bool {
+    if e.is_incomplete_message() || e.is_body_write_aborted() {
+        return true;
+    }
+    let mut source = std::error::Error::source(e);
+    while let Some(err) = source {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            return matches!(
+                io.kind(),
+                std::io::ErrorKind::ConnectionReset
+                    | std::io::ErrorKind::BrokenPipe
+                    | std::io::ErrorKind::UnexpectedEof
+                    | std::io::ErrorKind::NotConnected
+            );
+        }
+        source = err.source();
+    }
+    false
 }
 
 #[cfg(test)]
