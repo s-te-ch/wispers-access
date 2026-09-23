@@ -1,6 +1,6 @@
 //! Per-share tracing setup. Foreground mode writes to stderr and a daily-
-//! rotated file; the daemonized mode writes only to the file. In daemon mode
-//! we install a panic hook that funnels panic messages through tracing.
+//! rotated file, the daemonized mode writes only to the file. In daemon mode we
+//! install a panic hook that funnels panic messages through tracing.
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
