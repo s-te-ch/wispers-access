@@ -1,11 +1,12 @@
 import SwiftUI
+import WispersAccessSdk
 
 /// The roster of joined shares, and the home + switcher in one surface: the
 /// wordmark, a "SHARED WITH YOU" section, cards (avatar · status · name), and a
-/// floating add button. Tapping a card opens/resumes its browser (a warm session
-/// shows a live marker); the trailing ⓘ opens the detail screen (info + Remove).
+/// floating add button. Tapping a card opens/resumes the share's app (a warm
+/// session shows a live marker), or its detail screen when there are several;
+/// the trailing ⓘ opens the detail screen (info + Remove).
 struct ShareListScreen: View {
-    @Environment(ShareStore.self) private var store
     @Environment(ShareManager.self) private var manager
     @Environment(ShareIconStore.self) private var icons
     @Environment(BrowseRouter.self) private var router
@@ -20,7 +21,7 @@ struct ShareListScreen: View {
                     sectionHeader
                         .padding(.top, 40)
                     Group {
-                        if store.shares.isEmpty {
+                        if manager.shares.isEmpty {
                             empty
                         } else {
                             shareCards
@@ -36,10 +37,10 @@ struct ShareListScreen: View {
         }
         .toolbar(.hidden, for: .navigationBar)
         .sheet(isPresented: $showingAdd, onDismiss: consumePendingOpen) { AddShareScreen() }
-        .task(id: store.shares.map(\.id)) {
+        .task(id: manager.shares.map(\.id)) {
             while !Task.isCancelled {
                 await manager.status.refresh(
-                    store.shares.map(\.id), using: manager.sessions, store: store)
+                    manager.shares, using: manager.client, activity: manager.activity)
                 try? await Task.sleep(for: .seconds(30))
             }
         }
@@ -59,7 +60,7 @@ struct ShareListScreen: View {
             Text("SHARED WITH YOU")
                 .font(.caption.weight(.medium)).tracking(1.5)
             Spacer()
-            Text("\(store.shares.count)")
+            Text("\(manager.shares.count)")
                 .font(.caption.weight(.medium))
         }
         .foregroundStyle(AccessColor.onSurfaceVariant)
@@ -67,30 +68,28 @@ struct ShareListScreen: View {
 
     private var shareCards: some View {
         VStack(spacing: 12) {
-            ForEach(store.shares) { share in
+            ForEach(manager.shares) { share in
                 shareRow(share)
             }
         }
     }
 
-    /// One roster row: the card taps through to the browser; the trailing ⓘ taps
-    /// through to the detail screen. Two side-by-side hit targets inside one card.
-    /// A terminal share's card routes to the detail screen too — there's nothing
-    /// to browse anymore, only the explanation and Remove.
-    private func shareRow(_ share: ShareMetadata) -> some View {
+    /// One roster row: the card taps through to the app (or the detail screen
+    /// when there are several apps, or none, or the share is gone); the
+    /// trailing ⓘ taps through to the detail screen. Two side-by-side hit
+    /// targets inside one card.
+    private func shareRow(_ share: Share) -> some View {
         HStack(spacing: 8) {
-            NavigationLink(
-                value: share.terminalState == nil
-                    ? ShareRoute.browse(share.id) : ShareRoute.detail(share.id)
-            ) {
+            NavigationLink(value: ShareRoute.forCard(share)) {
                 ShareCard(
                     share: share,
-                    availability: share.terminalState?.availability
+                    availability: share.state.availability
                         ?? manager.status.availability(for: share.id),
+                    lastConnected: manager.activity.lastConnected(share.id),
                     isLive: manager.browser.isWarm(share.id),
                     iconData: icons.iconData(for: share.id)
                 )
-                .opacity(share.terminalState == nil ? 1 : 0.6)
+                .opacity(share.state == .live ? 1 : 0.6)
             }
             .buttonStyle(.plain)
 
@@ -102,7 +101,7 @@ struct ShareListScreen: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            .accessibilityLabel("App details")
+            .accessibilityLabel("Share details")
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 16)
@@ -134,14 +133,15 @@ struct ShareListScreen: View {
     private func consumePendingOpen() {
         if let id = router.openAfterDismiss {
             router.openAfterDismiss = nil
-            router.open(id)
+            if let share = manager.share(id) { router.open(share) }
         }
     }
 }
 
 private struct ShareCard: View {
-    let share: ShareMetadata
+    let share: Share
     let availability: Availability
+    let lastConnected: Date?
     let isLive: Bool
     let iconData: Data?
 
@@ -163,6 +163,12 @@ private struct ShareCard: View {
                     .foregroundStyle(AccessColor.onSurface)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
+                if share.apps.count > 1 {
+                    Text(share.apps.map(\.name).joined(separator: " · "))
+                        .font(.caption)
+                        .foregroundStyle(AccessColor.onSurfaceVariant)
+                        .lineLimit(1)
+                }
             }
             Spacer(minLength: 8)
         }
@@ -180,7 +186,7 @@ private struct ShareCard: View {
     }
 
     private var name: String {
-        share.nickname.isEmpty ? "Untitled app" : share.nickname
+        share.name.isEmpty ? "Untitled share" : share.name
     }
 
     private var statusLine: String {
@@ -192,7 +198,7 @@ private struct ShareCard: View {
         case .checking: status = "CHECKING…"
         case .removed, .revoked: return "NO LONGER SHARED"
         }
-        guard let last = share.lastConnectedAt, let ago = Self.shortAgo(last) else { return status }
+        guard let lastConnected, let ago = Self.shortAgo(lastConnected) else { return status }
         return "\(status) · LAST \(ago) AGO"
     }
 

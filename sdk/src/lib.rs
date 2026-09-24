@@ -126,6 +126,8 @@ pub struct Share {
     /// The apps as last fetched from the host node, in its order.
     pub apps: Vec<App>,
     pub state: ShareState,
+    /// When this device joined.
+    pub joined_at: std::time::SystemTime,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]

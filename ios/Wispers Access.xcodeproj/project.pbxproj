@@ -7,8 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		AA11AA11AA11AA11AA110003 /* WispersConnect in Frameworks */ = {isa = PBXBuildFile; productRef = AA11AA11AA11AA11AA110002 /* WispersConnect */; };
-		CC33CC33CC33CC33CC330003 /* LLHTTP in Frameworks */ = {isa = PBXBuildFile; productRef = CC33CC33CC33CC33CC330002 /* LLHTTP */; };
+		DD44DD44DD44DD44DD440003 /* WispersAccessSdk in Frameworks */ = {isa = PBXBuildFile; productRef = DD44DD44DD44DD44DD440002 /* WispersAccessSdk */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,8 +56,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				AA11AA11AA11AA11AA110003 /* WispersConnect in Frameworks */,
-				CC33CC33CC33CC33CC330003 /* LLHTTP in Frameworks */,
+				DD44DD44DD44DD44DD440003 /* WispersAccessSdk in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -119,8 +117,7 @@
 			);
 			name = "Wispers Access";
 			packageProductDependencies = (
-				AA11AA11AA11AA11AA110002 /* WispersConnect */,
-				CC33CC33CC33CC33CC330002 /* LLHTTP */,
+				DD44DD44DD44DD44DD440002 /* WispersAccessSdk */,
 			);
 			productName = "Wispers Access";
 			productReference = 64AAA7272FF5BFA50081A7F3 /* Wispers Access.app */;
@@ -205,8 +202,7 @@
 			mainGroup = 64AAA71E2FF5BFA50081A7F3;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				AA11AA11AA11AA11AA110001 /* XCRemoteSwiftPackageReference "wispers-client" */,
-				CC33CC33CC33CC33CC330001 /* XCLocalSwiftPackageReference "LLHTTP" */,
+				DD44DD44DD44DD44DD440001 /* XCLocalSwiftPackageReference "swift" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 64AAA7282FF5BFA50081A7F3 /* Products */;
@@ -599,32 +595,16 @@
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */
-		CC33CC33CC33CC33CC330001 /* XCLocalSwiftPackageReference "LLHTTP" */ = {
+		DD44DD44DD44DD44DD440001 /* XCLocalSwiftPackageReference "swift" */ = {
 			isa = XCLocalSwiftPackageReference;
-			relativePath = LLHTTP;
+			relativePath = ../sdk/swift;
 		};
 /* End XCLocalSwiftPackageReference section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		AA11AA11AA11AA11AA110001 /* XCRemoteSwiftPackageReference "wispers-client" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/s-te-ch/wispers-client";
-			requirement = {
-				kind = upToNextMinorVersion;
-				minimumVersion = 0.14.0;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
 /* Begin XCSwiftPackageProductDependency section */
-		AA11AA11AA11AA11AA110002 /* WispersConnect */ = {
+		DD44DD44DD44DD44DD440002 /* WispersAccessSdk */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = AA11AA11AA11AA11AA110001 /* XCRemoteSwiftPackageReference "wispers-client" */;
-			productName = WispersConnect;
-		};
-		CC33CC33CC33CC33CC330002 /* LLHTTP */ = {
-			isa = XCSwiftPackageProductDependency;
-			productName = LLHTTP;
+			productName = WispersAccessSdk;
 		};
 /* End XCSwiftPackageProductDependency section */
 	};

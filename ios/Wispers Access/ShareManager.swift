@@ -1,21 +1,37 @@
 import Foundation
 import Observation
-import WispersConnect
+import WispersAccessSdk
+import os
 
-/// App coordinator for joined shares: bridges the UI to the wispers-connect node
-/// lifecycle and the two stores (Keychain secrets + JSON metadata). Phase 1 owns
-/// the join flow and the roster; serving/tunnelling arrives in a later phase.
-/// Injected via `@Environment`; its observable state is `store`.
+/// App coordinator for joined shares: the SDK client, the shares as its store
+/// has them, and the app-side state around them (availability, icons, last
+/// use, open browse sessions). Injected via `@Environment`. In demo mode there
+/// is no client and the roster is fixed.
 @Observable
 @MainActor
 final class ShareManager {
-    let store: ShareStore
+    /// The shares as the SDK's store has them, newest join last. Reloaded
+    /// whenever the SDK reports a change.
+    private(set) var shares: [Share] = []
 
-    /// Per-share serving-node availability, polled while a screen is visible.
+    /// Per-share availability, polled while a screen is visible.
     let status = ShareStatusStore()
 
     /// Site icons harvested while browsing, for the roster/detail avatars.
     let icons: ShareIconStore
+
+    /// When each share was last reached, for the roster's "LAST 5M AGO".
+    let activity: ShareActivityStore
+
+    /// The SDK client, or nil in demo mode.
+    @ObservationIgnored let client: Client?
+
+    /// One loopback proxy for the whole app, a port per app it serves.
+    @ObservationIgnored let proxy: PerAppProxy?
+
+    /// The secret every proxied request must carry; installed into each web
+    /// view before its first load.
+    @ObservationIgnored let proxyAuth = ProxyAuth()
 
     /// The shares currently open for browsing, switchable in-app. Lazy so its
     /// icon callback can capture `self` (to feed `icons`).
@@ -25,132 +41,125 @@ final class ShareManager {
         }
     )
 
-    /// App-wide cache of live nodes + QUIC connections for browsing. Lazy so its
-    /// closures can capture `self` weakly; `@ObservationIgnored` since it isn't
-    /// view-observable state.
-    @ObservationIgnored private(set) lazy var sessions = SessionManager(
-        storageProvider: { [weak self] id in
-            guard let self else { throw CancellationError() }
-            return try await self.storageFor(id)
-        },
-        onConnected: { [weak self] id in await self?.store.markConnected(id) }
-    )
-
-    init(store: ShareStore? = nil, icons: ShareIconStore? = nil) {
-        // Constructed here rather than in default arguments: the stores' inits
-        // are main-actor-isolated, and default arguments evaluate nonisolated.
-        self.store = store ?? ShareStore()
+    init(
+        client: Client?,
+        icons: ShareIconStore? = nil,
+        activity: ShareActivityStore? = nil,
+        shares: [Share] = []
+    ) {
+        self.client = client
+        self.proxy = client?.startPerAppProxy(requiredCookie: proxyAuth.requiredCookie)
         self.icons = icons ?? ShareIconStore()
+        self.activity = activity ?? ShareActivityStore()
+        self.shares = shares
     }
 
-    /// Joins a share from a `wax_` invite code: parse → persist metadata (incl.
-    /// any self-hosted backend) → restore/init the node → register → activate →
-    /// adopt the connectivity group's name as the label. On any failure the
-    /// half-created share is rolled back so a retry is clean — including
-    /// deregistering from the hub if registration got far enough to leave a node
-    /// there (otherwise a failed activation would strand a `.registered` node
-    /// server-side, and repeated retries would pile them up).
-    @discardableResult
-    func join(inviteCode: String, onStep: (JoinStep) -> Void = { _ in }) async throws -> ShareID {
-        onStep(.validating)
-        let invite = try InviteCode.parse(inviteCode)
-        let id = ShareID.random()
-        store.add(
-            ShareMetadata(
-                id: id,
-                nickname: "",
-                backend: invite.backend,
-                createdAt: Date(),
-                lastConnectedAt: nil
-            )
-        )
+    /// The real thing: a client on the app's data directory, secrets in the
+    /// Keychain, and this manager told about every change. The observer is
+    /// created first, since the client wants it at construction, and wired to
+    /// the manager once there is one.
+    static func live() -> ShareManager {
+        // The SDK's lines into the unified log, once per process.
+        try? installLogSink(sink: OSLogSink(), level: .info)
+        let relay = ShareChangeRelay()
+        let client: Client
         do {
-            onStep(.initializing)
-            let storage = try storageFor(id)
-            let (node, _) = try await storage.restoreOrInit()
-            onStep(.registering)
-            try await node.register(token: invite.registrationToken)
-            onStep(.activating)
-            try await node.activate(activationCode: invite.activationCode)
-            store.markConnected(id)
-            // Adopt the connectivity group's display name as the label — best
-            // effort: the share is already joined and usable, so a failed
-            // groupInfo() (or a blank name) must not fail the join.
-            if let info = try? await node.groupInfo(), let name = info.name, !name.isEmpty {
-                store.setNickname(name, for: id)
-            }
-            // `storage` owns the callbacks holder and frees it on deinit, but the
-            // node calls back into it during register/activate (saveRootKey,
-            // saveRegistration). Keep it alive until they've all returned so
-            // release-build ARC can't drop it after `restoreOrInit`.
-            withExtendedLifetime(storage) {}
-            // Activation has now persisted, so prime the share's status from a
-            // fresh (activated) node — otherwise the roster keeps the "CHECKING"
-            // that a status poll fired mid-join (before activation landed) left.
-            await status.refresh([id], using: sessions, store: store)
-            return id
+            client = try Client(config: ClientConfig(
+                dataDir: Self.dataDirectory().path,
+                secrets: KeychainSecretStore(),
+                observer: relay
+            ))
         } catch {
-            // Roll back the partial join. `logoutAndDiscard` deregisters from the
-            // hub iff a registration actually persisted (so it undoes a completed
-            // `register` even when `activate` then failed) and no-ops for failures
-            // that never reached the hub; `wipe` then clears local secrets + the
-            // roster entry.
-            await sessions.logoutAndDiscard(id)
-            wipe(id)
-            throw error
+            // Without a client there is nothing this app can do; surface it.
+            fatalError("could not start the Wispers Access SDK: \(error)")
         }
+        let manager = ShareManager(client: client)
+        relay.onChange = { [weak manager] in manager?.reload() }
+        manager.reload()
+        return manager
     }
 
-    /// Removes a share: tears down any open browse session and drops it from the
-    /// roster immediately (so the UI updates at once), then best-effort logs the
-    /// node out of the hub — deregistering this device — and wipes its Keychain
-    /// secrets. Local removal is instant; hub deregistration tolerates being
-    /// offline.
-    func delete(_ id: ShareID) {
-        // Stop the warm browse session first: its loopback proxy holds the node
-        // we're about to log out, and leaving it up would leak the proxy (and show
-        // a broken page if its browser is on screen).
+    func share(_ id: ShareId) -> Share? {
+        shares.first { $0.id == id }
+    }
+
+    /// Joins a share from an invite code. The SDK does the work and rolls a
+    /// failed join back; this reports the two steps the UI shows.
+    @discardableResult
+    func join(inviteCode: String, onStep: (JoinStep) -> Void = { _ in }) async throws -> Share {
+        guard let client else { throw DemoMode.NotAvailable() }
+        onStep(.validating)
+        _ = try validateInvite(inviteCode: inviteCode.trimmingCharacters(in: .whitespacesAndNewlines))
+        onStep(.joining)
+        let share = try await client.join(inviteCode: inviteCode.trimmingCharacters(in: .whitespacesAndNewlines))
+        reload()
+        activity.markConnected(share.id)
+        await status.refresh([share], using: client, activity: activity)
+        return share
+    }
+
+    /// Removes a share: tears down its open browse sessions and drops it from
+    /// the roster at once, then lets the SDK leave it, which tells the host
+    /// node where it can and forgets the share and its secrets either way.
+    func delete(_ id: ShareId) {
         browser.close(id)
         icons.remove(id)
-        store.remove(id)
+        activity.remove(id)
+        shares.removeAll { $0.id == id }
+        guard let client else { return }
         Task {
-            await sessions.logoutAndDiscard(id)
-            try? KeychainShareStore(shareID: id.value).deleteAll()
+            do {
+                try await client.leave(share: id)
+            } catch {
+                Logger.app.error("leaving share \(id) failed: \(error)")
+            }
+            reload()
         }
     }
 
-    /// A `NodeStorage` for the share, already pointed at the share's self-hosted
-    /// hub if it has one. `overrideHubAddr` is applied *before* the caller runs
-    /// `restoreOrInit()`: restoring a registered node contacts the hub
-    /// immediately, so the override has to be in place first.
-    func storageFor(_ id: ShareID) throws -> NodeStorage {
-        let storage = NodeStorage.withCallbacks(KeychainShareStore(shareID: id.value))
-        if let backend = store.backend(for: id) {
-            try storage.overrideHubAddr(backend)
+    /// Re-reads the roster from the SDK's store.
+    func reload() {
+        guard let client else { return }
+        do {
+            shares = try client.shares()
+        } catch {
+            Logger.app.error("reading shares failed: \(error)")
         }
-        return storage
-    }
-
-    private func wipe(_ id: ShareID) {
-        try? KeychainShareStore(shareID: id.value).deleteAll()
-        store.remove(id)
     }
 }
 
-/// The steps a join walks through, in order, for the add-share progress UI.
-/// Each `join` reports the step it's *entering*; steps before it are done.
+/// The steps a join walks through, for the add-share progress UI. Each `join`
+/// reports the step it's *entering*; steps before it are done.
 enum JoinStep: Int, CaseIterable {
     case validating
-    case initializing
-    case registering
-    case activating
+    case joining
 
     var label: String {
         switch self {
         case .validating: "Validating invitation code…"
-        case .initializing: "Generating node identity…"
-        case .registering: "Registering…"
-        case .activating: "Activating…"
+        case .joining: "Joining through the host…"
         }
+    }
+}
+
+/// The SDK's observer, called from its threads: hops to the main actor and
+/// tells the manager to reload.
+nonisolated final class ShareChangeRelay: Observer, @unchecked Sendable {
+    var onChange: @MainActor () -> Void = {}
+
+    func onShareChanged(share: Share) {
+        Task { @MainActor in self.onChange() }
+    }
+}
+
+extension Share: @retroactive Identifiable {}
+
+extension ShareManager {
+    /// The SDK's state lives under Application Support, apart from the files
+    /// the pre-SDK app wrote there.
+    static func dataDirectory() -> URL {
+        FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("sdk")
     }
 }

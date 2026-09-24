@@ -1,35 +1,46 @@
 import Foundation
 import Observation
 import WebKit
+import WispersAccessSdk
 
-/// One live share-browsing session: its loopback proxy and a retained
+/// One app of one share, as the browse sessions tell them apart.
+struct BrowseKey: Hashable, Sendable {
+    let shareID: ShareId
+    let appID: String
+}
+
+/// One live browsing session: an app's URL on the SDK's proxy and a retained
 /// `WKWebView`, kept alive so the page persists while the user is on another
 /// share or back on the list. The iOS answer to Android's per-share task —
 /// concurrency lives in-app rather than in the OS switcher.
 @MainActor
 @Observable
 final class BrowseSession: Identifiable {
-    let shareID: ShareID
+    let key: BrowseKey
     let name: String
-    nonisolated var id: ShareID { shareID }
+    nonisolated var id: BrowseKey { key }
 
     private(set) var url: URL?
     var isLoading = true
     private(set) var startupError: String?
 
     @ObservationIgnored let webView: WKWebView
-    @ObservationIgnored private let proxy: LoopbackProxy
+    @ObservationIgnored private let proxy: PerAppProxy
+    @ObservationIgnored private let auth: ProxyAuth
     @ObservationIgnored private let loadObserver = WebViewLoadObserver()
     @ObservationIgnored private let harvester: IconHarvester
 
     init(
-        share: ShareMetadata,
-        sessionManager: SessionManager,
-        onIcon: @escaping (ShareID, Data, Int) -> Void = { _, _, _ in }
+        share: Share,
+        app: App,
+        proxy: PerAppProxy,
+        auth: ProxyAuth,
+        onIcon: @escaping (ShareId, Data, Int) -> Void = { _, _, _ in }
     ) {
-        self.shareID = share.id
-        self.name = share.nickname.isEmpty ? "Untitled app" : share.nickname
-        self.proxy = LoopbackProxy(shareID: share.id, sessions: sessionManager)
+        self.key = BrowseKey(shareID: share.id, appID: app.id)
+        self.name = app.name.isEmpty ? share.name : app.name
+        self.proxy = proxy
+        self.auth = auth
         self.harvester = IconHarvester(shareID: share.id, onIcon: onIcon)
 
         let configuration = WKWebViewConfiguration()
@@ -47,7 +58,8 @@ final class BrowseSession: Identifiable {
         }
     }
 
-    /// Starts the proxy and points the web view at it.
+    /// Asks the proxy for the app's URL, which binds its port on first use,
+    /// and points the web view at it.
     func start() {
         startupError = nil
         isLoading = true
@@ -57,9 +69,9 @@ final class BrowseSession: Identifiable {
                 // Install the proxy-auth cookie before the first load; without
                 // it the proxy 403s the web view like any other local process.
                 await webView.configuration.websiteDataStore.httpCookieStore
-                    .setCookie(ProxyAuth.shared.cookie())
-                let port = try await proxy.start()
-                let url = URL(string: "http://127.0.0.1:\(port)/")
+                    .setCookie(auth.cookie())
+                let base = try await proxy.baseUrl(share: key.shareID, appId: key.appID)
+                let url = URL(string: base + "/")
                 self.url = url
                 if let url { webView.load(URLRequest(url: url)) }
             } catch {
@@ -70,9 +82,9 @@ final class BrowseSession: Identifiable {
 
     func reload() { webView.reload() }
 
-    /// Tears the session down (proxy stops; the web view is released with it).
+    /// Tears the session down; the web view is released with it. The app's
+    /// port stays bound in the proxy, as ports are per app, not per session.
     func stop() {
-        proxy.stop()
         // Break the userContentController → handler retention explicitly; the web
         // view is about to be released, but this keeps teardown tidy.
         webView.configuration.userContentController.removeScriptMessageHandler(forName: IconHarvester.messageName)

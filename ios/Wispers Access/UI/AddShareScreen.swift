@@ -1,11 +1,11 @@
 import SwiftUI
+import WispersAccessSdk
 
-/// Join a share by pasting its `wax_` invite code or scanning its QR. The idle
-/// state offers both; once joining starts it shows step-by-step progress
-/// (Validating → Generating identity → Registering → Activating), and on success
-/// a "Joined" summary with Open / Back. The join itself lives in `ShareManager`
-/// (single source of truth incl. rollback); this screen only drives the UI from
-/// the steps it reports.
+/// Join a share by pasting its invite code or scanning its QR. The idle state
+/// offers both; once joining starts it shows step progress (Validating →
+/// Joining), and on success a "Joined" summary with Open / Back. The join
+/// itself is the SDK's, through `ShareManager`; this screen only drives the UI
+/// from the steps it reports.
 struct AddShareScreen: View {
     @Environment(ShareManager.self) private var manager
     @Environment(BrowseRouter.self) private var router
@@ -43,8 +43,8 @@ struct AddShareScreen: View {
         case .joining(let current):
             JoinStepList(steps: JoinStep.allCases.map { ($0.label, stepStatus($0, current: current)) })
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        case .joined(let id, let nickname):
-            JoinSuccess(nickname: nickname, onOpen: { open(id) }, onBackToList: { dismiss() })
+        case .joined(let share):
+            JoinSuccess(nickname: share.name, onOpen: { open(share.id) }, onBackToList: { dismiss() })
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
     }
@@ -75,7 +75,7 @@ struct AddShareScreen: View {
                 .font(.caption.weight(.medium)).tracking(1)
                 .foregroundStyle(AccessColor.onSurfaceVariant)
 
-            TextField("wax_…", text: $code, axis: .vertical)
+            TextField("wax1_…", text: $code, axis: .vertical)
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.body.monospaced())
@@ -109,18 +109,20 @@ struct AddShareScreen: View {
         }
     }
 
-    /// Shows which backend the pasted code points at — so a self-hosted invite
-    /// announces itself — but only once the code parses.
+    /// Shows which transport the pasted code rides, but only once it parses.
     @ViewBuilder private var backendNote: some View {
-        if let invite = try? InviteCode.parse(code) {
-            if let backend = invite.backend {
-                Label("Self-hosted: \(backend)", systemImage: "server.rack")
-                    .font(.caption).foregroundStyle(AccessColor.onSurfaceVariant)
-                    .lineLimit(1).truncationMode(.middle)
-            } else {
-                Label("Managed backend", systemImage: "checkmark.seal")
-                    .font(.caption).foregroundStyle(AccessColor.onSurfaceVariant)
-            }
+        if let transport = try? validateInvite(inviteCode: trimmedCode) {
+            Label(Self.describe(transport), systemImage: "point.3.connected.trianglepath.dotted")
+                .font(.caption).foregroundStyle(AccessColor.onSurfaceVariant)
+                .lineLimit(1).truncationMode(.middle)
+        }
+    }
+
+    private static func describe(_ transport: Transport) -> String {
+        switch transport {
+        case .wispersConnect: "Via Wispers Connect"
+        case .iroh: "Peer to peer (iroh)"
+        case .tailscale: "Via Tailscale"
         }
     }
 
@@ -173,24 +175,23 @@ struct AddShareScreen: View {
         // Pre-validate so a bad code shows its real reason inline, without briefly
         // flashing the progress steps.
         do {
-            _ = try InviteCode.parse(code)
+            _ = try validateInvite(inviteCode: trimmedCode)
         } catch {
             errorMessage = error.localizedDescription
             return
         }
         do {
-            let id = try await manager.join(inviteCode: code) { step in
+            let share = try await manager.join(inviteCode: trimmedCode) { step in
                 phase = .joining(step)
             }
-            let nickname = manager.store.metadata(for: id)?.nickname ?? ""
-            phase = .joined(id: id, nickname: nickname)
+            phase = .joined(share)
         } catch {
             phase = .idle
             errorMessage = error.localizedDescription
         }
     }
 
-    private func open(_ id: ShareID) {
+    private func open(_ id: ShareId) {
         // Defer the push to the roster's onDismiss — see BrowseRouter.
         router.openAfterDismiss = id
         dismiss()
@@ -218,7 +219,7 @@ private enum AddTab: Hashable { case enterCode, scanQR }
 private enum JoinPhase {
     case idle
     case joining(JoinStep)
-    case joined(id: ShareID, nickname: String)
+    case joined(Share)
 }
 
 private enum StepStatus { case pending, running, done }

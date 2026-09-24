@@ -6,6 +6,7 @@ use rusqlite_migration::Migrations;
 use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use wire::{App, AppKind, ConfigHash, ShareInfo};
 use wispers_access_wire as wire;
 
@@ -300,6 +301,17 @@ impl Row {
         Ok(())
     }
 
+    /// When this device joined the share.
+    pub fn read_joined_at(&self) -> Result<SystemTime> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let millis: i64 = conn.query_row(
+            "SELECT created_at FROM shares WHERE id = ?1",
+            [self.id],
+            |r| r.get(0),
+        )?;
+        Ok(UNIX_EPOCH + Duration::from_millis(millis.max(0) as u64))
+    }
+
     /// The share as the SDK's API presents it.
     pub fn read_share(&self) -> Result<Share> {
         let (id, name, label) = self.read_names()?;
@@ -319,6 +331,7 @@ impl Row {
             transport: self.read_transport_kind()?,
             apps: self.read_apps()?,
             state,
+            joined_at: self.read_joined_at()?,
         })
     }
 
@@ -443,7 +456,6 @@ fn clean_up_incomplete_rows(conn: &mut rusqlite::Connection) -> Result<()> {
 }
 
 fn now_millis() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("system clock is before the Unix epoch")

@@ -1,74 +1,85 @@
 import Foundation
 import Observation
+import WispersAccessSdk
 
 /// Availability of a share for the status dot and labels. `.checking`, `.online`,
 /// `.offline` and `.unknown` are transient observations; `.removed` / `.revoked`
-/// are terminal — the hub has definitively rejected this device.
+/// are terminal — the host node has definitively turned this device away.
 enum Availability {
     case checking  // not yet checked
     case online
     case offline
-    case unknown  // check failed — typically the hub is unreachable
+    case unknown  // check failed for a reason other than the host node saying no
     case removed
     case revoked
 }
 
-extension TerminalShareState {
-    /// The persisted terminal state as an availability, for uniform rendering.
-    var availability: Availability {
+extension ShareState {
+    /// The SDK's terminal states as availabilities; nil while live.
+    var availability: Availability? {
         switch self {
-        case .removed: return .removed
-        case .revoked: return .revoked
+        case .live: nil
+        case .removed: .removed
+        case .revoked: .revoked
         }
     }
 }
 
-/// Per-share availability, refreshed while a screen is visible. The iOS analog
-/// of Android's `ShareStatusTracker` — a single source the list and detail
-/// screens both read so they can't disagree.
+/// Per-share availability, refreshed while a screen is visible: a single
+/// source the list and detail screens both read so they can't disagree. A
+/// check is the SDK's `refresh`, which reaches the host node over the share's
+/// transport: an answer means online, a refusal offline.
 @Observable
 @MainActor
 final class ShareStatusStore {
     /// Absent key = not checked yet.
-    private(set) var statuses: [ShareID: Availability] = [:]
+    private(set) var statuses: [ShareId: Availability] = [:]
 
-    func availability(for id: ShareID) -> Availability {
+    func availability(for id: ShareId) -> Availability {
         statuses[id] ?? .checking
     }
 
-    /// Refreshes every id concurrently, each under its own deadline so one
-    /// blackholing hub (an unreachable self-hosted backend hangs the connect
-    /// for minutes) can't wedge the others. A terminal result is persisted to
-    /// `store`, and terminal shares are skipped — that state is forever.
-    func refresh(_ ids: [ShareID], using sessions: SessionManager, store: ShareStore) async {
-        // Demo roster: fixed statuses, no hub to poll.
-        if DemoMode.active {
+    /// Refreshes every live share concurrently, each under its own deadline
+    /// so one unreachable host node can't wedge the others. Terminal shares
+    /// are skipped: the SDK's store already knows.
+    func refresh(_ shares: [Share], using client: Client?, activity: ShareActivityStore) async {
+        // Demo roster: fixed statuses, no host to poll.
+        guard let client else {
             statuses = DemoMode.statuses
             return
         }
-        let live = ids.filter { store.metadata(for: $0)?.terminalState == nil }
-        await withTaskGroup(of: (ShareID, Availability).self) { group in
-            for id in live {
+        let live = shares.filter { $0.state == .live }
+        await withTaskGroup(of: (ShareId, Availability).self) { group in
+            for share in live {
                 group.addTask {
-                    let availability =
-                        (try? await withDeadline(seconds: Self.checkTimeout) {
-                            await sessions.checkAvailability(id)
-                        }) ?? .unknown
-                    return (id, availability)
+                    let availability = await Self.check(share.id, using: client)
+                    return (share.id, availability)
                 }
             }
             for await (id, availability) in group {
                 statuses[id] = availability
-                switch availability {
-                case .removed: store.markTerminal(id, .removed)
-                case .revoked: store.markTerminal(id, .revoked)
-                default: break
-                }
+                if availability == .online { activity.markConnected(id) }
             }
         }
     }
 
-    /// Generous per-share deadline: a healthy hub answers in well under a
-    /// second; only a blackholing connect runs into this.
+    private static func check(_ id: ShareId, using client: Client) async -> Availability {
+        do {
+            let changed = try await withDeadline(seconds: checkTimeout) {
+                try await client.refresh(share: id)
+            }
+            return changed?.state.availability ?? .online
+        } catch let error as SdkError {
+            switch error {
+            case .HostNode: return .offline
+            default: return .unknown
+            }
+        } catch {
+            return .unknown
+        }
+    }
+
+    /// Generous per-share deadline: a reachable host node answers in well
+    /// under a second; only a blackholing connect runs into this.
     private static let checkTimeout: Double = 10
 }

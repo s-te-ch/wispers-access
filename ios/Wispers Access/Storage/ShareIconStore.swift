@@ -1,5 +1,6 @@
 import Foundation
 import Observation
+import WispersAccessSdk
 
 /// Per-share site icons harvested while browsing (web-app-manifest icon /
 /// apple-touch-icon / favicon), kept as image bytes plus the rank-ladder rung
@@ -20,21 +21,21 @@ final class ShareIconStore {
     }
 
     /// The cached icon bytes for a share, if any — feeds `ShareAvatar`.
-    func iconData(for id: ShareID) -> Data? { records[id.value]?.png }
+    func iconData(for id: ShareId) -> Data? { records[id]?.png }
 
     /// The rank of the cached icon (0 if none) — the bar a new one must beat.
-    func rank(for id: ShareID) -> Int { records[id.value]?.rank ?? 0 }
+    func rank(for id: ShareId) -> Int { records[id]?.rank ?? 0 }
 
     /// Stores a harvested icon, but only if it out-ranks what's cached (a higher
     /// rung of the ladder). The caller has already validated the bytes decode.
-    func update(_ png: Data, rank: Int, for id: ShareID) {
+    func update(_ png: Data, rank: Int, for id: ShareId) {
         guard rank > self.rank(for: id) else { return }
-        records[id.value] = IconRecord(rank: rank, png: png)
+        records[id] = IconRecord(rank: rank, png: png)
         persist()
     }
 
-    func remove(_ id: ShareID) {
-        guard records.removeValue(forKey: id.value) != nil else { return }
+    func remove(_ id: ShareId) {
+        guard records.removeValue(forKey: id) != nil else { return }
         persist()
     }
 

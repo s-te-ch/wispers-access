@@ -1,96 +1,105 @@
 import Foundation
 import Observation
+import WispersAccessSdk
 
-/// App-level set of open browsing sessions — the shares currently "warm". Each
-/// session keeps its loopback proxy + `WKWebView` alive so re-opening a share is
-/// instant and page state persists.
+/// App-level set of open browsing sessions — the apps currently "warm". Each
+/// session keeps its `WKWebView` alive so re-opening is instant and page state
+/// persists.
 ///
 /// iPhone has no per-document task switcher, so the roster doubles as the
-/// switcher: opening a share pushes its browser; backing out to the roster (which
+/// switcher: opening an app pushes its browser; backing out to the roster (which
 /// marks what's live) is how you switch. A backgrounded session is torn down
-/// after a warm-TTL to free resources, so "several shares open at once" holds
-/// without leaking proxies forever.
+/// after a warm-TTL to free resources.
 @MainActor
 @Observable
 final class BrowseSessionStore {
     private(set) var sessions: [BrowseSession] = []
-    /// The share whose browser is currently on screen, if any.
-    private(set) var activeShareID: ShareID?
+    /// The app whose browser is currently on screen, if any.
+    private(set) var active: BrowseKey?
 
     /// How long a backgrounded session stays warm before it's torn down.
     private let warmTTL: Duration = .seconds(300)
-    @ObservationIgnored private var evictionTasks: [ShareID: Task<Void, Never>] = [:]
+    @ObservationIgnored private var evictionTasks: [BrowseKey: Task<Void, Never>] = [:]
 
-    /// Reports a site icon harvested by a session's web view (shareID, bytes, rank).
-    @ObservationIgnored private let onIcon: (ShareID, Data, Int) -> Void
+    /// Reports a site icon harvested by a session's web view (share, bytes, rank).
+    @ObservationIgnored private let onIcon: (ShareId, Data, Int) -> Void
 
-    init(onIcon: @escaping (ShareID, Data, Int) -> Void = { _, _, _ in }) {
+    init(onIcon: @escaping (ShareId, Data, Int) -> Void = { _, _, _ in }) {
         self.onIcon = onIcon
     }
 
-    func session(for shareID: ShareID) -> BrowseSession? {
-        sessions.first { $0.shareID == shareID }
+    func session(for key: BrowseKey) -> BrowseSession? {
+        sessions.first { $0.key == key }
     }
 
-    /// Whether a share has a live (warm) session — drives the roster's live marker.
-    func isWarm(_ shareID: ShareID) -> Bool {
-        sessions.contains { $0.shareID == shareID }
+    /// Whether any of a share's apps has a live (warm) session — drives the
+    /// roster's live marker.
+    func isWarm(_ shareID: ShareId) -> Bool {
+        sessions.contains { $0.key.shareID == shareID }
     }
 
-    /// Ensures a warm session exists for the share and marks it the on-screen one.
-    /// Called by the browser as it appears, so navigating to a share (a row tap,
-    /// or Open from detail) is all it takes to start or resume it.
+    /// Ensures a warm session exists for the app and marks it the on-screen one.
+    /// Called by the browser as it appears, so navigating to an app is all it
+    /// takes to start or resume it.
     @discardableResult
-    func open(_ share: ShareMetadata, using sessionManager: SessionManager) -> BrowseSession {
+    func open(_ share: Share, _ app: App, proxy: PerAppProxy, auth: ProxyAuth) -> BrowseSession {
+        let key = BrowseKey(shareID: share.id, appID: app.id)
         let session: BrowseSession
-        if let existing = self.session(for: share.id) {
+        if let existing = self.session(for: key) {
             session = existing
         } else {
-            session = BrowseSession(share: share, sessionManager: sessionManager, onIcon: onIcon)
+            session = BrowseSession(share: share, app: app, proxy: proxy, auth: auth, onIcon: onIcon)
             sessions.append(session)
             session.start()
         }
-        markActive(share.id)
+        markActive(key)
         return session
     }
 
-    /// Marks a share's browser as on screen: cancels any pending eviction.
-    func markActive(_ shareID: ShareID) {
-        cancelEviction(shareID)
-        activeShareID = shareID
+    /// Marks an app's browser as on screen: cancels any pending eviction.
+    func markActive(_ key: BrowseKey) {
+        cancelEviction(key)
+        active = key
     }
 
-    /// The browser for this share left the screen: start its warm-TTL countdown.
+    /// The browser for this app left the screen: start its warm-TTL countdown.
     /// Re-opening within the TTL cancels it and reuses the warm web view.
-    func resignActive(_ shareID: ShareID) {
-        if activeShareID == shareID { activeShareID = nil }
-        scheduleEviction(shareID)
+    func resignActive(_ key: BrowseKey) {
+        if active == key { active = nil }
+        scheduleEviction(key)
     }
 
-    /// Closes a share now: proxy stops, web view is released, eviction cancelled.
-    func close(_ shareID: ShareID) {
-        cancelEviction(shareID)
-        if let index = sessions.firstIndex(where: { $0.shareID == shareID }) {
+    /// Closes every session of a share now: web views released, evictions
+    /// cancelled. For a share being removed.
+    func close(_ shareID: ShareId) {
+        for session in sessions where session.key.shareID == shareID {
+            close(session.key)
+        }
+    }
+
+    func close(_ key: BrowseKey) {
+        cancelEviction(key)
+        if let index = sessions.firstIndex(where: { $0.key == key }) {
             sessions[index].stop()
             sessions.remove(at: index)
         }
-        if activeShareID == shareID { activeShareID = nil }
+        if active == key { active = nil }
     }
 
-    private func scheduleEviction(_ shareID: ShareID) {
-        cancelEviction(shareID)
+    private func scheduleEviction(_ key: BrowseKey) {
+        cancelEviction(key)
         let ttl = warmTTL
-        evictionTasks[shareID] = Task { [weak self] in
+        evictionTasks[key] = Task { [weak self] in
             try? await Task.sleep(for: ttl)
             guard let self, !Task.isCancelled else { return }
             // Skip if it was re-opened while the timer ran.
-            guard self.activeShareID != shareID else { return }
-            self.close(shareID)
+            guard self.active != key else { return }
+            self.close(key)
         }
     }
 
-    private func cancelEviction(_ shareID: ShareID) {
-        evictionTasks[shareID]?.cancel()
-        evictionTasks[shareID] = nil
+    private func cancelEviction(_ key: BrowseKey) {
+        evictionTasks[key]?.cancel()
+        evictionTasks[key] = nil
     }
 }

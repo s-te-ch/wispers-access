@@ -10,7 +10,7 @@ import SwiftUI
 @main
 struct Wispers_AccessApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
-    @State private var manager = DemoMode.active ? DemoMode.makeManager() : ShareManager()
+    @State private var manager = DemoMode.active ? DemoMode.makeManager() : ShareManager.live()
     @State private var router = {
         let router = BrowseRouter()
         if let route = DemoMode.initialRoute { router.path = [route] }
@@ -21,7 +21,6 @@ struct Wispers_AccessApp: App {
         WindowGroup {
             RootView()
                 .environment(manager)
-                .environment(manager.store)
                 .environment(manager.icons)
                 .environment(router)
                 .environment(QuickActionInbox.shared)

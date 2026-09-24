@@ -1,5 +1,6 @@
 import UIKit
 import Observation
+import WispersAccessSdk
 
 /// Home-screen quick actions: long-press the app icon to jump straight into a
 /// recent share. The dynamic item list is rebuilt from the roster; the selected
@@ -9,28 +10,27 @@ enum QuickAction {
     private static let shareIDKey = "shareID"
 
     /// The target share of an "open share" shortcut, if the item is one of ours.
-    static func shareID(from item: UIApplicationShortcutItem) -> ShareID? {
-        guard item.type == openShareType,
-            let raw = item.userInfo?[shareIDKey] as? String
-        else { return nil }
-        return ShareID(raw)
+    static func shareID(from item: UIApplicationShortcutItem) -> ShareId? {
+        guard item.type == openShareType else { return nil }
+        return item.userInfo?[shareIDKey] as? String
     }
 
     /// The dynamic shortcut list from the roster: most-recently-connected first,
     /// capped to the four the launcher shows. Terminal shares don't get one —
     /// there's nothing to open.
-    static func shortcutItems(for shares: [ShareMetadata]) -> [UIApplicationShortcutItem] {
-        shares
-            .filter { $0.terminalState == nil }
-            .sorted { ($0.lastConnectedAt ?? $0.createdAt) > ($1.lastConnectedAt ?? $1.createdAt) }
+    static func shortcutItems(for shares: [Share], activity: ShareActivityStore) -> [UIApplicationShortcutItem] {
+        let lastUsed = { (share: Share) in activity.lastConnected(share.id) ?? share.joinedAt }
+        return shares
+            .filter { $0.state == .live }
+            .sorted { lastUsed($0) > lastUsed($1) }
             .prefix(4)
             .map { share in
                 UIApplicationShortcutItem(
                     type: openShareType,
-                    localizedTitle: share.nickname.isEmpty ? "Untitled app" : share.nickname,
+                    localizedTitle: share.name.isEmpty ? "Untitled share" : share.name,
                     localizedSubtitle: nil,
                     icon: UIApplicationShortcutIcon(systemImageName: "globe"),
-                    userInfo: [shareIDKey: share.id.value as NSString]
+                    userInfo: [shareIDKey: share.id as NSString]
                 )
             }
     }
@@ -43,7 +43,7 @@ enum QuickAction {
 @Observable
 final class QuickActionInbox {
     static let shared = QuickActionInbox()
-    var pendingShareID: ShareID?
+    var pendingShareID: ShareId?
 
     nonisolated init() {}
 

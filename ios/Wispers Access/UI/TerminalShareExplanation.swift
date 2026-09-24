@@ -1,14 +1,15 @@
 import SwiftUI
+import WispersAccessSdk
 
 /// Explains a terminal share: what happened and that only removal remains.
 /// Mirrors the Android `TerminalShareExplanation`, so the story reads the same
 /// on both platforms.
 struct TerminalShareExplanation: View {
-    let state: TerminalShareState
+    let state: ShareState
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("This app is no longer available")
+            Text("This share is no longer available")
                 .font(.headline)
                 .foregroundStyle(AccessColor.onSurface)
             Text(explanation)
@@ -24,9 +25,11 @@ struct TerminalShareExplanation: View {
         let what: String
         switch state {
         case .removed:
-            what = "The app was removed by its owner and can't be reached anymore."
+            what = "The share was removed by its host and can't be reached anymore."
         case .revoked:
-            what = "This device's access to the app was revoked by its owner."
+            what = "This device's access was revoked by the share's host."
+        case .live:
+            what = "The share is available."
         }
         return what + " You can remove it from this device; joining again needs a new invitation code."
     }

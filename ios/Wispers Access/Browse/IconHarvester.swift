@@ -1,5 +1,6 @@
 import UIKit
 import WebKit
+import WispersAccessSdk
 
 /// Harvests a browsed site's best icon and reports it via `onIcon`. A
 /// `WKScriptMessageHandler` that receives the page's pick — chosen by injected
@@ -13,10 +14,10 @@ import WebKit
 final class IconHarvester: NSObject, WKScriptMessageHandler {
     static let messageName = "waIcon"
 
-    private let shareID: ShareID
-    private let onIcon: (ShareID, Data, Int) -> Void
+    private let shareID: ShareId
+    private let onIcon: (ShareId, Data, Int) -> Void
 
-    init(shareID: ShareID, onIcon: @escaping (ShareID, Data, Int) -> Void) {
+    init(shareID: ShareId, onIcon: @escaping (ShareId, Data, Int) -> Void) {
         self.shareID = shareID
         self.onIcon = onIcon
     }
