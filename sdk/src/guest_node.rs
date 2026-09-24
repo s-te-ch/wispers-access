@@ -1,25 +1,22 @@
-//! Share management logic.
+//! This device's node in one share, and the guest API it speaks.
 
-use crate::storage::{self, ShareId};
+use crate::storage;
 use crate::transports::{Stream, TerminalState, Transport, TransportError};
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
 use hyper::StatusCode;
 use hyper::client::conn::http1 as http1_client;
 use hyper_util::rt::TokioIo;
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
-use wire::{App, ConfigHash, ShareInfo};
+use std::sync::Mutex;
+use wire::{ConfigHash, ShareInfo};
 use wispers_access_wire as wire;
 
-/// A share this client has joined. Manages share metadata (e.g. the list of
-/// apps) and the transport used to communicate with the share's host node,
-/// makes guest-API calls to the host node as needed.
-pub struct Share {
+/// This device's guest node in one share: its transport to the host node,
+/// its row in the store, and the guest API calls it makes. Restored on the
+/// share's first use, by `Client::guest_node`.
+pub struct GuestNode {
     /// The `<share>` label in `<app>.<share>.localhost`.
     label: String,
-    id: ShareId,
-    display_name: String,
     row: storage::Row,
     transport: Box<dyn Transport>,
     /// Set once the transport reports a terminal failure mid-session. From
@@ -27,18 +24,10 @@ pub struct Share {
     dead: Mutex<Option<TerminalState>>,
 }
 
-impl Share {
-    pub fn new(
-        label: String,
-        id: ShareId,
-        display_name: String,
-        row: storage::Row,
-        transport: Box<dyn Transport>,
-    ) -> Self {
+impl GuestNode {
+    pub fn new(label: String, row: storage::Row, transport: Box<dyn Transport>) -> Self {
         Self {
             label,
-            id,
-            display_name,
             row,
             transport,
             dead: Mutex::new(None),
@@ -47,20 +36,6 @@ impl Share {
 
     pub fn label(&self) -> &str {
         &self.label
-    }
-
-    pub fn display_name(&self) -> &str {
-        &self.display_name
-    }
-
-    /// The host node as the transport identifies it, for humans.
-    pub fn describe_transport(&self) -> String {
-        self.transport.describe()
-    }
-
-    /// The apps as last fetched from the host node.
-    pub fn apps(&self) -> Result<Vec<App>> {
-        self.row.read_apps()
     }
 
     /// Opens a DATA stream for one app, ready for the HTTP request.
@@ -72,12 +47,12 @@ impl Share {
         Ok(stream)
     }
 
-    /// Asks the host node for the app list if it changed since the stored
-    /// one, and stores the answer. `None` = unchanged.
-    pub async fn refresh(&self) -> Result<Option<ShareInfo>> {
+    /// Asks the host node for the share if it changed since the stored copy,
+    /// and stores the answer. `None` = unchanged.
+    pub async fn refresh(&self) -> Result<Option<ShareInfo>, RefreshError> {
         let stream = self.open_stream().await.map_err(|e| match e {
-            TransportError::Terminal(state) => anyhow::anyhow!("{}", state.describe()),
-            TransportError::Transient(e) => e,
+            TransportError::Terminal(_) => RefreshError::Terminal,
+            TransportError::Transient(e) => RefreshError::Transient(e),
         })?;
         let known = self.row.read_share_config_hash()?;
         let info = fetch_info(stream, known).await?;
@@ -106,6 +81,19 @@ impl Share {
             }
             other => other,
         }
+    }
+}
+
+pub enum RefreshError {
+    /// The host node has turned this device away for good. The store has
+    /// the state.
+    Terminal,
+    Transient(anyhow::Error),
+}
+
+impl From<anyhow::Error> for RefreshError {
+    fn from(e: anyhow::Error) -> Self {
+        RefreshError::Transient(e)
     }
 }
 
@@ -199,48 +187,4 @@ async fn read_share(resp: hyper::Response<hyper::body::Incoming>) -> Result<Shar
         .context("reading the share")?
         .to_bytes();
     serde_json::from_slice(&body).context("parsing the share")
-}
-
-//-- Registry ------------------------------------------------------------------
-
-/// ShareRegistry manages all shares this client has joined.
-#[derive(Default)]
-pub struct ShareRegistry {
-    live: HashMap<String, Arc<Share>>,
-    by_id: HashMap<String, String>,
-    dead: HashMap<String, TerminalState>,
-}
-
-pub enum Lookup {
-    Live(Arc<Share>),
-    Dead(TerminalState),
-    Unknown,
-}
-
-impl ShareRegistry {
-    pub fn insert(&mut self, share: Share) {
-        self.by_id.insert(share.id.to_string(), share.label.clone());
-        self.live.insert(share.label.clone(), Arc::new(share));
-    }
-
-    pub fn insert_dead(&mut self, label: String, id: ShareId, state: TerminalState) {
-        self.by_id.insert(id.to_string(), label.clone());
-        self.dead.insert(label, state);
-    }
-
-    /// By label, or by share id.
-    pub fn get(&self, key: &str) -> Lookup {
-        let label = self.by_id.get(key).map(String::as_str).unwrap_or(key);
-        if let Some(share) = self.live.get(label) {
-            return Lookup::Live(share.clone());
-        }
-        if let Some(state) = self.dead.get(label) {
-            return Lookup::Dead(*state);
-        }
-        Lookup::Unknown
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &Arc<Share>> {
-        self.live.values()
-    }
 }

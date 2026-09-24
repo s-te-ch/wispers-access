@@ -1,9 +1,9 @@
-//! Persistent storage for waclient.
+//! The SDK's store: one SQLite file per client.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use rusqlite_migration::Migrations;
 use std::fs;
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 use wire::{App, AppKind, ConfigHash, ShareInfo};
 use wispers_access_wire as wire;
@@ -34,8 +34,9 @@ impl std::fmt::Display for ShareId {
 }
 
 impl DB {
-    pub fn new() -> Result<Arc<Self>> {
-        let conn = open_db()?;
+    /// Opens `state.db` under `dir`, creating both as needed.
+    pub fn open(dir: &Path) -> Result<Arc<Self>> {
+        let conn = open_db(dir)?;
         let db = DB {
             conn: Mutex::new(conn),
         };
@@ -423,8 +424,7 @@ fn to_wc_error(e: rusqlite::Error) -> wc::StorageError {
     wc::StorageError::Io(std::io::Error::other(e))
 }
 
-fn open_db() -> Result<rusqlite::Connection> {
-    let dir = base_dir()?;
+fn open_db(dir: &Path) -> Result<rusqlite::Connection> {
     let db_path = dir.join("state.db");
     fs::create_dir_all(dir)?;
     let conn = rusqlite::Connection::open(db_path)?;
@@ -439,11 +439,6 @@ fn prepare(mut conn: rusqlite::Connection) -> Result<rusqlite::Connection> {
     migrations().to_latest(&mut conn)?;
     clean_up_incomplete_rows(&mut conn)?;
     Ok(conn)
-}
-
-fn base_dir() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().context("could not determine config directory")?;
-    Ok(config_dir.join("waclient"))
 }
 
 fn migrations() -> Migrations<'static> {

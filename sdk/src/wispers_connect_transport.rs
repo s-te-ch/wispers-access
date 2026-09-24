@@ -1,6 +1,6 @@
 //! The Wispers Connect transport implementation.
 
-use crate::shares;
+use crate::guest_node;
 use crate::storage;
 use crate::transports::{BoxFuture, Stream, TerminalState, Transport, TransportError};
 use anyhow::{Context, Result};
@@ -65,7 +65,7 @@ async fn activate_and_fetch(
         .await
         .context("connecting to the host node")?;
     let stream = conn.open_stream().await.context("opening a stream")?;
-    let info = shares::fetch_info(Box::new(stream), None)
+    let info = guest_node::fetch_info(Box::new(stream), None)
         .await?
         .context("the host node answered 304 to an unconditional request")?;
     row.write_backend(backend)?;
@@ -172,20 +172,6 @@ impl WispersConnect {
 }
 
 impl Transport for WispersConnect {
-    fn describe(&self) -> String {
-        format!(
-            "Wispers Connect group {}, node {}",
-            self.node
-                .connectivity_group_id()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "?".to_owned()),
-            self.node
-                .node_number()
-                .map(|n| n.to_string())
-                .unwrap_or_else(|| "?".to_owned())
-        )
-    }
-
     fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>> {
         Box::pin(async {
             // One retry covers a connection that died and had to be

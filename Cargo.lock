@@ -4704,13 +4704,11 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "clap",
+ "dirs",
  "libc",
- "rustls",
- "slug",
  "tabwriter",
  "tokio",
  "wispers-access-sdk",
- "wispers-access-wire",
 ]
 
 [[package]]
@@ -5422,14 +5420,15 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bytes",
- "dirs",
  "http-body-util",
  "hyper",
  "hyper-util",
  "iroh",
  "rusqlite",
  "rusqlite_migration",
+ "rustls",
  "serde_json",
+ "slug",
  "tokio",
  "uuid",
  "wispers-access-wire",

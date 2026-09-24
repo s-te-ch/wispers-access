@@ -77,9 +77,6 @@ pub trait Transport: Send + Sync {
     /// Opens a fresh stream, connecting or reconnecting as needed. A passing
     /// failure is retried once; a final one is reported as such.
     fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>>;
-
-    /// How this transport identifies the host, for humans.
-    fn describe(&self) -> String;
 }
 
 pub enum TransportError {

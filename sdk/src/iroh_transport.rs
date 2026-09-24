@@ -1,6 +1,6 @@
 //! The iroh transport implementation.
 
-use crate::shares;
+use crate::guest_node;
 use crate::storage;
 use crate::transports::{BoxFuture, Stream, TerminalState, Transport, TransportError};
 use anyhow::{Context, Result};
@@ -25,7 +25,7 @@ pub async fn join(
         TransportError::Transient(e) => e.context("connecting to the Wispers Access host"),
     })?;
     println!("Activating...");
-    let info = shares::activate(stream, secret).await?;
+    let info = guest_node::activate(stream, secret).await?;
     row.write_iroh_state(&storage::IrohState {
         secret_key: key.to_bytes(),
         host_endpoint_id: host.to_string(),
@@ -43,7 +43,7 @@ pub async fn leave(row: &storage::Row) {
     let attempt = async {
         let transport = Iroh::restore(row).await.map_err(describe)?;
         let stream = transport.open_stream().await.map_err(describe)?;
-        shares::leave(stream).await?;
+        guest_node::leave(stream).await?;
         // Close properly, so the host node sees us go rather than time out.
         transport.endpoint.close().await;
         Ok::<(), anyhow::Error>(())
@@ -150,10 +150,6 @@ impl Iroh {
 }
 
 impl Transport for Iroh {
-    fn describe(&self) -> String {
-        format!("iroh endpoint {}", self.host)
-    }
-
     fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>> {
         Box::pin(async {
             match self.try_open_stream().await {

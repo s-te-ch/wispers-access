@@ -3,8 +3,8 @@
 //! The user's browser talks to `http://<app>.<share>.localhost:<port>`, and
 //! every request becomes one DATA stream to the share's host node.
 
-use crate::shares::{Lookup, ShareRegistry};
 use crate::transports::{TerminalState, TransportError};
+use crate::{Client, Lookup};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
@@ -14,23 +14,24 @@ use hyper::client::conn::http1 as http1_client;
 use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
-use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 
-/// Binds the loopback port and serves every connection against `registry`.
-/// Returns only when the port cannot be bound.
-pub async fn serve(port: u16, registry: Arc<ShareRegistry>) -> Result<()> {
+/// Binds the loopback port. `0` picks a free one.
+pub async fn bind_loopback_port(port: u16) -> Result<TcpListener> {
     let bind_addr = format!("localhost:{}", port);
-    let listener = TcpListener::bind(&bind_addr)
+    TcpListener::bind(&bind_addr)
         .await
-        .with_context(|| format!("failed to bind to {}", bind_addr))?;
-    println!("Listening on {}", bind_addr);
+        .with_context(|| format!("failed to bind to {}", bind_addr))
+}
+
+/// Serves every connection against the client's shares, until cancelled.
+pub async fn accept_loop(listener: TcpListener, client: Client) {
     loop {
         match listener.accept().await {
             Ok((tcp_stream, _)) => {
-                let registry = registry.clone();
+                let client = client.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(tcp_stream, registry).await {
+                    if let Err(e) = handle_connection(tcp_stream, client).await {
                         eprintln!("Connection error: {:#}", e);
                     }
                 });
@@ -42,9 +43,9 @@ pub async fn serve(port: u16, registry: Arc<ShareRegistry>) -> Result<()> {
     }
 }
 
-async fn handle_connection(tcp_stream: TcpStream, registry: Arc<ShareRegistry>) -> Result<()> {
+async fn handle_connection(tcp_stream: TcpStream, client: Client) -> Result<()> {
     let tcp_stream = TokioIo::new(tcp_stream);
-    let service = hyper::service::service_fn(move |req| forward(req, registry.clone()));
+    let service = hyper::service::service_fn(move |req| forward(req, client.clone()));
     let served = http1_server::Builder::new()
         .serve_connection(tcp_stream, service)
         // Allow a 101 to hand the browser socket over for raw relaying (WebSocket).
@@ -65,7 +66,7 @@ type BoxedBody = BoxBody<Bytes, std::io::Error>;
 
 async fn forward(
     mut req: hyper::Request<Incoming>,
-    registry: Arc<ShareRegistry>,
+    client: Client,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
     // Determine the share and app...
     let Ok(host) = extract_host(&req) else {
@@ -78,13 +79,20 @@ async fn forward(
         Ok(target) => target,
         Err(e) => return Ok(error_response(StatusCode::NOT_FOUND, &e.to_string())),
     };
-    let share = match registry.get(&share) {
-        Lookup::Live(share) => share,
-        Lookup::Dead(state) => return Ok(gone(state)),
-        Lookup::Unknown => {
+    let share = match client.guest_node(&share).await {
+        Ok(Lookup::Live(share)) => share,
+        Ok(Lookup::Dead(state)) => return Ok(gone(state)),
+        Ok(Lookup::Unknown) => {
             return Ok(error_response(
                 StatusCode::NOT_FOUND,
-                &format!("unknown share '{}' (see 'waclient list')", share),
+                &format!("unknown share '{}'", share),
+            ));
+        }
+        Err(e) => {
+            eprintln!("[{}] could not restore the share: {:#}", share, e);
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                "Wispers Access server unavailable",
             ));
         }
     };
@@ -168,7 +176,7 @@ async fn forward(
         );
         let share = share.clone();
         tokio::spawn(async move {
-            if let Err(e) = share.refresh().await {
+            if let Err(crate::guest_node::RefreshError::Transient(e)) = share.refresh().await {
                 eprintln!(
                     "[{}] could not refresh the app list: {:#}",
                     share.label(),
@@ -256,7 +264,7 @@ fn extract_target(host: &str) -> Result<(String, String)> {
             Ok(((*app).to_owned(), (*share).to_owned()))
         }
         _ => anyhow::bail!(
-            "unknown host {}: apps are served at http://<app>.<share>.localhost:<port> (see 'waclient list')",
+            "unknown host {}: apps are served at http://<app>.<share>.localhost:<port>",
             host
         ),
     }
