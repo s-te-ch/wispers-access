@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use wire::{App, AppKind, ConfigHash, ShareInfo};
+use wire::{AppKind, ConfigHash, ShareInfo, SharedApp};
 use wispers_access_wire as wire;
 
 pub struct DB {
@@ -268,13 +268,13 @@ impl Row {
     }
 
     /// The apps as last fetched, in the host node's order.
-    pub fn read_apps(&self) -> Result<Vec<App>> {
+    pub fn read_apps(&self) -> Result<Vec<SharedApp>> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
         let mut stmt = conn
             .prepare("SELECT app_id, name, kind FROM apps WHERE share_id = ?1 ORDER BY position")?;
         let apps = stmt
             .query_map([self.id], |r| {
-                Ok(App {
+                Ok(SharedApp {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     kind: AppKind::parse_or_web(&r.get::<_, String>(2)?),
@@ -490,12 +490,12 @@ mod tests {
             name: "Family".into(),
             transport: "wispers-connect".into(),
             apps: vec![
-                App {
+                SharedApp {
                     id: "jf".into(),
                     name: "Jellyfin".into(),
                     kind: AppKind::Jellyfin,
                 },
-                App {
+                SharedApp {
                     id: "photos".into(),
                     name: "Photos".into(),
                     kind: AppKind::Web,

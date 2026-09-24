@@ -204,7 +204,7 @@ private struct ShareHeader: View {
 /// One app's card: its icon (harvested while browsing, else a letter tile)
 /// and name. The thing the user taps.
 private struct AppCard: View {
-    let app: WispersAccessSdk.App
+    let app: SharedApp
     let isLive: Bool
     let iconData: Data?
 

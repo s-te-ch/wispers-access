@@ -93,7 +93,7 @@ async fn join(client: &sdk::Client, invite_code: &str) -> Result<()> {
     Ok(())
 }
 
-fn describe_apps(apps: &[sdk::App]) -> String {
+fn describe_apps(apps: &[sdk::SharedApp]) -> String {
     if apps.is_empty() {
         return "none yet".to_owned();
     }
@@ -235,12 +235,12 @@ mod tests {
     #[test]
     fn app_descriptions_skip_redundant_names() {
         let apps = vec![
-            sdk::App {
+            sdk::SharedApp {
                 id: "echo".into(),
                 name: "echo".into(),
                 kind: sdk::AppKind::Web,
             },
-            sdk::App {
+            sdk::SharedApp {
                 id: "jf".into(),
                 name: "Jellyfin".into(),
                 kind: sdk::AppKind::Jellyfin,

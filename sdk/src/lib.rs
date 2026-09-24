@@ -3,7 +3,7 @@
 //! calls, and the loopback HTTP proxy.
 //!
 //! The entry point is [`Client`], one per data directory. The wire types an
-//! integrator meets ([`App`], [`Transport`]) are re-exported from the wire
+//! integrator meets ([`SharedApp`], [`Transport`]) are re-exported from the wire
 //! crate, so the SDK is the only dependency an app needs. The same surface
 //! is what UniFFI turns into the Swift and Kotlin bindings. The SDK logs
 //! through `tracing`; a Rust app installs its own subscriber, the bindings
@@ -24,7 +24,7 @@ pub use http::RequiredCookie;
 pub use logging::{LogLevel, LogSink, install_log_sink};
 pub use secrets::{FileSecretStore, SecretStore, SecretStoreError};
 pub use storage::ShareId;
-pub use wispers_access_wire::{App, AppKind, Transport};
+pub use wispers_access_wire::{AppKind, SharedApp, Transport};
 
 use guest_node::GuestNode;
 use std::collections::HashMap;
@@ -124,7 +124,7 @@ pub struct Share {
     pub label: String,
     pub transport: Transport,
     /// The apps as last fetched from the host node, in its order.
-    pub apps: Vec<App>,
+    pub apps: Vec<SharedApp>,
     pub state: ShareState,
     /// When this device joined.
     pub joined_at: std::time::SystemTime,
@@ -143,7 +143,7 @@ pub enum ShareState {
 // The wire types the surface carries, mirrored for the bindings.
 
 #[uniffi::remote(Record)]
-pub struct App {
+pub struct SharedApp {
     pub id: String,
     pub name: String,
     pub kind: AppKind,

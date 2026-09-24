@@ -41,7 +41,7 @@ enum DemoMode {
                     name: entry.nickname,
                     label: entry.slug,
                     transport: .iroh,
-                    apps: [App(id: "app", name: entry.nickname, kind: .web)],
+                    apps: [SharedApp(id: "app", name: entry.nickname, kind: .web)],
                     state: .live,
                     joinedAt: now.addingTimeInterval(-entry.joined)
                 )

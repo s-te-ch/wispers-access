@@ -32,7 +32,7 @@ final class BrowseSession: Identifiable {
 
     init(
         share: Share,
-        app: App,
+        app: SharedApp,
         proxy: PerAppProxy,
         auth: ProxyAuth,
         onIcon: @escaping (BrowseKey, Data, Int) -> Void = { _, _, _ in }
