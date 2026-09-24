@@ -1,0 +1,4 @@
+# Produced by build-jnilibs.sh.
+src/main/jniLibs/
+src/main/kotlin/
+build/

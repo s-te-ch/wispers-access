@@ -24,4 +24,7 @@ dependencyResolutionManagement {
 
 rootProject.name = "Wispers Access"
 include(":app")
+// The SDK's Android module lives with the SDK, outside this project.
+include(":wispers-access-sdk")
+project(":wispers-access-sdk").projectDir = file("../sdk/android")
  
