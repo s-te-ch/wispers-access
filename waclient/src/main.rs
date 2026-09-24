@@ -1,15 +1,9 @@
-mod http;
-mod iroh_transport;
-mod shares;
-mod storage;
-mod transports;
-mod wispers_connect_transport;
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use shares::{Share, ShareRegistry};
 use std::sync::Arc;
-use transports::{TerminalState, TransportError};
+use wispers_access_sdk::shares::{Share, ShareRegistry};
+use wispers_access_sdk::transports::{self, TerminalState, TransportError};
+use wispers_access_sdk::{http, storage};
 use wispers_access_wire as wire;
 
 #[derive(Parser)]

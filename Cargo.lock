@@ -4703,24 +4703,14 @@ name = "waclient"
 version = "0.2.0"
 dependencies = [
  "anyhow",
- "bytes",
  "clap",
- "dirs",
- "http-body-util",
- "hyper",
- "hyper-util",
- "iroh",
  "libc",
- "rusqlite",
- "rusqlite_migration",
  "rustls",
- "serde_json",
  "slug",
  "tabwriter",
  "tokio",
- "uuid",
+ "wispers-access-sdk",
  "wispers-access-wire",
- "wispers-connect",
 ]
 
 [[package]]
@@ -5424,6 +5414,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "23b97319f7b8343df12cc98938e5c3eb436064524c8d2b4e30a1d3a36eecdf81"
 dependencies = [
  "memchr",
+]
+
+[[package]]
+name = "wispers-access-sdk"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "dirs",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "iroh",
+ "rusqlite",
+ "rusqlite_migration",
+ "serde_json",
+ "tokio",
+ "uuid",
+ "wispers-access-wire",
+ "wispers-connect",
 ]
 
 [[package]]
