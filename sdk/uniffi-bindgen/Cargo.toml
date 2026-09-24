@@ -1,0 +1,9 @@
+[package]
+name = "uniffi-bindgen"
+version = "0.1.0"
+edition = "2024"
+description = "Generates the SDK's Swift and Kotlin bindings"
+publish = false
+
+[dependencies]
+uniffi = { version = "0.32", features = ["cli"] }

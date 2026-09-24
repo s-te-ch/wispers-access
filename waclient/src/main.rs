@@ -1,6 +1,5 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use std::sync::Arc;
 use wispers_access_sdk as sdk;
 
 #[derive(Parser)]
@@ -47,12 +46,14 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(command: Command) -> Result<()> {
-    let client = sdk::Client::new(sdk::ClientConfig {
-        data_dir: data_dir()?,
-        secrets: None,
-        observer: None,
-        runtime: Some(tokio::runtime::Handle::current()),
-    })?;
+    let client = sdk::Client::new_with_runtime(
+        sdk::ClientConfig {
+            data_dir: data_dir()?.to_string_lossy().into_owned(),
+            secrets: None,
+            observer: None,
+        },
+        tokio::runtime::Handle::current(),
+    )?;
     match command {
         Command::Join { invite_code } => join(&client, &invite_code).await,
         Command::Serve { port } => serve(&client, port).await,
@@ -81,8 +82,7 @@ fn data_dir() -> Result<std::path::PathBuf> {
 }
 
 async fn join(client: &sdk::Client, invite_code: &str) -> Result<()> {
-    let invite = sdk::Invite::parse(invite_code)?;
-    let share = client.join(invite).await?;
+    let share = client.join(invite_code.to_owned()).await?;
     println!(
         "Joined share: {}\n  Label: {}\n  Apps: {}\n  Share id: {}\n",
         share.name,
@@ -150,15 +150,15 @@ fn describe_state(state: sdk::ShareState) -> &'static str {
 
 async fn remove(client: &sdk::Client, share: &str) -> Result<()> {
     let found = client
-        .share(share)?
+        .share(share.to_owned())?
         .with_context(|| format!("no share '{}' (see 'waclient list')", share))?;
-    client.leave(&found.id).await?;
+    client.leave(found.id).await?;
     println!("Share '{}' removed from this device.", share);
     Ok(())
 }
 
 async fn serve(client: &sdk::Client, port: u16) -> Result<()> {
-    let proxy = Arc::new(client.proxy(sdk::ProxyMode::HostRouted { port }).await?);
+    let proxy = client.start_host_routed_proxy(port).await?;
     println!("Listening on localhost:{}", proxy.port());
 
     // Every share as last seen. Report but don't serve dead ones.
@@ -188,7 +188,7 @@ async fn serve(client: &sdk::Client, port: u16) -> Result<()> {
         let client = client.clone();
         let proxy = proxy.clone();
         tokio::spawn(async move {
-            match client.refresh(&share.id).await {
+            match client.refresh(share.id.clone()).await {
                 Ok(Some(share)) if share.state != sdk::ShareState::Live => {
                     report_dead_share(&share)
                 }
@@ -206,12 +206,15 @@ async fn serve(client: &sdk::Client, port: u16) -> Result<()> {
     std::future::pending().await
 }
 
-fn print_app_urls(proxy: &sdk::Proxy, share: &sdk::Share) {
+fn print_app_urls(proxy: &sdk::HostRoutedProxy, share: &sdk::Share) {
     if share.apps.is_empty() {
         println!("    (no apps yet)");
     }
     for app in &share.apps {
-        println!("    {:<16} {}", app.name, proxy.base_url(share, &app.id));
+        let url = proxy
+            .base_url(share.id.clone(), app.id.clone())
+            .unwrap_or_else(|e| format!("({e})"));
+        println!("    {:<16} {}", app.name, url);
     }
 }
 

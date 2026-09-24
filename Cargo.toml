@@ -4,5 +4,6 @@ members = [
     "waserver",
     "waclient",
     "sdk",
+    "sdk/uniffi-bindgen",
     "wire",
 ]

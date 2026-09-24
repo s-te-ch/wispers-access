@@ -4,7 +4,7 @@
 //! every request becomes one DATA stream to the share's host node.
 
 use crate::transports::{TerminalState, TransportError};
-use crate::{Client, Lookup};
+use crate::{Client, Lookup, ShareId};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
@@ -14,25 +14,70 @@ use hyper::client::conn::http1 as http1_client;
 use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
-/// Binds the loopback port. `0` picks a free one.
-pub async fn bind_loopback_port(port: u16) -> Result<TcpListener> {
-    let bind_addr = format!("localhost:{}", port);
-    TcpListener::bind(&bind_addr)
-        .await
-        .with_context(|| format!("failed to bind to {}", bind_addr))
+/// Bind a port on both loopback addresses, `127.0.0.1` and `::1`, since a
+/// browser may resolve `localhost` to either. Port `0` picks a free one.
+/// Returns the port and its listeners.
+///
+/// Only a machine without an IPv6 loopback gets IPv4 alone, with a warning: a
+/// port that is taken on one address is an error, or with port `0` another try.
+pub async fn bind_loopback_port(port: u16) -> Result<(u16, Vec<TcpListener>)> {
+    for _ in 0..PORT_TRIES {
+        let ipv4_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
+        let v4_listener = TcpListener::bind(ipv4_addr)
+            .await
+            .with_context(|| format!("failed to bind to {ipv4_addr}"))?;
+        let bound_port = v4_listener.local_addr()?.port();
+        let ipv6_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), bound_port);
+        match TcpListener::bind(ipv6_addr).await {
+            Ok(v6_listener) => return Ok((bound_port, vec![v4_listener, v6_listener])),
+            Err(e) if no_ipv6_loopback(&e) => {
+                warn!(error = format!("{e:#}"), "no IPv6 loopback");
+                return Ok((bound_port, vec![v4_listener]));
+            }
+            Err(_) if port == 0 => {
+                // The auto-assigned port for IPv4 isn't available on IPv6. Retry.
+                continue;
+            }
+            Err(e) => return Err(e.into()),
+        }
+    }
+    anyhow::bail!("no port free on both loopback addresses after {PORT_TRIES} tries")
+}
+
+/// How often port `0` is retried when the IPv4 pick is taken on `::1`.
+const PORT_TRIES: usize = 8;
+
+/// Whether binding `::1` failed because the machine has no IPv6 loopback,
+/// rather than because the port is taken.
+fn no_ipv6_loopback(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
+    )
+}
+
+/// How a listener knows which app a request is for.
+#[derive(Clone)]
+pub enum Route {
+    /// From the `Host` header: `<app>.<share>.localhost`.
+    FromHost,
+    /// The listener serves this one app.
+    Fixed { share: ShareId, app: String },
 }
 
 /// Serves every connection against the client's shares, until cancelled.
-pub async fn accept_loop(listener: TcpListener, client: Client) {
+pub async fn accept_loop(listener: TcpListener, client: Client, route: Route) {
     loop {
         match listener.accept().await {
             Ok((tcp_stream, _)) => {
                 let client = client.clone();
+                let route = route.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(tcp_stream, client).await {
+                    if let Err(e) = handle_connection(tcp_stream, client, route).await {
                         warn!(error = format!("{e:#}"), "connection error");
                     }
                 });
@@ -44,9 +89,10 @@ pub async fn accept_loop(listener: TcpListener, client: Client) {
     }
 }
 
-async fn handle_connection(tcp_stream: TcpStream, client: Client) -> Result<()> {
+async fn handle_connection(tcp_stream: TcpStream, client: Client, route: Route) -> Result<()> {
     let tcp_stream = TokioIo::new(tcp_stream);
-    let service = hyper::service::service_fn(move |req| forward(req, client.clone()));
+    let service =
+        hyper::service::service_fn(move |req| forward(req, client.clone(), route.clone()));
     let served = http1_server::Builder::new()
         .serve_connection(tcp_stream, service)
         // Allow a 101 to hand the browser socket over for raw relaying (WebSocket).
@@ -68,17 +114,23 @@ type BoxedBody = BoxBody<Bytes, std::io::Error>;
 async fn forward(
     mut req: hyper::Request<Incoming>,
     client: Client,
+    route: Route,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
     // Determine the share and app...
-    let Ok(host) = extract_host(&req) else {
-        return Ok(error_response(
-            StatusCode::BAD_REQUEST,
-            "missing host header",
-        ));
-    };
-    let (app, share) = match extract_target(&host) {
-        Ok(target) => target,
-        Err(e) => return Ok(error_response(StatusCode::NOT_FOUND, &e.to_string())),
+    let (share, app) = match route {
+        Route::Fixed { share, app } => (share.to_string(), app),
+        Route::FromHost => {
+            let Ok(host) = extract_host(&req) else {
+                return Ok(error_response(
+                    StatusCode::BAD_REQUEST,
+                    "missing host header",
+                ));
+            };
+            match extract_target(&host) {
+                Ok((share, app)) => (share, app),
+                Err(e) => return Ok(error_response(StatusCode::NOT_FOUND, &e.to_string())),
+            }
+        }
     };
     let share = match client.guest_node(&share).await {
         Ok(Lookup::Live(share)) => share,
@@ -269,7 +321,7 @@ fn extract_host(req: &hyper::Request<Incoming>) -> Result<String> {
 /// the proxy can be told from one the app sent.
 const ERROR_HEADER: &str = "x-wispers-access-error";
 
-/// `<app>.<share>.localhost[:port]` → (app, share).
+/// `<app>.<share>.localhost[:port]` → (share, app).
 fn extract_target(host: &str) -> Result<(String, String)> {
     let host = host.rsplit_once(':').map_or(host, |(h, port)| {
         if port.chars().all(|c| c.is_ascii_digit()) {
@@ -280,7 +332,7 @@ fn extract_target(host: &str) -> Result<(String, String)> {
     });
     match host.split('.').collect::<Vec<_>>().as_slice() {
         [app, share, "localhost"] if !app.is_empty() && !share.is_empty() => {
-            Ok(((*app).to_owned(), (*share).to_owned()))
+            Ok(((*share).to_owned(), (*app).to_owned()))
         }
         _ => anyhow::bail!(
             "unknown host {}: apps are served at http://<app>.<share>.localhost:<port>",
@@ -385,15 +437,31 @@ fn peer_went_away(e: &hyper::Error) -> bool {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_port_taken_on_one_loopback_is_not_half_bound() {
+        // Occupy a port on ::1 only.
+        let Ok(occupant) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await else {
+            eprintln!("no IPv6 loopback on this machine");
+            return;
+        };
+        let taken = occupant.local_addr().unwrap().port();
+        // Asking for that port fails rather than serving IPv4 alone.
+        assert!(bind_loopback_port(taken).await.is_err());
+        // Letting the SDK pick still yields a port bound on both.
+        let (port, listeners) = bind_loopback_port(0).await.unwrap();
+        assert_ne!(port, taken);
+        assert_eq!(listeners.len(), 2);
+    }
+
     #[test]
     fn targets_are_app_dot_share() {
         assert_eq!(
             extract_target("echo.round-trip.localhost:8000").unwrap(),
-            ("echo".to_owned(), "round-trip".to_owned())
+            ("round-trip".to_owned(), "echo".to_owned())
         );
         assert_eq!(
             extract_target("echo.round-trip.localhost").unwrap(),
-            ("echo".to_owned(), "round-trip".to_owned())
+            ("round-trip".to_owned(), "echo".to_owned())
         );
         // One label is not enough, and neither is a foreign host.
         assert!(extract_target("round-trip.localhost:8000").is_err());

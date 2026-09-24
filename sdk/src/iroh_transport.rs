@@ -37,7 +37,11 @@ pub async fn join(
     // one has done its job. Close it properly, iroh complains otherwise.
     transport.endpoint.close().await;
     row.write_iroh_endpoint_id(&host.to_string())?;
-    secrets.save(&row.share_id()?, SECRET_KEY, &key.to_bytes())?;
+    secrets.save(
+        row.share_id()?,
+        SECRET_KEY.to_owned(),
+        key.to_bytes().to_vec(),
+    )?;
     Ok(info)
 }
 
@@ -72,7 +76,7 @@ pub async fn leave(row: &storage::Row, secrets: &Arc<dyn SecretStore>) {
     }
     match row.share_id() {
         Ok(share) => {
-            if let Err(e) = secrets.delete(&share, SECRET_KEY) {
+            if let Err(e) = secrets.delete(share, SECRET_KEY.to_owned()) {
                 warn!(error = %e, "could not delete the share's iroh key");
             }
         }
@@ -115,7 +119,7 @@ impl Iroh {
                 .parse()
                 .context("stored host endpoint ID is invalid")?;
             let secret: [u8; 32] = secrets
-                .load(&row.share_id()?, SECRET_KEY)?
+                .load(row.share_id()?, SECRET_KEY.to_owned())?
                 .context("share has no iroh key")?
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("stored iroh key has the wrong length"))?;

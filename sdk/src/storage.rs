@@ -27,6 +27,11 @@ impl ShareId {
     }
 }
 
+uniffi::custom_type!(ShareId, String, {
+    lower: |id| id.0,
+    try_lift: |s| Ok(ShareId(s)),
+});
+
 impl std::fmt::Display for ShareId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -327,6 +332,30 @@ impl Row {
         Ok(state)
     }
 
+    /// The port a `PerApp` proxy last served this app on.
+    pub fn read_app_port(&self, app_id: &str) -> Result<Option<u16>> {
+        use rusqlite::OptionalExtension;
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let port = conn
+            .query_row(
+                "SELECT port FROM app_ports WHERE share_id = ?1 AND app_id = ?2",
+                rusqlite::params![self.id, app_id],
+                |r| r.get::<_, u16>(0),
+            )
+            .optional()?;
+        Ok(port)
+    }
+
+    pub fn write_app_port(&self, app_id: &str, port: u16) -> Result<()> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        conn.execute(
+            "INSERT INTO app_ports (share_id, app_id, port) VALUES (?1, ?2, ?3)
+             ON CONFLICT (share_id, app_id) DO UPDATE SET port = excluded.port",
+            rusqlite::params![self.id, app_id, port],
+        )?;
+        Ok(())
+    }
+
     /// Deletes the share and its apps outright. Its secrets are the secret
     /// store's to delete.
     pub fn delete_row(&self) -> Result<()> {
@@ -396,6 +425,12 @@ fn migrations() -> Migrations<'static> {
                  app_id TEXT NOT NULL,
                  name TEXT NOT NULL,
                  kind TEXT NOT NULL,
+                 PRIMARY KEY (share_id, app_id)
+             ) STRICT;
+             CREATE TABLE app_ports (
+                 share_id INTEGER NOT NULL REFERENCES shares(id) ON DELETE CASCADE,
+                 app_id TEXT NOT NULL,
+                 port INTEGER NOT NULL,
                  PRIMARY KEY (share_id, app_id)
              ) STRICT;",
         ),

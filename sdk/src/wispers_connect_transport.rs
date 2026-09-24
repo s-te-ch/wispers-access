@@ -236,8 +236,10 @@ impl NodeSecrets {
     }
 
     fn delete_all(&self) -> Result<(), SecretStoreError> {
-        self.secrets.delete(&self.share, ROOT_KEY)?;
-        self.secrets.delete(&self.share, REGISTRATION)
+        self.secrets
+            .delete(self.share.clone(), ROOT_KEY.to_owned())?;
+        self.secrets
+            .delete(self.share.clone(), REGISTRATION.to_owned())
     }
 }
 
@@ -245,7 +247,7 @@ impl wc::NodeStateStore for NodeSecrets {
     fn load(&self) -> Result<Option<wc::PersistedNodeState>, wc::StorageError> {
         let Some(root_key) = self
             .secrets
-            .load(&self.share, ROOT_KEY)
+            .load(self.share.clone(), ROOT_KEY.to_owned())
             .map_err(to_wc_error)?
         else {
             // No root key: nothing has been saved yet.
@@ -256,7 +258,7 @@ impl wc::NodeStateStore for NodeSecrets {
             .map_err(|_| wc::StorageError::InvalidRootKey)?;
         let registration = self
             .secrets
-            .load(&self.share, REGISTRATION)
+            .load(self.share.clone(), REGISTRATION.to_owned())
             .map_err(to_wc_error)?
             .and_then(|b| wc::deserialize_registration(&b).ok());
         Ok(Some(wc::PersistedNodeState::from_stored(key, registration)))
@@ -264,20 +266,24 @@ impl wc::NodeStateStore for NodeSecrets {
 
     fn save(&self, state: &wc::PersistedNodeState) -> Result<(), wc::StorageError> {
         self.secrets
-            .save(&self.share, ROOT_KEY, state.root_key_bytes())
+            .save(
+                self.share.clone(),
+                ROOT_KEY.to_owned(),
+                state.root_key_bytes().to_vec(),
+            )
             .map_err(to_wc_error)?;
         match state.registration() {
             Some(registration) => self
                 .secrets
                 .save(
-                    &self.share,
-                    REGISTRATION,
-                    &wc::serialize_registration(registration),
+                    self.share.clone(),
+                    REGISTRATION.to_owned(),
+                    wc::serialize_registration(registration),
                 )
                 .map_err(to_wc_error),
             None => self
                 .secrets
-                .delete(&self.share, REGISTRATION)
+                .delete(self.share.clone(), REGISTRATION.to_owned())
                 .map_err(to_wc_error),
         }
     }
