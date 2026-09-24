@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 use tracing::{debug, error as log_error, info, warn};
-use wire::{ActivationError, App, ConfigHash, ShareChanged, ShareInfo};
+use wire::{ActivationError, ConfigHash, ShareChanged, ShareInfo, SharedApp};
 use wispers_access_wire as wire;
 
 type BoxedBody = BoxBody<Bytes, std::io::Error>;
@@ -123,7 +123,7 @@ fn share_info(config: &ShareConfig) -> ShareInfo {
         apps: config
             .apps
             .iter()
-            .map(|s| App {
+            .map(|s| SharedApp {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 kind: s.kind,

@@ -1,12 +1,11 @@
 import SwiftUI
+import WispersAccessSdk
 
-/// Details for one share: online status, avatar, name, join / last-connected
-/// info, and Open / Remove actions. Mirrors the Android `ShareDetailScreen`
-/// (minus "Add to homescreen", which has no iOS equivalent). Reads the live
-/// share from the store by id, so a rename or removal reflects immediately.
+/// Details for one share: online status, avatar, name, last-connected / joined
+/// info, its apps to open, and Remove. Reads the live share from the manager by
+/// id, so a change or removal reflects immediately.
 struct ShareDetailScreen: View {
-    let shareID: ShareID
-    @Environment(ShareStore.self) private var store
+    let shareID: ShareId
     @Environment(ShareManager.self) private var manager
     @Environment(ShareIconStore.self) private var icons
     @Environment(\.dismiss) private var dismiss
@@ -15,54 +14,53 @@ struct ShareDetailScreen: View {
     var body: some View {
         ZStack {
             AccessColor.background.ignoresSafeArea()
-            if let share = store.metadata(for: shareID) {
+            if let share = manager.share(shareID) {
                 content(share)
             } else {
                 // Removed while open — leave the screen.
                 Color.clear.onAppear { dismiss() }
             }
         }
-        .navigationTitle("Shared app")
+        .navigationTitle("Shared with you")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             while !Task.isCancelled {
-                await manager.status.refresh([shareID], using: manager.sessions, store: store)
+                if let share = manager.share(shareID) {
+                    await manager.status.refresh([share], using: manager.client, activity: manager.activity)
+                }
                 try? await Task.sleep(for: .seconds(30))
             }
         }
     }
 
-    private func content(_ share: ShareMetadata) -> some View {
+    private func content(_ share: Share) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             StatusRow(
-                availability: share.terminalState?.availability
+                availability: share.state.availability
                     ?? manager.status.availability(for: shareID))
-            ShareAvatar(nickname: name(share), iconPNG: icons.iconData(for: shareID), size: 64)
+            ShareAvatar(nickname: name(share), iconPNG: icons.iconData(forAnyAppOf: share), size: 64)
             Text(name(share))
                 .font(.system(.largeTitle, design: .serif).weight(.bold))
                 .foregroundStyle(AccessColor.onSurface)
             HStack(spacing: 8) {
-                InfoCard(label: "LAST CONNECTED", value: date(share.lastConnectedAt))
-                InfoCard(label: "JOINED", value: date(share.createdAt))
+                InfoCard(label: "LAST CONNECTED", value: date(manager.activity.lastConnected(shareID)))
+                InfoCard(label: "JOINED", value: date(share.joinedAt))
             }
-            if let terminal = share.terminalState {
-                TerminalShareExplanation(state: terminal)
-                Button {
-                    confirmingRemoval = true
-                } label: {
-                    Text("Remove from this device")
-                        .accessOutlinedButton(tint: AccessColor.destructive)
-                }
+            if share.state != .live {
+                TerminalShareExplanation(state: share.state)
+                removeButton
             } else {
                 VStack(spacing: 8) {
-                    NavigationLink(value: ShareRoute.browse(shareID)) {
-                        Text("Open app ↗").accessFilledButton()
+                    if share.apps.isEmpty {
+                        Text("No apps shared yet. They appear here once the host adds some.")
+                            .font(.footnote).foregroundStyle(AccessColor.onSurfaceVariant)
                     }
-                    Button {
-                        confirmingRemoval = true
-                    } label: {
-                        Text("Remove from this device").accessOutlinedButton(tint: AccessColor.destructive)
+                    ForEach(share.apps, id: \.id) { app in
+                        NavigationLink(value: ShareRoute.browse(BrowseKey(shareID: shareID, appID: app.id))) {
+                            Text("Open \(app.name) ↗").accessFilledButton()
+                        }
                     }
+                    removeButton
                 }
             }
             Spacer()
@@ -76,12 +74,20 @@ struct ShareDetailScreen: View {
             }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This device's access will be removed on the server. You'll need a new invitation code to rejoin.")
+            Text("This device's access will be removed on the host. You'll need a new invitation code to rejoin.")
         }
     }
 
-    private func name(_ share: ShareMetadata) -> String {
-        share.nickname.isEmpty ? "Untitled app" : share.nickname
+    private var removeButton: some View {
+        Button {
+            confirmingRemoval = true
+        } label: {
+            Text("Remove from this device").accessOutlinedButton(tint: AccessColor.destructive)
+        }
+    }
+
+    private func name(_ share: Share) -> String {
+        share.name.isEmpty ? "Untitled share" : share.name
     }
 
     private func date(_ date: Date?) -> String {

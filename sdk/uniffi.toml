@@ -1,0 +1,9 @@
+[bindings.swift]
+cdylib_name = "wispers_access_sdk"
+module_name = "WispersAccessSdk"
+ffi_module_name = "WispersAccessSdkFfi"
+generate_immutable_records = true
+
+[bindings.kotlin]
+cdylib_name = "wispers_access_sdk"
+package_name = "dev.wispers.access.sdk"

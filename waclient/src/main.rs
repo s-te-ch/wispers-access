@@ -1,16 +1,6 @@
-mod http;
-mod iroh_transport;
-mod shares;
-mod storage;
-mod transports;
-mod wispers_connect_transport;
-
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
-use shares::{Share, ShareRegistry};
-use std::sync::Arc;
-use transports::{TerminalState, TransportError};
-use wispers_access_wire as wire;
+use wispers_access_sdk as sdk;
 
 #[derive(Parser)]
 #[command(name = "waclient", version)]
@@ -45,12 +35,9 @@ fn main() -> Result<()> {
     unsafe {
         libc::umask(0o077);
     }
-    // De-conflict rustls.
-    rustls::crypto::aws_lc_rs::default_provider()
-        .install_default()
-        .expect("install rustls crypto provider");
 
     let cli = Cli::parse();
+    init_logging();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -59,58 +46,54 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(command: Command) -> Result<()> {
+    let client = sdk::Client::new_with_runtime(
+        sdk::ClientConfig {
+            data_dir: data_dir()?.to_string_lossy().into_owned(),
+            secrets: None,
+            observer: None,
+        },
+        tokio::runtime::Handle::current(),
+    )?;
     match command {
-        Command::Join { invite_code } => join(&invite_code).await,
-        Command::Serve { port } => serve(port).await,
-        Command::List => list().await,
-        Command::Remove { share } => remove(&share).await,
+        Command::Join { invite_code } => join(&client, &invite_code).await,
+        Command::Serve { port } => serve(&client, port).await,
+        Command::List => list(&client),
+        Command::Remove { share } => remove(&client, &share).await,
     }
 }
 
-async fn join(invite_code: &str) -> Result<()> {
-    let invite = wire::Invite::parse(invite_code)?;
-    let db = storage::DB::new()?;
-    let row = db.new_row()?;
-    // The row is the share's; the transport writes its part of it and the
-    // host node's answer fills the rest. A failed join leaves no row behind.
-    let result = async {
-        let info = transports::join(invite, &row).await?;
-        record_join(&row, &info)
-    }
-    .await;
-    if result.is_err() {
-        let _ = row.delete_row();
-    }
-    result
+/// The SDK's own lines at `info`, its dependencies only when they complain.
+/// `RUST_LOG` overrides.
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,wispers_access_sdk=info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
+        .with_writer(std::io::stderr)
+        .init();
 }
 
-/// The local bookkeeping of any `join`, once the host node has answered with
-/// the share: names, the app list, and marking the row complete so it
-/// survives the next start.
-fn record_join(row: &storage::Row, info: &wire::ShareInfo) -> Result<()> {
-    let share_id = row.share_id()?;
-    row.write_share_info(info)?;
-    let display_name = if info.name.is_empty() {
-        share_id.to_string()
-    } else {
-        info.name.clone()
-    };
-    row.write_display_name(&display_name)?;
-    let hostname = host_slug(&display_name).unwrap_or_else(|| share_id.to_string());
-    let hostname = row.write_deduped_hostname(&hostname)?;
-    row.mark_complete()?;
+fn data_dir() -> Result<std::path::PathBuf> {
+    let config_dir = dirs::config_dir().context("could not determine config directory")?;
+    Ok(config_dir.join("waclient"))
+}
 
+async fn join(client: &sdk::Client, invite_code: &str) -> Result<()> {
+    let share = client.join(invite_code.to_owned()).await?;
     println!(
         "Joined share: {}\n  Label: {}\n  Apps: {}\n  Share id: {}\n",
-        display_name,
-        hostname,
-        describe_apps(&info.apps),
-        share_id,
+        share.name,
+        share.label,
+        describe_apps(&share.apps),
+        share.id,
     );
     Ok(())
 }
 
-fn describe_apps(apps: &[wire::App]) -> String {
+fn describe_apps(apps: &[sdk::SharedApp]) -> String {
     if apps.is_empty() {
         return "none yet".to_owned();
     }
@@ -126,30 +109,20 @@ fn describe_apps(apps: &[wire::App]) -> String {
         .join(", ")
 }
 
-async fn list() -> Result<()> {
+fn list(client: &sdk::Client) -> Result<()> {
     use std::io::Write;
     use tabwriter::TabWriter;
 
-    let db = storage::DB::new()?;
-    let rows = db.get_all_rows()?;
-    if rows.is_empty() {
+    let shares = client.shares()?;
+    if shares.is_empty() {
         println!("No shares joined. Use 'waclient join <invite_code>'.");
         return Ok(());
     }
     let mut tw = TabWriter::new(std::io::stdout().lock()).padding(2);
     writeln!(&mut tw, "Share\tName\tApps\tStatus")?;
-    for row in rows {
-        let (_, display_name, hostname) = row.read_names()?;
-        let state = match row
-            .read_terminal_state()?
-            .as_deref()
-            .and_then(TerminalState::parse)
-        {
-            Some(state) => state.describe(),
-            None => "ok",
-        };
-        let apps = row
-            .read_apps()?
+    for share in shares {
+        let apps = share
+            .apps
             .iter()
             .map(|s| s.id.clone())
             .collect::<Vec<_>>()
@@ -157,129 +130,102 @@ async fn list() -> Result<()> {
         writeln!(
             &mut tw,
             "{}\t{}\t{}\t{}",
-            hostname,
-            display_name,
+            share.label,
+            share.name,
             if apps.is_empty() { "-" } else { &apps },
-            state
+            describe_state(share.state)
         )?;
     }
     tw.flush()?;
     Ok(())
 }
 
-async fn remove(share: &str) -> Result<()> {
-    let db = storage::DB::new()?;
-    let row = db
-        .find_row(share)?
-        .with_context(|| format!("no share '{}' (see 'waclient list')", share))?;
+fn describe_state(state: sdk::ShareState) -> &'static str {
+    match state {
+        sdk::ShareState::Live => "ok",
+        sdk::ShareState::Removed => "the share was removed by its host node",
+        sdk::ShareState::Revoked => "this device's access was revoked",
+    }
+}
 
-    transports::leave(&row).await?;
-    row.delete_row()?;
+async fn remove(client: &sdk::Client, share: &str) -> Result<()> {
+    let found = client
+        .share(share.to_owned())?
+        .with_context(|| format!("no share '{}' (see 'waclient list')", share))?;
+    client.leave(found.id).await?;
     println!("Share '{}' removed from this device.", share);
     Ok(())
 }
 
-/// Free-form name -> DNS-label-safe slug, or None if nothing usable remains.
-fn host_slug(name: &str) -> Option<String> {
-    // Remove apostrophes, so "Bob's app" becomes "bobs-app", not "bob-s-app".
-    let cleaned = name.replace(['\'', '’'], "");
-    // Slugify, but keep it to 63 chars, to produce a legal DNS label.
-    let mut s = slug::slugify(cleaned);
-    s.truncate(63);
-    // Truncation can leave a trailing '-'.
-    let s = s.trim_end_matches('-');
-    (!s.is_empty()).then(|| s.to_string())
-}
+async fn serve(client: &sdk::Client, port: u16) -> Result<()> {
+    let proxy = client.start_host_routed_proxy(port, None).await?;
+    println!("Listening on localhost:{}", proxy.port());
 
-async fn serve(port: u16) -> Result<()> {
-    // Load every known share. One dead or unreachable share must not take the
-    // others down - report it and skip it. Terminal rejections (revocations)
-    // get persisted so we never dial the share again.
-    let db = storage::DB::new()?;
-    let mut registry = ShareRegistry::default();
+    // Every share as last seen. Report but don't serve dead ones.
     println!("Available apps (as last seen; refreshed in the background):");
-    for row in db.get_all_rows()? {
-        let (share_id, display_name, label) = row.read_names()?;
-        if let Some(state) = row
-            .read_terminal_state()?
-            .as_deref()
-            .and_then(TerminalState::parse)
-        {
-            report_dead_share(&display_name, &label, state);
-            registry.insert_dead(label, share_id, state);
+    let shares = client.shares()?;
+    for share in &shares {
+        if share.state != sdk::ShareState::Live {
+            report_dead_share(share);
             continue;
         }
-        match transports::restore(row.clone()).await {
-            Ok(transport) => {
-                let share = Share::new(label, share_id, display_name, row, transport);
-                println!(
-                    "  {} ({}) via {}:",
-                    share.display_name(),
-                    share.label(),
-                    share.describe_transport()
-                );
-                print_app_urls(share.label(), &share.apps()?, port);
-                registry.insert(share);
-            }
-            Err(TransportError::Terminal(state)) => {
-                let _ = row.write_terminal_state(state.as_str());
-                report_dead_share(&display_name, &label, state);
-                registry.insert_dead(label, share_id, state);
-            }
-            Err(TransportError::Transient(e)) => {
-                eprintln!(
-                    "  {} — temporarily unavailable ({e:#}), not serving it this run",
-                    label
-                );
-            }
-        }
+        println!(
+            "  {} ({}) via {}:",
+            share.name,
+            share.label,
+            share.transport.as_str()
+        );
+        print_app_urls(&proxy, share);
     }
-    let registry = Arc::new(registry);
 
-    // Ask every live share's host node whether the app list changed since the
-    // last run. Best effort and off the startup path: an unreachable host node
-    // just leaves the stored list in place.
-    for share in registry.iter() {
-        let share = share.clone();
+    // Ask every live share's host node whether the config changed since the
+    // last run. Best effort and off the startup path - an unreachable host node
+    // just leaves the stored copy in place.
+    for share in shares
+        .into_iter()
+        .filter(|s| s.state == sdk::ShareState::Live)
+    {
+        let client = client.clone();
+        let proxy = proxy.clone();
         tokio::spawn(async move {
-            match share.refresh().await {
-                Ok(Some(info)) => {
-                    println!("Updated app list for {} ({}):", info.name, share.label());
-                    print_app_urls(share.label(), &info.apps, port);
+            match client.refresh(share.id.clone()).await {
+                Ok(Some(share)) if share.state != sdk::ShareState::Live => {
+                    report_dead_share(&share)
+                }
+                Ok(Some(share)) => {
+                    println!("Updated app list for {} ({}):", share.name, share.label);
+                    print_app_urls(&proxy, &share);
                 }
                 Ok(None) => {}
-                Err(e) => eprintln!(
-                    "[{}] could not refresh the app list: {:#}",
-                    share.label(),
-                    e
-                ),
+                Err(e) => eprintln!("[{}] could not refresh the share: {:#}", share.label, e),
             }
         });
     }
 
-    http::serve(port, registry).await
+    // Wait forever to let the proxy do its thing.
+    std::future::pending().await
 }
 
-fn print_app_urls(hostname: &str, apps: &[wire::App], port: u16) {
-    if apps.is_empty() {
+fn print_app_urls(proxy: &sdk::HostRoutedProxy, share: &sdk::Share) {
+    if share.apps.is_empty() {
         println!("    (no apps yet)");
     }
-    for app in apps {
-        println!(
-            "    {:<16} http://{}.{}.localhost:{}",
-            app.name, app.id, hostname, port
-        );
+    for app in &share.apps {
+        let url = proxy
+            .base_url(share.id.clone(), app.id.clone())
+            .unwrap_or_else(|e| format!("({e})"));
+        println!("    {:<16} {}", app.name, url);
     }
 }
 
-fn report_dead_share(display_name: &str, label: &str, state: TerminalState) {
+fn report_dead_share(share: &sdk::Share) {
     eprintln!(
         "  {} ('{}') is no longer available — {}.",
-        label,
-        display_name,
-        state.describe()
+        share.label,
+        share.name,
+        describe_state(share.state)
     );
-    eprintln!("    Run 'waclient remove {}' to clean it up.", label);
+    eprintln!("    Run 'waclient remove {}' to clean it up.", share.label);
 }
 
 #[cfg(test)]
@@ -289,15 +235,15 @@ mod tests {
     #[test]
     fn app_descriptions_skip_redundant_names() {
         let apps = vec![
-            wire::App {
+            sdk::SharedApp {
                 id: "echo".into(),
                 name: "echo".into(),
-                kind: wire::AppKind::Web,
+                kind: sdk::AppKind::Web,
             },
-            wire::App {
+            sdk::SharedApp {
                 id: "jf".into(),
                 name: "Jellyfin".into(),
-                kind: wire::AppKind::Jellyfin,
+                kind: sdk::AppKind::Jellyfin,
             },
         ];
         assert_eq!(describe_apps(&apps), "echo, jf (Jellyfin)");

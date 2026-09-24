@@ -1,7 +1,8 @@
 import Foundation
+import WispersAccessSdk
 
-/// Static roster for App Store screenshots: replaces the persisted roster and
-/// the live hub polling with fixed shares and statuses, so captures are
+/// Static roster for App Store screenshots: replaces the SDK's store and the
+/// live host polling with fixed shares and statuses, so captures are
 /// deterministic and need no backend. Debug-only — the launch argument is
 /// compiled out of release builds.
 ///
@@ -17,33 +18,42 @@ enum DemoMode {
         #endif
     }()
 
-    /// A ShareManager whose stores live in a throwaway temp directory seeded
-    /// with the fixed roster — the real shares.json / share-icons.json are
-    /// never touched.
+    /// What the demo manager throws for anything that needs a host.
+    struct NotAvailable: LocalizedError {
+        var errorDescription: String? { "Not available in demo mode." }
+    }
+
+    /// A ShareManager without an SDK client: the fixed roster, and icons and
+    /// activity in a throwaway temp directory — the real files are never
+    /// touched.
     static func makeManager() -> ShareManager {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("demo-roster")
         // A previous run's seed would resurface with stale timestamps.
         try? FileManager.default.removeItem(at: dir)
-        let store = ShareStore(fileURL: dir.appendingPathComponent("shares.json"))
         let icons = ShareIconStore(fileURL: dir.appendingPathComponent("share-icons.json"))
+        let activity = ShareActivityStore(fileURL: dir.appendingPathComponent("share-activity.json"))
         let now = Date()
+        var shares: [Share] = []
         for entry in roster {
-            store.add(
-                ShareMetadata(
-                    id: entry.id,
-                    nickname: entry.nickname,
-                    backend: nil,
-                    createdAt: now.addingTimeInterval(-entry.joined),
-                    lastConnectedAt: now.addingTimeInterval(-entry.lastConnected)
+            shares.append(
+                Share(
+                    id: entry.slug,
+                    name: entry.nickname,
+                    label: entry.slug,
+                    transport: .iroh,
+                    apps: [SharedApp(id: "app", name: entry.nickname, kind: .web)],
+                    state: .live,
+                    joinedAt: now.addingTimeInterval(-entry.joined)
                 )
             )
+            activity.markConnected(entry.slug, at: now.addingTimeInterval(-entry.lastConnected))
             if let url = Bundle.main.url(forResource: entry.slug, withExtension: "png"),
                 let png = try? Data(contentsOf: url)
             {
-                icons.update(png, rank: 1, for: entry.id)
+                icons.update(png, rank: 1, for: BrowseKey(shareID: entry.slug, appID: "app"))
             }
         }
-        return ShareManager(store: store, icons: icons)
+        return ShareManager(client: nil, icons: icons, activity: activity, shares: shares)
     }
 
     /// A screen to open on launch (`--demo-detail <slug>`, e.g. `grafana`), so
@@ -54,7 +64,7 @@ enum DemoMode {
         guard let flag = args.firstIndex(of: "--demo-detail"), flag + 1 < args.count else {
             return nil
         }
-        return .detail(ShareID(args[flag + 1]))
+        return .detail(args[flag + 1])
     }
 
     /// Whether to open the add-app sheet on launch (`--demo-add`), pre-filled
@@ -63,14 +73,15 @@ enum DemoMode {
         active && ProcessInfo.processInfo.arguments.contains("--demo-add")
     }
 
-    /// Shaped like a real `waserver invite` code (hex token, `node-secret`
-    /// activation) but pure fiction — it parses, so the screenshot shows the
-    /// backend note, and joins nothing.
-    static let sampleInvite = "wax_e3b7a4c92d15f8607b2a_7-h4kq9tm2xw"
+    /// Shaped like a real `waserver invite` code for an iroh share (endpoint
+    /// id, secret) but pure fiction — it parses, so the screenshot shows the
+    /// transport note, and joins nothing.
+    static let sampleInvite =
+        "wax1_iroh_30b1c2fed7e381856aad2334030bd0cf4c316ad4ee2fb08a4eebe661718c5977_d4ab8faf8841f2790da9bc82ee370ec7"
 
-    /// Fixed per-share availability, replacing the hub poll.
-    static var statuses: [ShareID: Availability] {
-        Dictionary(uniqueKeysWithValues: roster.map { ($0.id, $0.availability) })
+    /// Fixed per-share availability, replacing the host poll.
+    static var statuses: [ShareId: Availability] {
+        Dictionary(uniqueKeysWithValues: roster.map { ($0.slug, $0.availability) })
     }
 
     // Known self-hosted tools anchor the "that's my stack" reaction; one bespoke
@@ -115,7 +126,5 @@ enum DemoMode {
         let availability: Availability
         let lastConnected: TimeInterval
         let joined: TimeInterval
-
-        var id: ShareID { ShareID(slug) }
     }
 }

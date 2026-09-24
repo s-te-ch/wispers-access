@@ -1,20 +1,20 @@
 import SwiftUI
 import WebKit
+import WispersAccessSdk
 
-/// The browser for one open share, pushed onto the roster's navigation stack. It
-/// shows the share's retained `WKWebView` (kept alive by `BrowseSessionStore`, so
-/// page state survives switching). Backing out returns to the roster — which is
-/// how you switch shares — while the session stays warm for a while.
+/// The browser for one app of one share, pushed onto the roster's navigation
+/// stack. It shows the retained `WKWebView` (kept alive by `BrowseSessionStore`,
+/// so page state survives switching). Backing out returns to the roster — which
+/// is how you switch — while the session stays warm for a while.
 struct BrowserView: View {
     @Environment(ShareManager.self) private var manager
-    @Environment(ShareStore.self) private var store
-    let shareID: ShareID
+    let key: BrowseKey
 
     var body: some View {
         ZStack {
             Color(.systemBackground).ignoresSafeArea()
 
-            if let session = manager.browser.session(for: shareID) {
+            if let session = manager.browser.session(for: key) {
                 SessionWebView(session: session)
                     .ignoresSafeArea(.container, edges: .bottom)
                 if let error = session.startupError {
@@ -30,29 +30,32 @@ struct BrowserView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                Button { manager.browser.session(for: shareID)?.reload() } label: {
+                Button { manager.browser.session(for: key)?.reload() } label: {
                     Image(systemName: "arrow.clockwise")
                 }
                 .foregroundStyle(AccessColor.primaryDark)
-                .disabled(manager.browser.session(for: shareID) == nil)
+                .disabled(manager.browser.session(for: key) == nil)
             }
         }
         .onAppear {
             // Ensure the (warm) session exists and mark it on-screen.
-            if let share = store.metadata(for: shareID) {
-                manager.browser.open(share, using: manager.sessions)
+            if let share = manager.share(key.shareID),
+                let app = share.apps.first(where: { $0.id == key.appID }),
+                let proxy = manager.proxy
+            {
+                manager.browser.open(share, app, proxy: proxy, auth: manager.proxyAuth)
             }
         }
         .onDisappear {
-            manager.browser.resignActive(shareID)
+            manager.browser.resignActive(key)
         }
     }
 
     private var title: String {
-        guard let nickname = store.metadata(for: shareID)?.nickname, !nickname.isEmpty else {
-            return "App"
-        }
-        return nickname
+        guard let share = manager.share(key.shareID) else { return "App" }
+        let app = share.apps.first { $0.id == key.appID }
+        let name = app?.name ?? key.appID
+        return name.isEmpty ? share.name : name
     }
 }
 

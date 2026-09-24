@@ -1,0 +1,29 @@
+[package]
+name = "wispers-access-sdk"
+version = "0.1.0"
+edition = "2024"
+description = "The Wispers Access guest side: transports, share storage and the loopback proxy, for every client app"
+
+[lib]
+crate-type = ["lib", "staticlib", "cdylib"]
+
+[dependencies]
+anyhow = "1.0"
+bytes = "1"
+http-body-util = "0.1"
+hyper = { version = "1", features = ["http1", "client", "server"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+rusqlite = { version = "0.39", features = ["bundled"] }
+rusqlite_migration = "2.5.0"
+rustls = "0.23"
+serde_json = "1"
+slug = "0.1.6"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uniffi = "0.32"
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+uuid = { version = "1", features = ["v4"] }
+wispers-access-wire = { path = "../wire" }
+wispers-connect = "0.14.0"
+iroh = "1.2"

@@ -456,11 +456,11 @@ pub struct ShareInfo {
     /// Display name of the share.
     pub name: String,
     pub transport: String,
-    pub apps: Vec<App>,
+    pub apps: Vec<SharedApp>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct App {
+pub struct SharedApp {
     /// Stable key.
     pub id: String,
     /// Display name.
@@ -473,7 +473,7 @@ pub struct App {
 
 /// What kind of app is being shared: a generic web app, or one of the apps that
 /// integrating clients know how to talk to. Strict on its own (a config file
-/// must not silently accept a typo); the guest-facing [`App`] reads unknown
+/// must not silently accept a typo); the guest-facing [`SharedApp`] reads unknown
 /// kinds as `web`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -906,7 +906,7 @@ mod tests {
             config_hash: ConfigHash(0xdead_beef),
             name: "Family".into(),
             transport: "wispers-connect".into(),
-            apps: vec![App {
+            apps: vec![SharedApp {
                 id: "jf".into(),
                 name: "Jellyfin".into(),
                 kind: AppKind::Jellyfin,
@@ -923,10 +923,12 @@ mod tests {
             serde_json::json!({ "config_hash": "0000000000000001" })
         );
         // An app without a kind is a web app; unknown fields are ignored.
-        let app: App = serde_json::from_str(r#"{"id":"x","name":"X","future_field":1}"#).unwrap();
+        let app: SharedApp =
+            serde_json::from_str(r#"{"id":"x","name":"X","future_field":1}"#).unwrap();
         assert_eq!(app.kind, AppKind::Web);
         // An unknown kind reads as web: a host may add kinds before its guests.
-        let app: App = serde_json::from_str(r#"{"id":"x","name":"X","kind":"plex"}"#).unwrap();
+        let app: SharedApp =
+            serde_json::from_str(r#"{"id":"x","name":"X","kind":"plex"}"#).unwrap();
         assert_eq!(app.kind, AppKind::Web);
         // The kind on its own stays strict, for config files.
         assert!(serde_json::from_str::<AppKind>(r#""plex""#).is_err());

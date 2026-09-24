@@ -3,5 +3,7 @@ resolver = "2"
 members = [
     "waserver",
     "waclient",
+    "sdk",
+    "sdk/uniffi-bindgen",
     "wire",
 ]
