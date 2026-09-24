@@ -38,7 +38,7 @@ struct ShareDetailScreen: View {
             StatusRow(
                 availability: share.state.availability
                     ?? manager.status.availability(for: shareID))
-            ShareAvatar(nickname: name(share), iconPNG: icons.iconData(for: shareID), size: 64)
+            ShareAvatar(nickname: name(share), iconPNG: icons.iconData(forAnyAppOf: share), size: 64)
             Text(name(share))
                 .font(.system(.largeTitle, design: .serif).weight(.bold))
                 .foregroundStyle(AccessColor.onSurface)
@@ -56,7 +56,7 @@ struct ShareDetailScreen: View {
                             .font(.footnote).foregroundStyle(AccessColor.onSurfaceVariant)
                     }
                     ForEach(share.apps, id: \.id) { app in
-                        NavigationLink(value: ShareRoute.browse(shareID, appID: app.id)) {
+                        NavigationLink(value: ShareRoute.browse(BrowseKey(shareID: shareID, appID: app.id))) {
                             Text("Open \(app.name) ↗").accessFilledButton()
                         }
                     }

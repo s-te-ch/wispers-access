@@ -6,31 +6,36 @@ import WispersAccessSdk
 /// recent share. The dynamic item list is rebuilt from the roster; the selected
 /// one is captured by the UIKit lifecycle and routed once SwiftUI is ready.
 enum QuickAction {
-    static let openShareType = "dev.wispers.access.openShare"
+    static let openAppType = "dev.wispers.access.openApp"
     private static let shareIDKey = "shareID"
+    private static let appIDKey = "appID"
 
-    /// The target share of an "open share" shortcut, if the item is one of ours.
-    static func shareID(from item: UIApplicationShortcutItem) -> ShareId? {
-        guard item.type == openShareType else { return nil }
-        return item.userInfo?[shareIDKey] as? String
+    /// The target app of an "open app" shortcut, if the item is one of ours.
+    static func target(of item: UIApplicationShortcutItem) -> BrowseKey? {
+        guard item.type == openAppType,
+            let shareID = item.userInfo?[shareIDKey] as? String,
+            let appID = item.userInfo?[appIDKey] as? String
+        else { return nil }
+        return BrowseKey(shareID: shareID, appID: appID)
     }
 
-    /// The dynamic shortcut list from the roster: most-recently-connected first,
-    /// capped to the four the launcher shows. Terminal shares don't get one —
-    /// there's nothing to open.
+    /// The dynamic shortcut list from the roster: the apps of the most
+    /// recently reached shares first, capped to the four the launcher shows.
+    /// Terminal shares don't get one — there's nothing to open.
     static func shortcutItems(for shares: [Share], activity: ShareActivityStore) -> [UIApplicationShortcutItem] {
         let lastUsed = { (share: Share) in activity.lastConnected(share.id) ?? share.joinedAt }
         return shares
             .filter { $0.state == .live }
             .sorted { lastUsed($0) > lastUsed($1) }
+            .flatMap { share in share.apps.map { (share, $0) } }
             .prefix(4)
-            .map { share in
+            .map { share, app in
                 UIApplicationShortcutItem(
-                    type: openShareType,
-                    localizedTitle: share.name.isEmpty ? "Untitled share" : share.name,
-                    localizedSubtitle: nil,
+                    type: openAppType,
+                    localizedTitle: app.name.isEmpty ? app.id : app.name,
+                    localizedSubtitle: share.name,
                     icon: UIApplicationShortcutIcon(systemImageName: "globe"),
-                    userInfo: [shareIDKey: share.id as NSString]
+                    userInfo: [shareIDKey: share.id as NSString, appIDKey: app.id as NSString]
                 )
             }
     }
@@ -43,14 +48,14 @@ enum QuickAction {
 @Observable
 final class QuickActionInbox {
     static let shared = QuickActionInbox()
-    var pendingShareID: ShareId?
+    var pending: BrowseKey?
 
     nonisolated init() {}
 
     @discardableResult
     func handle(_ item: UIApplicationShortcutItem) -> Bool {
-        guard let id = QuickAction.shareID(from: item) else { return false }
-        pendingShareID = id
+        guard let key = QuickAction.target(of: item) else { return false }
+        pending = key
         return true
     }
 }

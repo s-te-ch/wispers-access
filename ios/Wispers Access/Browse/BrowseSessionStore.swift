@@ -21,10 +21,10 @@ final class BrowseSessionStore {
     private let warmTTL: Duration = .seconds(300)
     @ObservationIgnored private var evictionTasks: [BrowseKey: Task<Void, Never>] = [:]
 
-    /// Reports a site icon harvested by a session's web view (share, bytes, rank).
-    @ObservationIgnored private let onIcon: (ShareId, Data, Int) -> Void
+    /// Reports a site icon harvested by a session's web view (app, bytes, rank).
+    @ObservationIgnored private let onIcon: (BrowseKey, Data, Int) -> Void
 
-    init(onIcon: @escaping (ShareId, Data, Int) -> Void = { _, _, _ in }) {
+    init(onIcon: @escaping (BrowseKey, Data, Int) -> Void = { _, _, _ in }) {
         self.onIcon = onIcon
     }
 
@@ -32,10 +32,9 @@ final class BrowseSessionStore {
         sessions.first { $0.key == key }
     }
 
-    /// Whether any of a share's apps has a live (warm) session — drives the
-    /// roster's live marker.
-    func isWarm(_ shareID: ShareId) -> Bool {
-        sessions.contains { $0.key.shareID == shareID }
+    /// Whether an app has a live (warm) session — drives the roster's live marker.
+    func isWarm(_ key: BrowseKey) -> Bool {
+        sessions.contains { $0.key == key }
     }
 
     /// Ensures a warm session exists for the app and marks it the on-screen one.

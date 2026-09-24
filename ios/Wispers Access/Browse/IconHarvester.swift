@@ -14,11 +14,11 @@ import WispersAccessSdk
 final class IconHarvester: NSObject, WKScriptMessageHandler {
     static let messageName = "waIcon"
 
-    private let shareID: ShareId
-    private let onIcon: (ShareId, Data, Int) -> Void
+    private let key: BrowseKey
+    private let onIcon: (BrowseKey, Data, Int) -> Void
 
-    init(shareID: ShareId, onIcon: @escaping (ShareId, Data, Int) -> Void) {
-        self.shareID = shareID
+    init(key: BrowseKey, onIcon: @escaping (BrowseKey, Data, Int) -> Void) {
+        self.key = key
         self.onIcon = onIcon
     }
 
@@ -39,7 +39,7 @@ final class IconHarvester: NSObject, WKScriptMessageHandler {
             // (e.g. a raw .ico favicon) can't claim a rung and block a good one.
             UIImage(data: bytes) != nil
         else { return }
-        onIcon(shareID, bytes, rank)
+        onIcon(key, bytes, rank)
     }
 
     /// Decodes a `data:` URL's base64 payload, or nil if malformed.

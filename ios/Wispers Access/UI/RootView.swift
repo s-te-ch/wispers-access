@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import WispersAccessSdk
 
 /// The app's root: a navigation stack rooted at the share roster. The roster is
 /// both home and switcher — tapping a share pushes its app's browser (or its
@@ -17,7 +18,7 @@ struct RootView: View {
             ShareListScreen()
                 .navigationDestination(for: ShareRoute.self) { route in
                     switch route {
-                    case .browse(let id, let appID): BrowserView(shareID: id, appID: appID)
+                    case .browse(let key): BrowserView(key: key)
                     case .detail(let id): ShareDetailScreen(shareID: id)
                     }
                 }
@@ -25,7 +26,7 @@ struct RootView: View {
         // Route a quick action: cold-launch (already set before we appear) and
         // warm (set while running) both land here.
         .onAppear(perform: routeQuickAction)
-        .onChange(of: quickActions.pendingShareID) { routeQuickAction() }
+        .onChange(of: quickActions.pending) { routeQuickAction() }
         // Keep the app-icon shortcuts current — Apple's cue to refresh them.
         .onChange(of: scenePhase) { _, phase in
             if phase == .background {
@@ -35,11 +36,13 @@ struct RootView: View {
         }
     }
 
-    /// Opens a pending quick-action share once, if it still exists.
+    /// Opens a pending quick-action app once, if it still exists.
     private func routeQuickAction() {
-        guard let id = quickActions.pendingShareID else { return }
-        quickActions.pendingShareID = nil
-        guard let share = manager.share(id) else { return }
-        router.open(share)
+        guard let key = quickActions.pending else { return }
+        quickActions.pending = nil
+        guard let share = manager.share(key.shareID), share.state == .live,
+            share.apps.contains(where: { $0.id == key.appID })
+        else { return }
+        router.open(key)
     }
 }

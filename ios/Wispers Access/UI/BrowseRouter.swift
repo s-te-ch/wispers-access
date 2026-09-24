@@ -3,18 +3,8 @@ import WispersAccessSdk
 
 /// A destination reachable from the roster.
 enum ShareRoute: Hashable {
-    case browse(ShareId, appID: String)
+    case browse(BrowseKey)
     case detail(ShareId)
-
-    /// Where a share's card leads: straight into its only app, or to the
-    /// detail screen, which lists several apps, none yet, or the reason a
-    /// terminal share can't be opened.
-    static func forCard(_ share: Share) -> ShareRoute {
-        if share.state == .live, share.apps.count == 1 {
-            return .browse(share.id, appID: share.apps[0].id)
-        }
-        return .detail(share.id)
-    }
 }
 
 /// The roster's navigation state — the routes pushed onto the stack. Held in the
@@ -31,7 +21,17 @@ final class BrowseRouter {
     /// the sheet is still on screen (which SwiftUI handles poorly).
     var openAfterDismiss: ShareId?
 
+    /// Opens a share the quickest way there is: its only app, or its detail
+    /// screen when there are several to choose from, or none yet.
     func open(_ share: Share) {
-        path.append(.forCard(share))
+        if share.state == .live, share.apps.count == 1 {
+            path.append(.browse(BrowseKey(shareID: share.id, appID: share.apps[0].id)))
+        } else {
+            path.append(.detail(share.id))
+        }
+    }
+
+    func open(_ key: BrowseKey) {
+        path.append(.browse(key))
     }
 }

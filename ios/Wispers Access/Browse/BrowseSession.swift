@@ -35,13 +35,13 @@ final class BrowseSession: Identifiable {
         app: App,
         proxy: PerAppProxy,
         auth: ProxyAuth,
-        onIcon: @escaping (ShareId, Data, Int) -> Void = { _, _, _ in }
+        onIcon: @escaping (BrowseKey, Data, Int) -> Void = { _, _, _ in }
     ) {
         self.key = BrowseKey(shareID: share.id, appID: app.id)
         self.name = app.name.isEmpty ? share.name : app.name
         self.proxy = proxy
         self.auth = auth
-        self.harvester = IconHarvester(shareID: share.id, onIcon: onIcon)
+        self.harvester = IconHarvester(key: key, onIcon: onIcon)
 
         let configuration = WKWebViewConfiguration()
         configuration.defaultWebpagePreferences.allowsContentJavaScript = true

@@ -36,8 +36,8 @@ final class ShareManager {
     /// The shares currently open for browsing, switchable in-app. Lazy so its
     /// icon callback can capture `self` (to feed `icons`).
     @ObservationIgnored private(set) lazy var browser = BrowseSessionStore(
-        onIcon: { [weak self] id, png, rank in
-            self?.icons.update(png, rank: rank, for: id)
+        onIcon: { [weak self] key, png, rank in
+            self?.icons.update(png, rank: rank, for: key)
         }
     )
 

@@ -1,11 +1,11 @@
 import SwiftUI
 import WispersAccessSdk
 
-/// The roster of joined shares, and the home + switcher in one surface: the
-/// wordmark, a "SHARED WITH YOU" section, cards (avatar · status · name), and a
-/// floating add button. Tapping a card opens/resumes the share's app (a warm
-/// session shows a live marker), or its detail screen when there are several;
-/// the trailing ⓘ opens the detail screen (info + Remove).
+/// The roster: the apps shared with you, grouped by the share they come from,
+/// and the home + switcher in one surface. A share's header carries its name
+/// and status and leads to its detail screen; each app underneath is a card
+/// that opens (or resumes) its browser in one tap, a warm session showing a
+/// live marker. A floating button adds a share.
 struct ShareListScreen: View {
     @Environment(ShareManager.self) private var manager
     @Environment(ShareIconStore.self) private var icons
@@ -24,7 +24,7 @@ struct ShareListScreen: View {
                         if manager.shares.isEmpty {
                             empty
                         } else {
-                            shareCards
+                            shareSections
                         }
                     }
                     .padding(.top, 12)
@@ -60,56 +60,61 @@ struct ShareListScreen: View {
             Text("SHARED WITH YOU")
                 .font(.caption.weight(.medium)).tracking(1.5)
             Spacer()
-            Text("\(manager.shares.count)")
+            Text("\(manager.shares.reduce(0) { $0 + $1.apps.count })")
                 .font(.caption.weight(.medium))
         }
         .foregroundStyle(AccessColor.onSurfaceVariant)
     }
 
-    private var shareCards: some View {
-        VStack(spacing: 12) {
+    private var shareSections: some View {
+        VStack(spacing: 24) {
             ForEach(manager.shares) { share in
-                shareRow(share)
+                shareSection(share)
             }
         }
     }
 
-    /// One roster row: the card taps through to the app (or the detail screen
-    /// when there are several apps, or none, or the share is gone); the
-    /// trailing ⓘ taps through to the detail screen. Two side-by-side hit
-    /// targets inside one card.
-    private func shareRow(_ share: Share) -> some View {
-        HStack(spacing: 8) {
-            NavigationLink(value: ShareRoute.forCard(share)) {
-                ShareCard(
+    /// One share: its header, then one card per app. A terminal share keeps
+    /// its apps on screen, dimmed, and every tap on it leads to the detail
+    /// screen, which explains and offers Remove.
+    private func shareSection(_ share: Share) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            NavigationLink(value: ShareRoute.detail(share.id)) {
+                ShareHeader(
                     share: share,
                     availability: share.state.availability
                         ?? manager.status.availability(for: share.id),
-                    lastConnected: manager.activity.lastConnected(share.id),
-                    isLive: manager.browser.isWarm(share.id),
-                    iconData: icons.iconData(for: share.id)
+                    lastConnected: manager.activity.lastConnected(share.id)
                 )
-                .opacity(share.state == .live ? 1 : 0.6)
             }
             .buttonStyle(.plain)
 
-            NavigationLink(value: ShareRoute.detail(share.id)) {
-                Image(systemName: "info.circle")
-                    .font(.title3)
+            if share.apps.isEmpty {
+                Text("No apps shared yet.")
+                    .font(.subheadline)
                     .foregroundStyle(AccessColor.onSurfaceVariant)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Rectangle())
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 12)
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Share details")
+            ForEach(share.apps, id: \.id) { app in
+                let key = BrowseKey(shareID: share.id, appID: app.id)
+                NavigationLink(
+                    value: share.state == .live ? ShareRoute.browse(key) : ShareRoute.detail(share.id)
+                ) {
+                    AppCard(
+                        app: app,
+                        isLive: manager.browser.isWarm(key),
+                        iconData: icons.iconData(for: key)
+                    )
+                    .opacity(share.state == .live ? 1 : 0.6)
+                }
+                .buttonStyle(.plain)
+            }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 16)
-        .background(AccessColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
     }
 
     private var empty: some View {
-        Text("No apps yet. Tap + to add one.")
+        Text("No apps yet. Tap + to add a share.")
             .font(.subheadline)
             .foregroundStyle(AccessColor.onSurfaceVariant)
             .frame(maxWidth: .infinity)
@@ -138,19 +143,15 @@ struct ShareListScreen: View {
     }
 }
 
-private struct ShareCard: View {
+/// A share's line above its apps: status dot and line, the name, and the ⓘ
+/// that says the whole header leads to the detail screen.
+private struct ShareHeader: View {
     let share: Share
     let availability: Availability
     let lastConnected: Date?
-    let isLive: Bool
-    let iconData: Data?
 
     var body: some View {
-        HStack(spacing: 16) {
-            ShareAvatar(nickname: name, iconPNG: iconData, size: 48)
-                .overlay(alignment: .topTrailing) {
-                    if isLive { liveBadge }
-                }
+        HStack(alignment: .firstTextBaseline, spacing: 8) {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 8) {
                     StatusDot(availability: availability)
@@ -158,35 +159,20 @@ private struct ShareCard: View {
                         .font(.caption2.weight(.medium)).tracking(1)
                         .foregroundStyle(AccessColor.onSurfaceVariant)
                 }
-                Text(name)
+                Text(share.name.isEmpty ? "Untitled share" : share.name)
                     .font(.system(.title3, design: .serif).weight(.bold))
                     .foregroundStyle(AccessColor.onSurface)
                     .fixedSize(horizontal: false, vertical: true)
                     .multilineTextAlignment(.leading)
-                if share.apps.count > 1 {
-                    Text(share.apps.map(\.name).joined(separator: " · "))
-                        .font(.caption)
-                        .foregroundStyle(AccessColor.onSurfaceVariant)
-                        .lineLimit(1)
-                }
             }
             Spacer(minLength: 8)
+            Image(systemName: "info.circle")
+                .font(.title3)
+                .foregroundStyle(AccessColor.onSurfaceVariant)
+                .accessibilityLabel("Share details")
         }
+        .padding(.horizontal, 8)
         .contentShape(Rectangle())
-    }
-
-    /// Subtle presence badge on the avatar: this share has a warm session open.
-    private var liveBadge: some View {
-        Circle()
-            .fill(AccessColor.primaryDark)
-            .frame(width: 13, height: 13)
-            .overlay(Circle().stroke(AccessColor.surface, lineWidth: 2.5))
-            .offset(x: 3, y: -3)
-            .accessibilityLabel("Open")
-    }
-
-    private var name: String {
-        share.name.isEmpty ? "Untitled share" : share.name
     }
 
     private var statusLine: String {
@@ -212,5 +198,49 @@ private struct ShareCard: View {
         case ..<(60 * 24 * 7): return "\(minutes / (60 * 24))D"
         default: return "\(minutes / (60 * 24 * 7))W"
         }
+    }
+}
+
+/// One app's card: its icon (harvested while browsing, else a letter tile)
+/// and name. The thing the user taps.
+private struct AppCard: View {
+    let app: WispersAccessSdk.App
+    let isLive: Bool
+    let iconData: Data?
+
+    var body: some View {
+        HStack(spacing: 16) {
+            ShareAvatar(nickname: name, iconPNG: iconData, size: 48)
+                .overlay(alignment: .topTrailing) {
+                    if isLive { liveBadge }
+                }
+            Text(name)
+                .font(.system(.title3, design: .serif).weight(.bold))
+                .foregroundStyle(AccessColor.onSurface)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
+            Spacer(minLength: 8)
+            Image(systemName: "chevron.right")
+                .font(.footnote.weight(.semibold))
+                .foregroundStyle(AccessColor.onSurfaceVariant)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 16)
+        .background(AccessColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .contentShape(Rectangle())
+    }
+
+    /// Subtle presence badge on the avatar: this app has a warm session open.
+    private var liveBadge: some View {
+        Circle()
+            .fill(AccessColor.primaryDark)
+            .frame(width: 13, height: 13)
+            .overlay(Circle().stroke(AccessColor.surface, lineWidth: 2.5))
+            .offset(x: 3, y: -3)
+            .accessibilityLabel("Open")
+    }
+
+    private var name: String {
+        app.name.isEmpty ? app.id : app.name
     }
 }

@@ -5,15 +5,10 @@ import WispersAccessSdk
 /// The browser for one app of one share, pushed onto the roster's navigation
 /// stack. It shows the retained `WKWebView` (kept alive by `BrowseSessionStore`,
 /// so page state survives switching). Backing out returns to the roster — which
-/// is how you switch — while the session stays warm for a while. A share with
-/// several apps gets a menu to jump between them.
+/// is how you switch — while the session stays warm for a while.
 struct BrowserView: View {
     @Environment(ShareManager.self) private var manager
-    @Environment(BrowseRouter.self) private var router
-    let shareID: ShareId
-    let appID: String
-
-    private var key: BrowseKey { BrowseKey(shareID: shareID, appID: appID) }
+    let key: BrowseKey
 
     var body: some View {
         ZStack {
@@ -35,30 +30,17 @@ struct BrowserView: View {
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
             ToolbarItem(placement: .topBarTrailing) {
-                HStack {
-                    if let share = manager.share(shareID), share.apps.count > 1 {
-                        Menu {
-                            ForEach(share.apps, id: \.id) { app in
-                                Button(app.name) { router.path.append(.browse(shareID, appID: app.id)) }
-                                    .disabled(app.id == appID)
-                            }
-                        } label: {
-                            Image(systemName: "square.grid.2x2")
-                        }
-                        .accessibilityLabel("Other apps of this share")
-                    }
-                    Button { manager.browser.session(for: key)?.reload() } label: {
-                        Image(systemName: "arrow.clockwise")
-                    }
-                    .disabled(manager.browser.session(for: key) == nil)
+                Button { manager.browser.session(for: key)?.reload() } label: {
+                    Image(systemName: "arrow.clockwise")
                 }
                 .foregroundStyle(AccessColor.primaryDark)
+                .disabled(manager.browser.session(for: key) == nil)
             }
         }
         .onAppear {
             // Ensure the (warm) session exists and mark it on-screen.
-            if let share = manager.share(shareID),
-                let app = share.apps.first(where: { $0.id == appID }),
+            if let share = manager.share(key.shareID),
+                let app = share.apps.first(where: { $0.id == key.appID }),
                 let proxy = manager.proxy
             {
                 manager.browser.open(share, app, proxy: proxy, auth: manager.proxyAuth)
@@ -70,9 +52,9 @@ struct BrowserView: View {
     }
 
     private var title: String {
-        guard let share = manager.share(shareID) else { return "App" }
-        let app = share.apps.first { $0.id == appID }
-        let name = app?.name ?? appID
+        guard let share = manager.share(key.shareID) else { return "App" }
+        let app = share.apps.first { $0.id == key.appID }
+        let name = app?.name ?? key.appID
         return name.isEmpty ? share.name : name
     }
 }
