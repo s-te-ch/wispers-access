@@ -48,21 +48,10 @@ struct ShareDetailScreen: View {
             }
             if share.state != .live {
                 TerminalShareExplanation(state: share.state)
-                removeButton
             } else {
-                VStack(spacing: 8) {
-                    if share.apps.isEmpty {
-                        Text("No apps shared yet. They appear here once the host adds some.")
-                            .font(.footnote).foregroundStyle(AccessColor.onSurfaceVariant)
-                    }
-                    ForEach(share.apps, id: \.id) { app in
-                        NavigationLink(value: ShareRoute.browse(BrowseKey(shareID: shareID, appID: app.id))) {
-                            Text("Open \(app.name) ↗").accessFilledButton()
-                        }
-                    }
-                    removeButton
-                }
+                apps(share)
             }
+            removeButton
             Spacer()
         }
         .padding(16)
@@ -75,6 +64,32 @@ struct ShareDetailScreen: View {
             Button("Cancel", role: .cancel) {}
         } message: {
             Text("This device's access will be removed on the host. You'll need a new invitation code to rejoin.")
+        }
+    }
+
+    /// The share's apps as the roster shows them, each a tap away.
+    private func apps(_ share: Share) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("APPS")
+                .font(.caption.weight(.medium)).tracking(1.5)
+                .foregroundStyle(AccessColor.onSurfaceVariant)
+                .padding(.top, 8)
+            if share.apps.isEmpty {
+                Text("No apps shared yet. They appear here once the host adds some.")
+                    .font(.subheadline).foregroundStyle(AccessColor.onSurfaceVariant)
+                    .padding(.vertical, 8)
+            }
+            ForEach(share.apps, id: \.id) { app in
+                let key = BrowseKey(shareID: shareID, appID: app.id)
+                NavigationLink(value: ShareRoute.browse(key)) {
+                    AppCard(
+                        app: app,
+                        isLive: manager.browser.isWarm(key),
+                        iconData: icons.iconData(for: key)
+                    )
+                }
+                .buttonStyle(.plain)
+            }
         }
     }
 
