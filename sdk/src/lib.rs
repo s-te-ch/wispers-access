@@ -4,15 +4,18 @@
 //!
 //! The entry point is [`Client`], one per data directory. The wire types an
 //! integrator meets ([`Invite`], [`App`], …) are re-exported from the wire
-//! crate, so the SDK is the only dependency an app needs.
+//! crate, so the SDK is the only dependency an app needs. The SDK logs
+//! through `tracing`; the app installs the subscriber.
 
 mod guest_node;
 mod http;
 mod iroh_transport;
+mod secrets;
 mod storage;
 mod transports;
 mod wispers_connect_transport;
 
+pub use secrets::{FileSecretStore, SecretStore, SecretStoreError};
 pub use storage::ShareId;
 pub use wispers_access_wire::{App, AppKind, Invite, InviteError, Transport};
 
@@ -29,8 +32,21 @@ use wispers_access_wire as wire;
 pub struct ClientConfig {
     /// Where the client keeps its state. Created if missing.
     pub data_dir: PathBuf,
+    /// Where key material goes. Without one, a [`FileSecretStore`] under
+    /// `data_dir`.
+    pub secrets: Option<Arc<dyn SecretStore>>,
+    /// Told whenever a stored share changes. Without one, nobody is.
+    pub observer: Option<Arc<dyn Observer>>,
     /// The tokio runtime to run on. Without one, the client starts its own.
     pub runtime: Option<tokio::runtime::Handle>,
+}
+
+/// What an app implements to follow its shares without polling.
+pub trait Observer: Send + Sync {
+    /// The stored share changed: it was joined, its name or apps changed,
+    /// or its host node turned this device away for good. Called from the
+    /// client's runtime, for `leave` never (the caller knows).
+    fn on_share_changed(&self, share: Share);
 }
 
 /// This device's view of its shares: the store, the runtime everything runs
@@ -43,6 +59,8 @@ pub struct Client {
 
 struct ClientInner {
     db: Arc<storage::DB>,
+    secrets: Arc<dyn SecretStore>,
+    observer: Arc<dyn Observer>,
     runtime: tokio::runtime::Handle,
     /// Set when the client started the runtime itself, so it can stop it.
     owned_runtime: Mutex<Option<tokio::runtime::Runtime>>,
@@ -93,6 +111,10 @@ impl Client {
             let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         }
         let db = storage::DB::open(&config.data_dir)?;
+        let secrets = config
+            .secrets
+            .unwrap_or_else(|| Arc::new(FileSecretStore::new(config.data_dir.join("secrets"))));
+        let observer = config.observer.unwrap_or_else(|| Arc::new(NoObserver));
         let (runtime, owned_runtime) = match config.runtime {
             Some(handle) => (handle, None),
             None => {
@@ -106,6 +128,8 @@ impl Client {
         Ok(Client {
             inner: Arc::new(ClientInner {
                 db,
+                secrets,
+                observer,
                 runtime,
                 owned_runtime: Mutex::new(owned_runtime),
                 guest_nodes: Mutex::new(HashMap::new()),
@@ -121,14 +145,20 @@ impl Client {
         self.on_runtime(async move {
             let row = client.inner.db.new_row()?;
             let result = async {
-                let info = transports::join(invite, &row).await?;
+                let info = transports::join(invite, &row, &client.inner.secrets).await?;
                 client.record_join(&row, &info)
             }
             .await;
-            if result.is_err() {
-                let _ = row.delete_row();
+            match result {
+                Ok(share) => {
+                    client.inner.observer.on_share_changed(share.clone());
+                    Ok(share)
+                }
+                Err(e) => {
+                    let _ = row.delete_row();
+                    Err(e)
+                }
             }
-            result
         })
         .await
     }
@@ -148,7 +178,7 @@ impl Client {
         let label = host_slug(&name).unwrap_or_else(|| share_id.to_string());
         row.write_deduped_hostname(&label)?;
         row.mark_complete()?;
-        share_from_row(row)
+        row.read_share()
     }
 
     /// Every joined share, from the store. Never waits for the network.
@@ -157,7 +187,7 @@ impl Client {
             .db
             .get_all_rows()?
             .iter()
-            .map(share_from_row)
+            .map(storage::Row::read_share)
             .collect()
     }
 
@@ -167,14 +197,14 @@ impl Client {
             .db
             .find_row(key)?
             .as_ref()
-            .map(share_from_row)
+            .map(storage::Row::read_share)
             .transpose()
     }
 
     /// Asks the host node whether the share changed since the stored copy.
     /// `Some` carries the share as it is now, which may also mean that the
     /// host node has turned this device away for good; `None` means nothing
-    /// changed.
+    /// changed. The observer hears about a change too.
     pub async fn refresh(&self, share: &ShareId) -> Result<Option<Share>> {
         let client = self.clone();
         let share = share.clone();
@@ -184,20 +214,20 @@ impl Client {
                 .db
                 .find_row(share.as_str())?
                 .with_context(|| format!("no share {}", share))?;
-            let before = share_from_row(&row)?;
+            let before = row.read_share()?;
             if before.state != ShareState::Live {
                 return Ok(None);
             }
             let node = match client.guest_node(share.as_str()).await? {
                 Lookup::Live(node) => node,
                 // The store learned this during restore, above.
-                Lookup::Dead(_) => return Ok(Some(share_from_row(&row)?)),
+                Lookup::Dead(_) => return Ok(Some(row.read_share()?)),
                 Lookup::Unknown => anyhow::bail!("no share {}", share),
             };
             let after = match node.refresh().await {
-                Ok(Some(_)) => share_from_row(&row)?,
+                Ok(Some(_)) => row.read_share()?,
                 Ok(None) => return Ok(None),
-                Err(guest_node::RefreshError::Terminal) => share_from_row(&row)?,
+                Err(guest_node::RefreshError::Terminal) => row.read_share()?,
                 Err(guest_node::RefreshError::Transient(e)) => return Err(e),
             };
             Ok((after != before).then_some(after))
@@ -206,7 +236,7 @@ impl Client {
     }
 
     /// Leaves the share: tells the host node, or the hub, where possible, and
-    /// forgets the share on this device either way.
+    /// forgets the share and its secrets on this device either way.
     pub async fn leave(&self, share: &ShareId) -> Result<()> {
         let client = self.clone();
         let share = share.clone();
@@ -224,7 +254,7 @@ impl Client {
                 .lock()
                 .expect("unpoisoned")
                 .remove(&share);
-            transports::leave(&row).await?;
+            transports::leave(&row, &client.inner.secrets).await?;
             row.delete_row()
         })
         .await
@@ -274,11 +304,13 @@ impl Client {
                     .read_names()
                     .map_err(transports::TransportError::Transient)?
                     .2;
-                let transport = transports::restore(row.clone()).await?;
+                let transport =
+                    transports::restore(row.clone(), self.inner.secrets.clone()).await?;
                 Ok::<_, transports::TransportError>(Arc::new(GuestNode::new(
                     label,
                     row.clone(),
                     transport,
+                    self.inner.observer.clone(),
                 )))
             })
             .await;
@@ -286,6 +318,7 @@ impl Client {
             Ok(node) => Ok(Lookup::Live(node.clone())),
             Err(transports::TransportError::Terminal(state)) => {
                 row.write_terminal_state(state.as_str())?;
+                self.inner.observer.on_share_changed(row.read_share()?);
                 Ok(Lookup::Dead(state))
             }
             Err(transports::TransportError::Transient(e)) => Err(e),
@@ -314,25 +347,10 @@ pub(crate) enum Lookup {
     Unknown,
 }
 
-fn share_from_row(row: &storage::Row) -> Result<Share> {
-    let (id, name, label) = row.read_names()?;
-    let state = match row
-        .read_terminal_state()?
-        .as_deref()
-        .and_then(TerminalState::parse)
-    {
-        None => ShareState::Live,
-        Some(TerminalState::Removed) => ShareState::Removed,
-        Some(TerminalState::Revoked) => ShareState::Revoked,
-    };
-    Ok(Share {
-        id,
-        name,
-        label,
-        transport: row.read_transport_kind()?,
-        apps: row.read_apps()?,
-        state,
-    })
+struct NoObserver;
+
+impl Observer for NoObserver {
+    fn on_share_changed(&self, _: Share) {}
 }
 
 /// Free-form name -> DNS-label-safe slug, or None if nothing usable remains.
@@ -388,14 +406,20 @@ mod tests {
         std::env::temp_dir().join(format!("wispers-access-sdk-{}", uuid::Uuid::new_v4()))
     }
 
+    fn client_in(data_dir: &std::path::Path) -> Client {
+        Client::new(ClientConfig {
+            data_dir: data_dir.to_owned(),
+            secrets: None,
+            observer: None,
+            runtime: None,
+        })
+        .unwrap()
+    }
+
     #[test]
     fn a_client_starts_offline_with_its_own_runtime() {
         let data_dir = scratch_dir();
-        let client = Client::new(ClientConfig {
-            data_dir: data_dir.clone(),
-            runtime: None,
-        })
-        .unwrap();
+        let client = client_in(&data_dir);
         assert!(client.shares().unwrap().is_empty());
         assert!(client.share("nope").unwrap().is_none());
         drop(client);
@@ -405,11 +429,7 @@ mod tests {
     #[tokio::test]
     async fn a_client_can_be_dropped_inside_another_runtime() {
         let data_dir = scratch_dir();
-        let client = Client::new(ClientConfig {
-            data_dir: data_dir.clone(),
-            runtime: None,
-        })
-        .unwrap();
+        let client = client_in(&data_dir);
         let proxy = client
             .proxy(ProxyMode::HostRouted { port: 0 })
             .await

@@ -1,35 +1,43 @@
 //! The iroh transport implementation.
 
 use crate::guest_node;
+use crate::secrets::SecretStore;
 use crate::storage;
 use crate::transports::{BoxFuture, Stream, TerminalState, Transport, TransportError};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::OnceCell;
+use tracing::{info, warn};
 use wispers_access_wire as wire;
+
+/// The secret store key of this device's Ed25519 key for a share; its
+/// public key is what the host node bound to the invite.
+const SECRET_KEY: &str = "iroh_secret";
 
 /// Joins the share through iroh - creates an iroh endpoint, connects to the
 /// share's host node, activates (i.e. redeems the invite code).
 pub async fn join(
     row: &storage::Row,
+    secrets: &Arc<dyn SecretStore>,
     endpoint_id: wire::EndpointId,
     secret: &wire::InviteSecret,
 ) -> Result<wire::ShareInfo> {
     let host = iroh::EndpointId::from_bytes(&endpoint_id.0).context("invalid endpoint ID")?;
     let key = iroh::SecretKey::generate();
     let transport = Iroh::bind(key.to_bytes(), host).await?;
-    println!("Connecting to the share's host node...");
+    info!("connecting to the share's host node");
     let stream = transport.open_stream().await.map_err(|e| match e {
         TransportError::Terminal(state) => anyhow::anyhow!("{}", state.describe()),
         TransportError::Transient(e) => e.context("connecting to the Wispers Access host"),
     })?;
-    println!("Activating...");
+    info!("activating");
     let info = guest_node::activate(stream, secret).await?;
-    row.write_iroh_state(&storage::IrohState {
-        secret_key: key.to_bytes(),
-        host_endpoint_id: host.to_string(),
-    })?;
+    // The first use of the share restores a transport of its own; this
+    // one has done its job. Close it properly, iroh complains otherwise.
+    transport.endpoint.close().await;
+    row.write_iroh_endpoint_id(&host.to_string())?;
+    secrets.save(&row.share_id()?, SECRET_KEY, &key.to_bytes())?;
     Ok(info)
 }
 
@@ -39,23 +47,39 @@ const LEAVE_TIMEOUT: Duration = Duration::from_secs(10);
 /// Tells the host node this device is leaving, so it stops listing us and
 /// never serves this key again. Best effort: the host may be unreachable,
 /// and the share is removed locally either way.
-pub async fn leave(row: &storage::Row) {
+pub async fn leave(row: &storage::Row, secrets: &Arc<dyn SecretStore>) {
     let attempt = async {
-        let transport = Iroh::restore(row).await.map_err(describe)?;
-        let stream = transport.open_stream().await.map_err(describe)?;
-        guest_node::leave(stream).await?;
-        // Close properly, so the host node sees us go rather than time out.
+        let transport = Iroh::restore(row, secrets).await.map_err(describe)?;
+        let told = async {
+            let stream = transport.open_stream().await.map_err(describe)?;
+            guest_node::leave(stream).await
+        }
+        .await;
+        // Close properly either way, so the host node sees us go rather than
+        // time out, and iroh has nothing to complain about.
         transport.endpoint.close().await;
-        Ok::<(), anyhow::Error>(())
+        told
     };
     match tokio::time::timeout(LEAVE_TIMEOUT, attempt).await {
-        Ok(Ok(())) => println!("Told the host node we are leaving."),
+        Ok(Ok(())) => info!("told the host node we are leaving"),
         Ok(Err(e)) => {
-            println!(
-                "Could not tell the host node we are leaving ({e:#}); removing locally anyway."
+            warn!(
+                error = format!("{e:#}"),
+                "could not tell the host node we are leaving; removing locally anyway"
             )
         }
-        Err(_) => println!("The host node did not answer in time; removing locally anyway."),
+        Err(_) => warn!("the host node did not answer in time; removing locally anyway"),
+    }
+    match row.share_id() {
+        Ok(share) => {
+            if let Err(e) = secrets.delete(&share, SECRET_KEY) {
+                warn!(error = %e, "could not delete the share's iroh key");
+            }
+        }
+        Err(e) => warn!(
+            error = format!("{e:#}"),
+            "could not delete the share's iroh key"
+        ),
     }
 }
 
@@ -80,20 +104,24 @@ pub struct Iroh {
 
 impl Iroh {
     /// Binds an endpoint with the share's stored key.
-    pub async fn restore(row: &storage::Row) -> Result<Self, TransportError> {
-        let state = row
-            .read_iroh_state()
-            .map_err(TransportError::Transient)?
-            .context("share has no iroh key")
-            .map_err(TransportError::Transient)?;
-        let host = state
-            .host_endpoint_id
-            .parse()
-            .context("stored host endpoint ID is invalid")
-            .map_err(TransportError::Transient)?;
-        Self::bind(state.secret_key, host)
-            .await
-            .map_err(TransportError::Transient)
+    pub async fn restore(
+        row: &storage::Row,
+        secrets: &Arc<dyn SecretStore>,
+    ) -> Result<Self, TransportError> {
+        let restored = async {
+            let host: iroh::EndpointId = row
+                .read_iroh_endpoint_id()?
+                .context("share has no iroh host")?
+                .parse()
+                .context("stored host endpoint ID is invalid")?;
+            let secret: [u8; 32] = secrets
+                .load(&row.share_id()?, SECRET_KEY)?
+                .context("share has no iroh key")?
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("stored iroh key has the wrong length"))?;
+            Self::bind(secret, host).await
+        };
+        restored.await.map_err(TransportError::Transient)
     }
 
     /// Binds an endpoint with `secret`, to reach `host`. `join` uses this
@@ -115,7 +143,7 @@ impl Iroh {
         let cell = self.conn.lock().expect("unpoisoned").clone();
         let conn = match cell
             .get_or_try_init(|| async {
-                eprintln!("connecting to the host node over iroh");
+                info!("connecting to the host node over iroh");
                 self.endpoint.connect(self.host, wire::ALPN).await
             })
             .await
@@ -154,7 +182,10 @@ impl Transport for Iroh {
         Box::pin(async {
             match self.try_open_stream().await {
                 Err(TransportError::Transient(e)) => {
-                    eprintln!("open_stream attempt 1 failed, retrying once: {:#}", e);
+                    warn!(
+                        error = format!("{e:#}"),
+                        "opening a stream failed, retrying once"
+                    );
                     self.try_open_stream().await
                 }
                 other => other,

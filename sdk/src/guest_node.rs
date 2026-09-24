@@ -1,5 +1,6 @@
 //! This device's node in one share, and the guest API it speaks.
 
+use crate::Observer;
 use crate::storage;
 use crate::transports::{Stream, TerminalState, Transport, TransportError};
 use anyhow::{Context, Result};
@@ -7,7 +8,8 @@ use http_body_util::{BodyExt, Full};
 use hyper::StatusCode;
 use hyper::client::conn::http1 as http1_client;
 use hyper_util::rt::TokioIo;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+use tracing::warn;
 use wire::{ConfigHash, ShareInfo};
 use wispers_access_wire as wire;
 
@@ -19,17 +21,24 @@ pub struct GuestNode {
     label: String,
     row: storage::Row,
     transport: Box<dyn Transport>,
+    observer: Arc<dyn Observer>,
     /// Set once the transport reports a terminal failure mid-session. From
     /// then on the share answers without dialing.
     dead: Mutex<Option<TerminalState>>,
 }
 
 impl GuestNode {
-    pub fn new(label: String, row: storage::Row, transport: Box<dyn Transport>) -> Self {
+    pub fn new(
+        label: String,
+        row: storage::Row,
+        transport: Box<dyn Transport>,
+        observer: Arc<dyn Observer>,
+    ) -> Self {
         Self {
             label,
             row,
             transport,
+            observer,
             dead: Mutex::new(None),
         }
     }
@@ -58,6 +67,7 @@ impl GuestNode {
         let info = fetch_info(stream, known).await?;
         if let Some(info) = &info {
             self.row.write_share_info(info)?;
+            self.observer.on_share_changed(self.row.read_share()?);
         }
         Ok(info)
     }
@@ -70,13 +80,24 @@ impl GuestNode {
         }
         match self.transport.open_stream().await {
             Err(TransportError::Terminal(state)) => {
-                eprintln!(
-                    "[{}] share is no longer available — {}",
-                    self.label,
+                warn!(
+                    share = self.label,
+                    "share is no longer available: {}",
                     state.describe()
                 );
-                let _ = self.row.write_terminal_state(state.as_str());
                 *self.dead.lock().expect("unpoisoned") = Some(state);
+                match self
+                    .row
+                    .write_terminal_state(state.as_str())
+                    .and_then(|()| self.row.read_share())
+                {
+                    Ok(share) => self.observer.on_share_changed(share),
+                    Err(e) => warn!(
+                        share = self.label,
+                        error = format!("{e:#}"),
+                        "could not record the share's state"
+                    ),
+                }
                 Err(TransportError::Terminal(state))
             }
             other => other,

@@ -15,6 +15,7 @@ use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use tokio::net::{TcpListener, TcpStream};
+use tracing::{info, warn};
 
 /// Binds the loopback port. `0` picks a free one.
 pub async fn bind_loopback_port(port: u16) -> Result<TcpListener> {
@@ -32,12 +33,12 @@ pub async fn accept_loop(listener: TcpListener, client: Client) {
                 let client = client.clone();
                 tokio::spawn(async move {
                     if let Err(e) = handle_connection(tcp_stream, client).await {
-                        eprintln!("Connection error: {:#}", e);
+                        warn!(error = format!("{e:#}"), "connection error");
                     }
                 });
             }
             Err(e) => {
-                eprintln!("Accept error: {:#}", e);
+                warn!(error = format!("{e:#}"), "accept error");
             }
         }
     }
@@ -89,7 +90,11 @@ async fn forward(
             ));
         }
         Err(e) => {
-            eprintln!("[{}] could not restore the share: {:#}", share, e);
+            warn!(
+                share,
+                error = format!("{e:#}"),
+                "could not restore the share"
+            );
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Wispers Access server unavailable",
@@ -102,7 +107,11 @@ async fn forward(
         Ok(s) => s,
         Err(TransportError::Terminal(state)) => return Ok(gone(state)),
         Err(TransportError::Transient(e)) => {
-            eprintln!("[{}] open_stream failed: {:#}", share.label(), e);
+            warn!(
+                share = share.label(),
+                error = format!("{e:#}"),
+                "could not open a stream"
+            );
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Wispers Access server unavailable",
@@ -113,7 +122,11 @@ async fn forward(
     let (mut sender, conn) = match http1_client::handshake(fwd_io).await {
         Ok(hs) => hs,
         Err(e) => {
-            eprintln!("[{}] client handshake failed: {:#}", share.label(), e);
+            warn!(
+                share = share.label(),
+                error = format!("{e:#}"),
+                "client handshake failed"
+            );
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Wispers Access server unavailable",
@@ -122,7 +135,7 @@ async fn forward(
     };
     tokio::spawn(async move {
         if let Err(e) = conn.with_upgrades().await {
-            eprintln!("upstream connection error: {:#}", e);
+            warn!(error = format!("{e:#}"), "upstream connection error");
         }
     });
 
@@ -153,7 +166,11 @@ async fn forward(
     let mut resp = match sender.send_request(rewritten).await {
         Ok(r) => r,
         Err(e) => {
-            eprintln!("[{}] send_request failed: {:#}", share.label(), e);
+            warn!(
+                share = share.label(),
+                error = format!("{e:#}"),
+                "sending the request failed"
+            );
             return Ok(error_response(
                 StatusCode::BAD_GATEWAY,
                 "Wispers Access server unavailable",
@@ -169,18 +186,17 @@ async fn forward(
             .get(ERROR_HEADER)
             .is_some_and(|v| v == "app-not-found")
     {
-        eprintln!(
-            "[{}] app '{}' is gone; refreshing the app list",
-            share.label(),
-            app
+        info!(
+            share = share.label(),
+            app, "app is gone; refreshing the app list"
         );
         let share = share.clone();
         tokio::spawn(async move {
             if let Err(crate::guest_node::RefreshError::Transient(e)) = share.refresh().await {
-                eprintln!(
-                    "[{}] could not refresh the app list: {:#}",
-                    share.label(),
-                    e
+                warn!(
+                    share = share.label(),
+                    error = format!("{e:#}"),
+                    "could not refresh the app list"
                 );
             }
         });
@@ -194,9 +210,9 @@ async fn forward(
                 let upstream_upgrade = hyper::upgrade::on(&mut resp);
                 tokio::spawn(splice_upgrade(peer_upgrade, upstream_upgrade));
             }
-            None => eprintln!(
-                "[{}] the app returned 101 without an upgrade request",
-                share.label()
+            None => warn!(
+                share = share.label(),
+                "the app returned 101 without an upgrade request"
             ),
         }
         let (mut parts, _body) = resp.into_parts();
@@ -221,14 +237,17 @@ async fn splice_upgrade(peer: hyper::upgrade::OnUpgrade, upstream: hyper::upgrad
     let (peer, upstream) = match tokio::try_join!(peer, upstream) {
         Ok(pair) => pair,
         Err(e) => {
-            eprintln!("upgrade handshake did not complete: {:#}", e);
+            warn!(
+                error = format!("{e:#}"),
+                "upgrade handshake did not complete"
+            );
             return;
         }
     };
     let mut peer = TokioIo::new(peer);
     let mut upstream = TokioIo::new(upstream);
     if let Err(e) = tokio::io::copy_bidirectional(&mut peer, &mut upstream).await {
-        eprintln!("upgraded relay error: {:#}", e);
+        warn!(error = format!("{e:#}"), "upgraded relay error");
     }
 }
 

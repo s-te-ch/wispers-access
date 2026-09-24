@@ -1,5 +1,6 @@
 //! The SDK's store: one SQLite file per client.
 
+use crate::{Share, ShareState};
 use anyhow::Result;
 use rusqlite_migration::Migrations;
 use std::fs;
@@ -7,7 +8,6 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use wire::{App, AppKind, ConfigHash, ShareInfo};
 use wispers_access_wire as wire;
-use wispers_connect as wc;
 
 pub struct DB {
     conn: Mutex<rusqlite::Connection>,
@@ -18,7 +18,7 @@ pub struct DB {
 pub struct ShareId(String);
 
 impl ShareId {
-    fn mint() -> Self {
+    pub(crate) fn mint() -> Self {
         ShareId(uuid::Uuid::new_v4().to_string())
     }
 
@@ -91,15 +91,6 @@ impl DB {
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
     }
-}
-
-/// What an iroh share needs to reach its host node.
-pub struct IrohState {
-    /// The Ed25519 key this device minted for the share at join; its
-    /// public key is what the host node bound to the invite.
-    pub secret_key: [u8; 32],
-    /// The host node's endpoint ID from the invite, in hex.
-    pub host_endpoint_id: String,
 }
 
 /// One joined share.
@@ -180,43 +171,36 @@ impl Row {
         Ok(row)
     }
 
-    /// Persist the share's custom backend base URL, if any.
-    pub fn write_backend(&self, backend: Option<&str>) -> Result<()> {
+    /// Persists the self-hosted hub a Wispers Connect share uses, if any.
+    pub fn write_wispers_connect_backend(&self, backend: Option<&str>) -> Result<()> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
         conn.execute(
-            "UPDATE shares SET backend = ?1 WHERE id = ?2",
+            "UPDATE shares SET wispers_connect_backend = ?1 WHERE id = ?2",
             rusqlite::params![backend, self.id],
         )?;
         Ok(())
     }
 
-    /// Records that this share rides iroh, and what that needs.
-    pub fn write_iroh_state(&self, state: &IrohState) -> Result<()> {
+    /// Records that this share rides iroh, and which endpoint its host node
+    /// is. The device's key for it lives in the secret store.
+    pub fn write_iroh_endpoint_id(&self, host_endpoint_id: &str) -> Result<()> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
         conn.execute(
-            "UPDATE shares SET transport = 'iroh', iroh_secret = ?1, iroh_host = ?2
-             WHERE id = ?3",
-            rusqlite::params![&state.secret_key[..], state.host_endpoint_id, self.id],
+            "UPDATE shares SET transport = 'iroh', iroh_endpoint_id = ?1 WHERE id = ?2",
+            rusqlite::params![host_endpoint_id, self.id],
         )?;
         Ok(())
     }
 
-    pub fn read_iroh_state(&self) -> Result<Option<IrohState>> {
+    /// The host node's endpoint ID, in hex, for an iroh share.
+    pub fn read_iroh_endpoint_id(&self) -> Result<Option<String>> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
-        let (secret, host): (Option<Vec<u8>>, Option<String>) = conn.query_row(
-            "SELECT iroh_secret, iroh_host FROM shares WHERE id = ?1",
+        let host = conn.query_row(
+            "SELECT iroh_endpoint_id FROM shares WHERE id = ?1",
             [self.id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| r.get::<_, Option<String>>(0),
         )?;
-        let (Some(secret), Some(server)) = (secret, host) else {
-            return Ok(None);
-        };
-        Ok(Some(IrohState {
-            secret_key: secret
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("stored iroh key has the wrong length"))?,
-            host_endpoint_id: server,
-        }))
+        Ok(host)
     }
 
     /// The transport this share rides.
@@ -230,12 +214,13 @@ impl Row {
         Ok(name.parse()?)
     }
 
-    pub fn read_backend(&self) -> Result<Option<String>> {
+    pub fn read_wispers_connect_backend(&self) -> Result<Option<String>> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
-        let backend =
-            conn.query_row("SELECT backend FROM shares WHERE id = ?1", [self.id], |r| {
-                r.get::<_, Option<String>>(0)
-            })?;
+        let backend = conn.query_row(
+            "SELECT wispers_connect_backend FROM shares WHERE id = ?1",
+            [self.id],
+            |r| r.get::<_, Option<String>>(0),
+        )?;
         Ok(backend)
     }
 
@@ -310,6 +295,28 @@ impl Row {
         Ok(())
     }
 
+    /// The share as the SDK's API presents it.
+    pub fn read_share(&self) -> Result<Share> {
+        let (id, name, label) = self.read_names()?;
+        let state = match self
+            .read_terminal_state()?
+            .as_deref()
+            .and_then(crate::transports::TerminalState::parse)
+        {
+            None => ShareState::Live,
+            Some(crate::transports::TerminalState::Removed) => ShareState::Removed,
+            Some(crate::transports::TerminalState::Revoked) => ShareState::Revoked,
+        };
+        Ok(Share {
+            id,
+            name,
+            label,
+            transport: self.read_transport_kind()?,
+            apps: self.read_apps()?,
+            state,
+        })
+    }
+
     pub fn read_terminal_state(&self) -> Result<Option<String>> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
         let state = conn.query_row(
@@ -320,9 +327,8 @@ impl Row {
         Ok(state)
     }
 
-    /// Deletes the share and its apps outright (unlike
-    /// [wc::NodeStateStore::delete], which only clears the node state). For
-    /// `waclient remove`.
+    /// Deletes the share and its apps outright. Its secrets are the secret
+    /// store's to delete.
     pub fn delete_row(&self) -> Result<()> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
         conn.execute("DELETE FROM shares WHERE id = ?1", [self.id])?;
@@ -342,86 +348,6 @@ fn is_unique_violation(e: &rusqlite::Error) -> bool {
             _
         )
     )
-}
-
-impl wc::NodeStateStore for Row {
-    fn load(&self) -> Result<Option<wc::PersistedNodeState>, wc::StorageError> {
-        let db = self
-            .db
-            .conn
-            .lock()
-            .map_err(|_| wc::StorageError::Poisoned)?;
-        let row = db
-            .query_row(
-                "SELECT root_key, registration FROM shares WHERE id = ?1",
-                [self.id],
-                |r| {
-                    Ok((
-                        r.get::<_, Option<Vec<u8>>>(0)?,
-                        r.get::<_, Option<Vec<u8>>>(1)?,
-                    ))
-                },
-            )
-            .map_err(to_wc_error)?;
-        let (Some(rk), reg) = row else {
-            // There's no root key, conclude nothing has been saved yet.
-            return Ok(None);
-        };
-        let key: [u8; wc::ROOT_KEY_LEN] = rk
-            .try_into()
-            .map_err(|_| wc::StorageError::InvalidRootKey)?;
-        let reg = reg.and_then(|b| wc::deserialize_registration(&b).ok());
-        Ok(Some(wc::PersistedNodeState::from_stored(key, reg)))
-    }
-
-    fn save(&self, state: &wc::PersistedNodeState) -> Result<(), wc::StorageError> {
-        let conn = self
-            .db
-            .conn
-            .lock()
-            .map_err(|_| wc::StorageError::Poisoned)?;
-        let registration: Option<Vec<u8>> = state.registration().map(wc::serialize_registration);
-        let n = conn
-            .execute(
-                "UPDATE shares SET root_key = ?1, registration = ?2 WHERE id = ?3",
-                rusqlite::params![
-                    // Convert &[u8; 32] -> &[u8] (BLOB).
-                    state.root_key_bytes().as_slice(),
-                    registration,
-                    self.id,
-                ],
-            )
-            .map_err(to_wc_error)?;
-        // The row is pre-INSERTed in new_row(). 0 means the row vanished
-        // underneath us => a logic error worth surfacing.
-        if n == 0 {
-            return Err(wc::StorageError::Io(std::io::Error::other(format!(
-                "no shares row with id {}",
-                self.id
-            ))));
-        }
-        Ok(())
-    }
-
-    fn delete(&self) -> Result<(), wc::StorageError> {
-        let conn = self
-            .db
-            .conn
-            .lock()
-            .map_err(|_| wc::StorageError::Poisoned)?;
-        conn.execute(
-            "UPDATE shares
-             SET root_key = NULL, registration = NULL
-             WHERE id = ?1",
-            [self.id],
-        )
-        .map_err(to_wc_error)?;
-        Ok(())
-    }
-}
-
-fn to_wc_error(e: rusqlite::Error) -> wc::StorageError {
-    wc::StorageError::Io(std::io::Error::other(e))
 }
 
 fn open_db(dir: &Path) -> Result<rusqlite::Connection> {
@@ -445,19 +371,22 @@ fn migrations() -> Migrations<'static> {
     use rusqlite_migration::M;
 
     Migrations::new(vec![
-        // v1 — one row per joined share (the node's identity and what the
-        // host said the share is), one row per app in it.
+        // v1 — one row per joined share (which transport, how to reach the
+        // host node, and what it said the share is), one row per app in it.
+        // Key material is not here but in the secret store. The schema of
+        // the unreleased waclient builds that kept keys in this file was
+        // dropped without a migration.
         M::up(
             "CREATE TABLE shares (
                  id INTEGER PRIMARY KEY AUTOINCREMENT,
                  share_id TEXT NOT NULL UNIQUE,
                  display_name TEXT,
                  hostname TEXT UNIQUE,
-                 backend TEXT,
+                 transport TEXT NOT NULL DEFAULT 'wispers-connect',
+                 wispers_connect_backend TEXT,
+                 iroh_endpoint_id TEXT,
                  config_hash TEXT,
                  created_at INTEGER NOT NULL,
-                 root_key BLOB,
-                 registration BLOB,
                  complete INTEGER,
                  terminal_state TEXT
              ) STRICT;
@@ -469,12 +398,6 @@ fn migrations() -> Migrations<'static> {
                  kind TEXT NOT NULL,
                  PRIMARY KEY (share_id, app_id)
              ) STRICT;",
-        ),
-        // v2 — transport kind, iroh device key and host endpoint ID.
-        M::up(
-            "ALTER TABLE shares ADD COLUMN transport TEXT NOT NULL DEFAULT 'wispers-connect';
-             ALTER TABLE shares ADD COLUMN iroh_secret BLOB;
-             ALTER TABLE shares ADD COLUMN iroh_host TEXT;",
         ),
     ])
 }

@@ -2,11 +2,13 @@
 //! implementations for particular transports.
 
 use crate::iroh_transport;
+use crate::secrets::SecretStore;
 use crate::storage;
 use crate::wispers_connect_transport;
 use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
 use wispers_access_wire as wire;
 
@@ -22,7 +24,11 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin> Bidirectional for T {}
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Joins the share the invite is for, selecting the appropriate transport.
-pub async fn join(invite: wire::Invite, row: &storage::Row) -> Result<wire::ShareInfo> {
+pub async fn join(
+    invite: wire::Invite,
+    row: &storage::Row,
+    secrets: &Arc<dyn SecretStore>,
+) -> Result<wire::ShareInfo> {
     match invite {
         wire::Invite::WispersConnect {
             registration_token,
@@ -31,6 +37,7 @@ pub async fn join(invite: wire::Invite, row: &storage::Row) -> Result<wire::Shar
         } => {
             wispers_connect_transport::join(
                 row,
+                secrets,
                 &registration_token,
                 &activation_code,
                 backend.as_deref(),
@@ -40,19 +47,24 @@ pub async fn join(invite: wire::Invite, row: &storage::Row) -> Result<wire::Shar
         wire::Invite::Iroh {
             endpoint_id,
             secret,
-        } => iroh_transport::join(row, endpoint_id, &secret).await,
+        } => iroh_transport::join(row, secrets, endpoint_id, &secret).await,
     }
 }
 
 /// Restores the transport for a share's database row.
-pub async fn restore(row: storage::Row) -> Result<Box<dyn Transport>, TransportError> {
+pub async fn restore(
+    row: storage::Row,
+    secrets: Arc<dyn SecretStore>,
+) -> Result<Box<dyn Transport>, TransportError> {
     match row
         .read_transport_kind()
         .map_err(TransportError::Transient)?
     {
-        wire::Transport::Iroh => Ok(Box::new(iroh_transport::Iroh::restore(&row).await?)),
+        wire::Transport::Iroh => Ok(Box::new(
+            iroh_transport::Iroh::restore(&row, &secrets).await?,
+        )),
         wire::Transport::WispersConnect => Ok(Box::new(
-            wispers_connect_transport::WispersConnect::restore(row).await?,
+            wispers_connect_transport::WispersConnect::restore(row, secrets).await?,
         )),
         wire::Transport::Tailscale => Err(TransportError::Transient(anyhow::anyhow!(
             "tailscale shares are not supported by this waclient"
@@ -61,11 +73,12 @@ pub async fn restore(row: storage::Row) -> Result<Box<dyn Transport>, TransportE
 }
 
 /// Releases whatever the transport holds beyond this device before the
-/// share is removed. Best effort: the row goes either way.
-pub async fn leave(row: &storage::Row) -> Result<()> {
+/// share is removed, and deletes the share's secrets. Best effort on the
+/// far side: the row goes either way.
+pub async fn leave(row: &storage::Row, secrets: &Arc<dyn SecretStore>) -> Result<()> {
     match row.read_transport_kind()? {
-        wire::Transport::Iroh => iroh_transport::leave(row).await,
-        wire::Transport::WispersConnect => wispers_connect_transport::leave(row).await,
+        wire::Transport::Iroh => iroh_transport::leave(row, secrets).await,
+        wire::Transport::WispersConnect => wispers_connect_transport::leave(row, secrets).await,
         wire::Transport::Tailscale => {}
     }
     Ok(())

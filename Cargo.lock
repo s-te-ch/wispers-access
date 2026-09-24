@@ -4708,6 +4708,7 @@ dependencies = [
  "libc",
  "tabwriter",
  "tokio",
+ "tracing-subscriber",
  "wispers-access-sdk",
 ]
 
@@ -5430,6 +5431,7 @@ dependencies = [
  "serde_json",
  "slug",
  "tokio",
+ "tracing",
  "uuid",
  "wispers-access-wire",
  "wispers-connect",

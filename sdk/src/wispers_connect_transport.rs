@@ -1,32 +1,40 @@
 //! The Wispers Connect transport implementation.
 
 use crate::guest_node;
-use crate::storage;
+use crate::secrets::{SecretStore, SecretStoreError};
+use crate::storage::{self, ShareId};
 use crate::transports::{BoxFuture, Stream, TerminalState, Transport, TransportError};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use tokio::sync::OnceCell;
+use tracing::{info, warn};
 use wispers_access_wire as wire;
 use wispers_connect as wc;
+
+/// The secret store keys of a share's node state: the root key the node
+/// minted, and its registration with the hub.
+const ROOT_KEY: &str = "root_key";
+const REGISTRATION: &str = "registration";
 
 /// Registers this device as a node of the share's connectivity group and
 /// activates it. A failure after registration logs the node out again, so
 /// no registration is orphaned on the hub.
 pub async fn join(
     row: &storage::Row,
+    secrets: &Arc<dyn SecretStore>,
     registration_token: &str,
     activation_code: &str,
     backend: Option<&str>,
 ) -> Result<wire::ShareInfo> {
     // Register the Wispers node. If the invite named a self-hosted backend,
     // use override_hub_addr().
-    let ns = wc::NodeStorage::new(row.clone());
+    let ns = wc::NodeStorage::new(NodeSecrets::new(row, secrets)?);
     if let Some(backend) = backend {
-        println!("Using Wispers Connect backend: {}", backend);
+        info!(backend, "using a self-hosted Wispers Connect backend");
         ns.override_hub_addr(backend);
     }
     let mut node = ns.restore_or_init_node().await?;
-    println!("Registering Wispers node...");
+    info!("registering the Wispers node");
     node.register(registration_token).await?;
 
     // From here on the hub holds a registration that consumes quota, so
@@ -36,9 +44,9 @@ pub async fn join(
         Ok(info) => Ok(info),
         Err(e) => {
             match node.logout().await {
-                Ok(()) => eprintln!("Join failed; deregistered from the hub again."),
+                Ok(()) => info!("join failed; deregistered from the hub again"),
                 Err(le) => {
-                    eprintln!("Join failed; could not deregister from the hub either ({le}).")
+                    warn!(error = %le, "join failed; could not deregister from the hub either")
                 }
             }
             Err(e)
@@ -54,10 +62,10 @@ async fn activate_and_fetch(
     activation_code: &str,
     backend: Option<&str>,
 ) -> Result<wire::ShareInfo> {
-    println!("Activating Wispers node...");
+    info!("activating the Wispers node");
     node.activate(activation_code).await?;
 
-    println!("Fetching the share from its host node...");
+    info!("fetching the share from its host node");
     // Straight on the node rather than through a transport: keeps the node
     // for a rollback.
     let conn = node
@@ -68,31 +76,43 @@ async fn activate_and_fetch(
     let info = guest_node::fetch_info(Box::new(stream), None)
         .await?
         .context("the host node answered 304 to an unconditional request")?;
-    row.write_backend(backend)?;
+    row.write_wispers_connect_backend(backend)?;
     Ok(info)
 }
 
 /// Deregisters from the hub, best effort: for a removed share the hub
 /// already rejects us, and for a revoked one logout cleanly retires the
 /// zombie registration.
-pub async fn leave(row: &storage::Row) {
-    let backend = match row.read_backend() {
-        Ok(backend) => backend,
-        Err(e) => {
-            println!("Could not read the share ({e}); removing locally anyway.");
-            return;
+pub async fn leave(row: &storage::Row, secrets: &Arc<dyn SecretStore>) {
+    let attempt = async {
+        let backend = row.read_wispers_connect_backend()?;
+        let store = NodeSecrets::new(row, secrets)?;
+        let ns = wc::NodeStorage::new(store);
+        if let Some(backend) = backend.as_deref() {
+            ns.override_hub_addr(backend);
         }
+        let mut node = ns.restore_or_init_node().await?;
+        node.logout().await?;
+        Ok::<(), anyhow::Error>(())
     };
-    let ns = wc::NodeStorage::new(row.clone());
-    if let Some(backend) = backend.as_deref() {
-        ns.override_hub_addr(backend);
+    match attempt.await {
+        Ok(()) => info!("deregistered from the hub"),
+        Err(e) => warn!(
+            error = format!("{e:#}"),
+            "could not deregister from the hub; removing locally anyway"
+        ),
     }
-    match ns.restore_or_init_node().await {
-        Ok(mut node) => match node.logout().await {
-            Ok(()) => println!("Deregistered from the hub."),
-            Err(e) => println!("Could not deregister from the hub ({e}); removing locally anyway."),
-        },
-        Err(e) => println!("Could not restore the node ({e}); removing locally anyway."),
+    // Logout deletes the node state on success; make sure of it either way.
+    match NodeSecrets::new(row, secrets) {
+        Ok(store) => {
+            if let Err(e) = store.delete_all() {
+                warn!(error = %e, "could not delete the share's node state");
+            }
+        }
+        Err(e) => warn!(
+            error = format!("{e:#}"),
+            "could not delete the share's node state"
+        ),
     }
 }
 
@@ -108,9 +128,15 @@ pub struct WispersConnect {
 impl WispersConnect {
     /// Restores the node from its stored state. A terminal error here means
     /// the hub has rejected this node for good.
-    pub async fn restore(row: storage::Row) -> Result<Self, TransportError> {
-        let backend = row.read_backend().map_err(TransportError::Transient)?;
-        let ns = wc::NodeStorage::new(row);
+    pub async fn restore(
+        row: storage::Row,
+        secrets: Arc<dyn SecretStore>,
+    ) -> Result<Self, TransportError> {
+        let backend = row
+            .read_wispers_connect_backend()
+            .map_err(TransportError::Transient)?;
+        let store = NodeSecrets::new(&row, &secrets).map_err(TransportError::Transient)?;
+        let ns = wc::NodeStorage::new(store);
         if let Some(backend) = backend.as_deref() {
             ns.override_hub_addr(backend);
         }
@@ -141,7 +167,7 @@ impl WispersConnect {
         let cell = self.conn.lock().expect("unpoisoned").clone();
         let conn = match cell
             .get_or_try_init(|| async {
-                eprintln!("establishing QUIC connection");
+                info!("establishing the QUIC connection");
                 self.node.connect_quic(1).await.map(Arc::new)
             })
             .await
@@ -160,7 +186,10 @@ impl WispersConnect {
                 // The connection has broken: evict it so the next attempt
                 // redials. Several tasks may race here, so only replace the
                 // cell that failed.
-                eprintln!("conn.open_stream failed, evicting connection: {:#}", e);
+                warn!(
+                    error = format!("{e:#}"),
+                    "opening a stream failed, evicting the connection"
+                );
                 let mut current = self.conn.lock().expect("unpoisoned");
                 if Arc::ptr_eq(&*current, &cell) {
                     *current = Arc::new(OnceCell::new());
@@ -179,13 +208,87 @@ impl Transport for WispersConnect {
             // only repeat.
             match self.try_open_stream().await {
                 Err(TransportError::Transient(e)) => {
-                    eprintln!("open_stream attempt 1 failed, retrying once: {:#}", e);
+                    warn!(
+                        error = format!("{e:#}"),
+                        "opening a stream failed, retrying once"
+                    );
                     self.try_open_stream().await
                 }
                 other => other,
             }
         })
     }
+}
+
+/// The node's persisted state, in the secret store under the share's id.
+/// What wispers-connect reads and writes through `NodeStateStore`.
+struct NodeSecrets {
+    secrets: Arc<dyn SecretStore>,
+    share: ShareId,
+}
+
+impl NodeSecrets {
+    fn new(row: &storage::Row, secrets: &Arc<dyn SecretStore>) -> Result<Self> {
+        Ok(Self {
+            secrets: secrets.clone(),
+            share: row.share_id()?,
+        })
+    }
+
+    fn delete_all(&self) -> Result<(), SecretStoreError> {
+        self.secrets.delete(&self.share, ROOT_KEY)?;
+        self.secrets.delete(&self.share, REGISTRATION)
+    }
+}
+
+impl wc::NodeStateStore for NodeSecrets {
+    fn load(&self) -> Result<Option<wc::PersistedNodeState>, wc::StorageError> {
+        let Some(root_key) = self
+            .secrets
+            .load(&self.share, ROOT_KEY)
+            .map_err(to_wc_error)?
+        else {
+            // No root key: nothing has been saved yet.
+            return Ok(None);
+        };
+        let key: [u8; wc::ROOT_KEY_LEN] = root_key
+            .try_into()
+            .map_err(|_| wc::StorageError::InvalidRootKey)?;
+        let registration = self
+            .secrets
+            .load(&self.share, REGISTRATION)
+            .map_err(to_wc_error)?
+            .and_then(|b| wc::deserialize_registration(&b).ok());
+        Ok(Some(wc::PersistedNodeState::from_stored(key, registration)))
+    }
+
+    fn save(&self, state: &wc::PersistedNodeState) -> Result<(), wc::StorageError> {
+        self.secrets
+            .save(&self.share, ROOT_KEY, state.root_key_bytes())
+            .map_err(to_wc_error)?;
+        match state.registration() {
+            Some(registration) => self
+                .secrets
+                .save(
+                    &self.share,
+                    REGISTRATION,
+                    &wc::serialize_registration(registration),
+                )
+                .map_err(to_wc_error),
+            None => self
+                .secrets
+                .delete(&self.share, REGISTRATION)
+                .map_err(to_wc_error),
+        }
+    }
+
+    fn delete(&self) -> Result<(), wc::StorageError> {
+        self.delete_all().map_err(to_wc_error)
+    }
+}
+
+fn to_wc_error(e: SecretStoreError) -> wc::StorageError {
+    wc::StorageError::Io(std::io::Error::other(e))
 }
 
 fn terminal_from_node_err(e: &wc::NodeStateError) -> Option<TerminalState> {

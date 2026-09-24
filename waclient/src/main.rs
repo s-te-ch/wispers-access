@@ -38,6 +38,7 @@ fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
+    init_logging();
     tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
@@ -48,6 +49,8 @@ fn main() -> Result<()> {
 async fn async_main(command: Command) -> Result<()> {
     let client = sdk::Client::new(sdk::ClientConfig {
         data_dir: data_dir()?,
+        secrets: None,
+        observer: None,
         runtime: Some(tokio::runtime::Handle::current()),
     })?;
     match command {
@@ -56,6 +59,20 @@ async fn async_main(command: Command) -> Result<()> {
         Command::List => list(&client),
         Command::Remove { share } => remove(&client, &share).await,
     }
+}
+
+/// The SDK's own lines at `info`, its dependencies only when they complain.
+/// `RUST_LOG` overrides.
+fn init_logging() {
+    use tracing_subscriber::EnvFilter;
+    let filter = EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("warn,wispers_access_sdk=info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_target(false)
+        .without_time()
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 fn data_dir() -> Result<std::path::PathBuf> {

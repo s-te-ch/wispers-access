@@ -8,6 +8,7 @@ anyhow = "1.0"
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
 tabwriter = "1.4"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 wispers-access-sdk = { path = "../sdk" }
 
