@@ -1,0 +1,7 @@
+# Produced by build-xcframework.sh.
+WispersAccessSdkFfi.xcframework/
+Sources/WispersAccessSdk/WispersAccessSdk.swift
+build/
+# Swift Package Manager.
+.build/
+.swiftpm/
