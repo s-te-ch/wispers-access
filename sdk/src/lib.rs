@@ -20,6 +20,7 @@ mod storage;
 mod transports;
 mod wispers_connect_transport;
 
+pub use http::RequiredCookie;
 pub use logging::{LogLevel, LogSink, install_log_sink};
 pub use secrets::{FileSecretStore, SecretStore, SecretStoreError};
 pub use storage::ShareId;
@@ -292,8 +293,13 @@ impl Client {
     /// Starts a loopback proxy on one port, routing by the `Host` header:
     /// `http://<app>.<share>.localhost:<port>`. For desktop and Android. It
     /// serves every share the client knows, including ones joined later,
-    /// until the proxy is dropped.
-    pub async fn start_host_routed_proxy(&self, port: u16) -> Result<Arc<HostRoutedProxy>> {
+    /// until the proxy is dropped. With a `required_cookie`, requests
+    /// without it get a 403.
+    pub async fn start_host_routed_proxy(
+        &self,
+        port: u16,
+        required_cookie: Option<RequiredCookie>,
+    ) -> Result<Arc<HostRoutedProxy>> {
         let client = self.clone();
         self.on_runtime(async move {
             let (port, listeners) = http::bind_loopback_port(port)
@@ -306,6 +312,7 @@ impl Client {
                         listener,
                         client.clone(),
                         http::Route::FromHost,
+                        required_cookie.clone(),
                     ))
                 })
                 .collect();
@@ -319,10 +326,12 @@ impl Client {
 
     /// A loopback proxy with one `127.0.0.1` port per app, each bound when
     /// the app's URL is first asked for. For iOS, where `*.localhost` does
-    /// not resolve. Serves until dropped.
-    pub fn start_per_app_proxy(&self) -> Arc<PerAppProxy> {
+    /// not resolve. Serves until dropped. With a `required_cookie`, requests
+    /// without it get a 403.
+    pub fn start_per_app_proxy(&self, required_cookie: Option<RequiredCookie>) -> Arc<PerAppProxy> {
         Arc::new(PerAppProxy {
             client: self.clone(),
+            required_cookie,
             bound_ports: Mutex::new(HashMap::new()),
         })
     }
@@ -526,6 +535,7 @@ impl Drop for HostRoutedProxy {
 #[derive(uniffi::Object)]
 pub struct PerAppProxy {
     client: Client,
+    required_cookie: Option<RequiredCookie>,
     /// Each app's port, bound by whoever asks for it first.
     bound_ports: Mutex<HashMap<AppKey, Arc<OnceCell<BoundPort>>>>,
 }
@@ -582,6 +592,7 @@ impl PerAppProxy {
                             listener,
                             self.client.clone(),
                             route.clone(),
+                            self.required_cookie.clone(),
                         ))
                     })
                     .collect();
@@ -663,7 +674,7 @@ mod tests {
     async fn a_client_can_be_dropped_inside_another_runtime() {
         let data_dir = scratch_dir();
         let client = client_in(&data_dir);
-        let proxy = client.start_host_routed_proxy(0).await.unwrap();
+        let proxy = client.start_host_routed_proxy(0, None).await.unwrap();
         let port = proxy.port();
         assert_ne!(port, 0);
         // Both loopback families answer; IPv6 only where the machine has it.
@@ -691,7 +702,7 @@ mod tests {
         row.mark_complete().unwrap();
         let share = row.share_id().unwrap();
 
-        let proxy = client.start_per_app_proxy();
+        let proxy = client.start_per_app_proxy(None);
         let first = proxy.base_url(share.clone(), "echo".into()).await.unwrap();
         assert!(first.starts_with("http://127.0.0.1:"));
         assert_eq!(
@@ -704,8 +715,49 @@ mod tests {
         );
         drop(proxy);
 
-        let proxy = client.start_per_app_proxy();
+        let proxy = client.start_per_app_proxy(None);
         assert_eq!(proxy.base_url(share, "echo".into()).await.unwrap(), first);
+        drop(proxy);
+        drop(client);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_required_cookie_gates_every_request() {
+        let data_dir = scratch_dir();
+        let client = client_in(&data_dir);
+        let cookie = RequiredCookie {
+            name: "__wispers_proxy_auth".into(),
+            value: "s3cret".into(),
+        };
+        let proxy = client
+            .start_host_routed_proxy(0, Some(cookie.clone()))
+            .await
+            .unwrap();
+        let url = format!("http://127.0.0.1:{}/", proxy.port());
+        let status = |req: hyper::Request<String>| async {
+            let stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port()))
+                .await
+                .unwrap();
+            let (mut sender, conn) =
+                hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+                    .await
+                    .unwrap();
+            tokio::spawn(conn);
+            sender.send_request(req).await.unwrap().status()
+        };
+        let without = hyper::Request::get(&url)
+            .header("host", "echo.nope.localhost")
+            .body(String::new())
+            .unwrap();
+        assert_eq!(status(without).await, hyper::StatusCode::FORBIDDEN);
+        let with = hyper::Request::get(&url)
+            .header("host", "echo.nope.localhost")
+            .header("cookie", format!("{}={}", cookie.name, cookie.value))
+            .body(String::new())
+            .unwrap();
+        // Past the gate: the share is what's unknown now.
+        assert_eq!(status(with).await, hyper::StatusCode::NOT_FOUND);
         drop(proxy);
         drop(client);
         std::fs::remove_dir_all(data_dir).unwrap();

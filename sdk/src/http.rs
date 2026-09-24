@@ -60,6 +60,38 @@ fn no_ipv6_loopback(e: &std::io::Error) -> bool {
     )
 }
 
+/// A cookie every request must carry, or the proxy answers 403 before it
+/// touches a stream. The loopback port is reachable by every process on the
+/// device; the app mints the value and installs the cookie in the client it
+/// drives, so only that client gets through.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RequiredCookie {
+    pub name: String,
+    pub value: String,
+}
+
+impl RequiredCookie {
+    /// Whether the request's `Cookie` headers carry the cookie, compared in
+    /// time that does not depend on where the values differ.
+    fn is_presented_in(&self, headers: &hyper::HeaderMap) -> bool {
+        headers
+            .get_all(hyper::header::COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(';'))
+            .filter_map(|pair| pair.trim().split_once('='))
+            .any(|(name, value)| name == self.name && constant_time_eq(value, &self.value))
+    }
+}
+
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+}
+
 /// How a listener knows which app a request is for.
 #[derive(Clone)]
 pub enum Route {
@@ -69,15 +101,25 @@ pub enum Route {
     Fixed { share: ShareId, app: String },
 }
 
-/// Serves every connection against the client's shares, until cancelled.
-pub async fn accept_loop(listener: TcpListener, client: Client, route: Route) {
+/// Serves every connection against the client's shares, until cancelled:
+/// requests are routed to an app as `route` says, and refused without
+/// `required_cookie`, if one is set.
+pub async fn accept_loop(
+    listener: TcpListener,
+    client: Client,
+    route: Route,
+    required_cookie: Option<RequiredCookie>,
+) {
     loop {
         match listener.accept().await {
             Ok((tcp_stream, _)) => {
                 let client = client.clone();
                 let route = route.clone();
+                let required_cookie = required_cookie.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(tcp_stream, client, route).await {
+                    if let Err(e) =
+                        handle_connection(tcp_stream, client, route, required_cookie).await
+                    {
                         warn!(error = format!("{e:#}"), "connection error");
                     }
                 });
@@ -89,10 +131,16 @@ pub async fn accept_loop(listener: TcpListener, client: Client, route: Route) {
     }
 }
 
-async fn handle_connection(tcp_stream: TcpStream, client: Client, route: Route) -> Result<()> {
+async fn handle_connection(
+    tcp_stream: TcpStream,
+    client: Client,
+    route: Route,
+    required_cookie: Option<RequiredCookie>,
+) -> Result<()> {
     let tcp_stream = TokioIo::new(tcp_stream);
-    let service =
-        hyper::service::service_fn(move |req| forward(req, client.clone(), route.clone()));
+    let service = hyper::service::service_fn(move |req| {
+        forward(req, client.clone(), route.clone(), required_cookie.clone())
+    });
     let served = http1_server::Builder::new()
         .serve_connection(tcp_stream, service)
         // Allow a 101 to hand the browser socket over for raw relaying (WebSocket).
@@ -115,7 +163,15 @@ async fn forward(
     mut req: hyper::Request<Incoming>,
     client: Client,
     route: Route,
+    required_cookie: Option<RequiredCookie>,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
+    // Only the app's own client gets past here.
+    if let Some(cookie) = &required_cookie
+        && !cookie.is_presented_in(req.headers())
+    {
+        return Ok(error_response(StatusCode::FORBIDDEN, "forbidden"));
+    }
+
     // Determine the share and app...
     let (share, app) = match route {
         Route::Fixed { share, app } => (share.to_string(), app),
@@ -451,6 +507,26 @@ mod tests {
         let (port, listeners) = bind_loopback_port(0).await.unwrap();
         assert_ne!(port, taken);
         assert_eq!(listeners.len(), 2);
+    }
+
+    #[test]
+    fn the_required_cookie_is_found_among_others() {
+        let cookie = RequiredCookie {
+            name: "__wispers_proxy_auth".into(),
+            value: "s3cret".into(),
+        };
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::COOKIE,
+            "a=1; __wispers_proxy_auth=s3cret".parse().unwrap(),
+        );
+        assert!(cookie.is_presented_in(&headers));
+        headers.insert(
+            hyper::header::COOKIE,
+            "__wispers_proxy_auth=s3cre".parse().unwrap(),
+        );
+        assert!(!cookie.is_presented_in(&headers));
+        assert!(!cookie.is_presented_in(&hyper::HeaderMap::new()));
     }
 
     #[test]

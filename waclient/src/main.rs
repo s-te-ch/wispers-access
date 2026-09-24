@@ -158,7 +158,7 @@ async fn remove(client: &sdk::Client, share: &str) -> Result<()> {
 }
 
 async fn serve(client: &sdk::Client, port: u16) -> Result<()> {
-    let proxy = client.start_host_routed_proxy(port).await?;
+    let proxy = client.start_host_routed_proxy(port, None).await?;
     println!("Listening on localhost:{}", proxy.port());
 
     // Every share as last seen. Report but don't serve dead ones.
