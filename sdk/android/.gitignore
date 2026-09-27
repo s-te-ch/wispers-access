@@ -2,3 +2,4 @@
 src/main/jniLibs/
 src/main/kotlin/
 build/
+.gradle/

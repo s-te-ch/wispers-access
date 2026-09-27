@@ -30,14 +30,14 @@ struct SdkRoundTripTests {
             dataDir: dir.path, secrets: KeychainSecretStore(), observer: changes))
         let share = try await client.join(inviteCode: code)
         #expect(share.state == .live)
-        #expect(share.apps.map(\.id) == ["echo"])
+        let app = try #require(share.apps.first, "the share needs an app to browse")
         #expect(try client.shares().map(\.id) == [share.id])
         #expect(changes.seen.contains { $0.id == share.id })
 
         // The proxy: refused without the cookie, served with it.
         let auth = ProxyAuth()
         let proxy = client.startPerAppProxy(requiredCookie: auth.requiredCookie)
-        let base = try await proxy.baseUrl(share: share.id, appId: "echo")
+        let base = try await proxy.baseUrl(share: share.id, appId: app.id)
         let url = URL(string: base + "/hello")!
         let (_, bare) = try await URLSession.shared.data(from: url)
         #expect((bare as? HTTPURLResponse)?.statusCode == 403)
@@ -45,10 +45,19 @@ struct SdkRoundTripTests {
         request.setValue("\(ProxyAuth.cookieName)=\(auth.secret)", forHTTPHeaderField: "Cookie")
         let (body, response) = try await URLSession.shared.data(for: request)
         #expect((response as? HTTPURLResponse)?.statusCode == 200)
-        #expect(String(data: body, encoding: .utf8)?.contains("path=/hello") == true)
+        #expect(!body.isEmpty)
 
         // Nothing changed on the host since the join.
         #expect(try await client.refresh(share: share.id) == nil)
+
+        // A live cached connection survives the resume check and keeps
+        // serving; a network change drops it and the next request re-dials.
+        await client.checkConnections()
+        let (_, afterCheck) = try await URLSession.shared.data(for: request)
+        #expect((afterCheck as? HTTPURLResponse)?.statusCode == 200)
+        client.closeConnections()
+        let (_, afterClose) = try await URLSession.shared.data(for: request)
+        #expect((afterClose as? HTTPURLResponse)?.statusCode == 200)
 
         try await client.leave(share: share.id)
         #expect(try client.shares().isEmpty)

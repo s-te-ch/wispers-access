@@ -27,11 +27,18 @@ struct RootView: View {
         // warm (set while running) both land here.
         .onAppear(perform: routeQuickAction)
         .onChange(of: quickActions.pending) { routeQuickAction() }
-        // Keep the app-icon shortcuts current — Apple's cue to refresh them.
+        // Keep the app-icon shortcuts current — Apple's cue to refresh them —
+        // and let the SDK check its connections after a longer stint away.
         .onChange(of: scenePhase) { _, phase in
-            if phase == .background {
+            switch phase {
+            case .background:
                 UIApplication.shared.shortcutItems = QuickAction.shortcutItems(
                     for: manager.shares, activity: manager.activity)
+                manager.wentToBackground()
+            case .active:
+                manager.cameToForeground()
+            default:
+                break
             }
         }
     }

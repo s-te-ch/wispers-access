@@ -117,6 +117,24 @@ final class ShareManager {
         }
     }
 
+    /// Backgrounded processes have connections die without noticing. After this
+    /// long in the background, we send a probe to check their health.
+    private static let checkAfterBackground: TimeInterval = 30
+
+    @ObservationIgnored private var backgroundedAt: Date?
+
+    func wentToBackground() {
+        backgroundedAt = Date()
+    }
+
+    /// Back in the foreground, check network connection health.
+    func cameToForeground() {
+        guard let since = backgroundedAt else { return }
+        backgroundedAt = nil
+        guard Date().timeIntervalSince(since) >= Self.checkAfterBackground, let client else { return }
+        Task { await client.checkConnections() }
+    }
+
     /// Re-reads the roster from the SDK's store.
     func reload() {
         guard let client else { return }

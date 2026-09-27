@@ -3,11 +3,14 @@
 use crate::guest_node;
 use crate::secrets::{SecretStore, SecretStoreError};
 use crate::storage::{self, ShareId};
-use crate::transports::{BoxFuture, Stream, TerminalState, Transport, TransportError};
+use crate::transports::{
+    BoxFuture, ConnectionCheck, Stream, TerminalState, Transport, TransportError,
+};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::OnceCell;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use wispers_access_wire as wire;
 use wispers_connect as wc;
 
@@ -122,8 +125,11 @@ pub struct WispersConnect {
     node: wc::Node,
     /// The live connection, established on first use. Replaced with a fresh
     /// cell when a stream fails to open on it, so the next caller redials.
-    conn: Mutex<Arc<OnceCell<Arc<wc::QuicConnection>>>>,
+    conn: Mutex<ConnectionCell>,
 }
+
+/// The cache slot for the connection: filled once, replaced whole.
+type ConnectionCell = Arc<OnceCell<Arc<wc::QuicConnection>>>;
 
 impl WispersConnect {
     /// Restores the node from its stored state. A terminal error here means
@@ -163,60 +169,134 @@ impl WispersConnect {
         }
     }
 
-    async fn try_open_stream(&self) -> Result<Stream, TransportError> {
+    /// The cached connection, or a freshly dialled one put in the cache.
+    async fn cached_connection_or_dial(&self) -> Result<ConnectionCell, TransportError> {
         let cell = self.conn.lock().expect("unpoisoned").clone();
-        let conn = match cell
-            .get_or_try_init(|| async {
-                info!("establishing the QUIC connection");
-                self.node.connect_quic(1).await.map(Arc::new)
-            })
-            .await
-        {
-            Ok(conn) => conn.clone(),
-            Err(e) => {
-                return Err(match terminal_from_p2p_err(&e) {
-                    Some(state) => TransportError::Terminal(state),
-                    None => TransportError::Transient(e.into()),
-                });
-            }
-        };
+        cell.get_or_try_init(|| async {
+            info!("establishing the QUIC connection");
+            self.node.connect_quic(HOST_NODE_NUMBER).await.map(Arc::new)
+        })
+        .await
+        .map_err(|e| match terminal_from_p2p_err(&e) {
+            Some(state) => TransportError::Terminal(state),
+            None => TransportError::Transient(e.into()),
+        })?;
+        Ok(cell)
+    }
+
+    /// The cache slot with the cached connection, if there is one; never
+    /// dials.
+    fn cached_connection(&self) -> Option<ConnectionCell> {
+        let cell = self.conn.lock().expect("unpoisoned").clone();
+        cell.initialized().then_some(cell)
+    }
+
+    /// Opens a stream on the connection in `cell`. If the stream cannot be
+    /// opened, the connection is dead, and that slot is emptied so the next
+    /// attempt dials a new one; a newer connection another task put in the
+    /// cache meanwhile is left alone. A connection the host node closed with
+    /// a terminal code is reported as such.
+    async fn open_stream_or_drop_connection(
+        &self,
+        cell: &ConnectionCell,
+    ) -> Result<Stream, TransportError> {
+        let conn = cell
+            .get()
+            .expect("a cell handed to open_stream_or_drop_connection holds a connection");
         match conn.open_stream().await {
             Ok(stream) => Ok(Box::new(stream)),
             Err(e) => {
-                // The connection has broken: evict it so the next attempt
-                // redials. Several tasks may race here, so only replace the
-                // cell that failed.
-                warn!(
-                    error = format!("{e:#}"),
-                    "opening a stream failed, evicting the connection"
-                );
-                let mut current = self.conn.lock().expect("unpoisoned");
-                if Arc::ptr_eq(&*current, &cell) {
-                    *current = Arc::new(OnceCell::new());
-                }
-                Err(TransportError::Transient(e.into()))
+                self.evict(cell);
+                Err(match terminal_from_close(conn.peer_close_info()) {
+                    Some(state) => TransportError::Terminal(state),
+                    None => TransportError::Transient(e.into()),
+                })
             }
+        }
+    }
+
+    /// Forgets the connection `cell` holds. Several tasks may race here,
+    /// so only the cell that failed is replaced.
+    fn evict(&self, cell: &ConnectionCell) {
+        let mut current = self.conn.lock().expect("unpoisoned");
+        if Arc::ptr_eq(&*current, cell) {
+            *current = Arc::new(OnceCell::new());
         }
     }
 }
 
+/// The host node's node number in every share's connectivity group.
+const HOST_NODE_NUMBER: i32 = 1;
+
 impl Transport for WispersConnect {
     fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>> {
         Box::pin(async {
-            // One retry covers a connection that died and had to be
-            // re-established. A terminal rejection is not retried: it can
-            // only repeat.
-            match self.try_open_stream().await {
-                Err(TransportError::Transient(e)) => {
-                    warn!(
-                        error = format!("{e:#}"),
-                        "opening a stream failed, retrying once"
-                    );
-                    self.try_open_stream().await
+            // A cached connection may have died unnoticed. A stream that
+            // fails to open on it evicts it, and one dial follows.
+            if let Some(cell) = self.cached_connection() {
+                match self.open_stream_or_drop_connection(&cell).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(TransportError::Terminal(state)) => {
+                        return Err(TransportError::Terminal(state));
+                    }
+                    Err(TransportError::Transient(e)) => {
+                        warn!(
+                            error = format!("{e:#}"),
+                            "cached connection is dead; redialling"
+                        );
+                    }
                 }
-                other => other,
+            }
+            let cell = self.cached_connection_or_dial().await?;
+            self.open_stream_or_drop_connection(&cell).await
+        })
+    }
+
+    /// A QUIC PING the host node's stack acknowledges, which the library
+    /// waits for.
+    fn check_connection(
+        &self,
+        deadline: Duration,
+    ) -> BoxFuture<'_, Result<ConnectionCheck, TransportError>> {
+        Box::pin(async move {
+            let Some(cell) = self.cached_connection() else {
+                return Ok(ConnectionCheck::NoConnection);
+            };
+            let conn = cell.get().expect("a cached connection");
+            match conn.ping(deadline).await {
+                Ok(rtt) => {
+                    debug!(rtt_ms = rtt.as_millis(), "cached connection answered");
+                    Ok(ConnectionCheck::Alive)
+                }
+                Err(e) => {
+                    debug!(error = %e, "probe failed");
+                    self.evict(&cell);
+                    match terminal_from_close(conn.peer_close_info()) {
+                        Some(state) => Err(TransportError::Terminal(state)),
+                        None => Ok(ConnectionCheck::Dead),
+                    }
+                }
             }
         })
+    }
+
+    fn drop_connection(&self) {
+        *self.conn.lock().expect("unpoisoned") = Arc::new(OnceCell::new());
+    }
+}
+
+/// The contract's close codes, as the host node sends them: only those may
+/// end a share for good, and only when the host node's application chose
+/// the code, not its QUIC stack.
+fn terminal_from_close(info: Option<wc::QuicCloseInfo>) -> Option<TerminalState> {
+    let info = info?;
+    if !info.closed_by_app {
+        return None;
+    }
+    match wire::CloseCode::from_code(info.error_code) {
+        Some(wire::CloseCode::Unknown) => Some(TerminalState::Removed),
+        Some(wire::CloseCode::Revoked) => Some(TerminalState::Revoked),
+        _ => None,
     }
 }
 

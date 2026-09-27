@@ -292,6 +292,39 @@ impl Client {
         .await
     }
 
+    /// Check connection health and drop/redial the connection if necessary.
+    /// This is primarily useful on mobile, when the app was in the background
+    /// and just returned to the foreground. Dead connections get redialed if
+    /// they had been used recently. Otherwise, we just drop them.
+    ///
+    /// The check costs one round trip on a live connection and up to 2 seconds
+    /// on a dead one.
+    pub async fn check_connections(&self) {
+        // Each check runs on the client's runtime; an outcome the guest node
+        // did not already log is a cancelled task, nothing to report.
+        let checks: Vec<_> = self
+            .live_guest_nodes()
+            .into_iter()
+            .map(|node| {
+                self.inner
+                    .runtime
+                    .spawn(async move { node.check_connection().await })
+            })
+            .collect();
+        for check in checks {
+            let _ = check.await;
+        }
+    }
+
+    /// Close every cached connection. Use if the network changed and we know
+    /// that existing connections must be dead. You may want to follow up with
+    /// `check_connections` to redial the connections that were recently in use.
+    pub fn close_connections(&self) {
+        for node in self.live_guest_nodes() {
+            node.drop_connection();
+        }
+    }
+
     /// Starts a loopback proxy on one port, routing by the `Host` header:
     /// `http://<app>.<share>.localhost:<port>`. For desktop and Android. It
     /// serves every share the client knows, including ones joined later,
@@ -396,6 +429,17 @@ impl Client {
         row.read_share()
     }
 
+    /// The guest nodes restored so far.
+    fn live_guest_nodes(&self) -> Vec<Arc<GuestNode>> {
+        self.inner
+            .guest_nodes
+            .lock()
+            .expect("unpoisoned")
+            .values()
+            .filter_map(|cell| cell.get().cloned())
+            .collect()
+    }
+
     fn row(&self, share: &ShareId) -> Result<storage::Row> {
         self.inner
             .db
@@ -480,7 +524,7 @@ pub(crate) enum Lookup {
     Unknown,
 }
 
-struct NoObserver;
+pub(crate) struct NoObserver;
 
 impl Observer for NoObserver {
     fn on_share_changed(&self, _: Share) {}

@@ -276,6 +276,13 @@ async fn serve_guest(
     let registration = handle
         .register_connection(guest.number as i32, guest.user_id.clone(), Some(closer))
         .await;
+    // A guest checking whether this connection still works opens a
+    // unidirectional stream and finishes it without a byte. Accepts and discard
+    // them to keep the stream credit from leaking.
+    let probes = tokio::spawn({
+        let conn = conn.clone();
+        async move { while conn.accept_uni().await.is_ok() {} }
+    });
     loop {
         match conn.accept_bi().await {
             Ok((send, recv)) => {
@@ -298,6 +305,7 @@ async fn serve_guest(
             }
         }
     }
+    probes.abort();
     handle.unregister_connection(registration).await;
 }
 

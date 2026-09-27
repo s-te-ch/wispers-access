@@ -9,6 +9,7 @@ use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use wispers_access_wire as wire;
 
@@ -87,9 +88,36 @@ pub async fn leave(row: &storage::Row, secrets: &Arc<dyn SecretStore>) -> Result
 /// One implementation per transport. Object-safe, so a registry can hold
 /// shares on different transports; hence the boxed futures.
 pub trait Transport: Send + Sync {
-    /// Opens a fresh stream, connecting or reconnecting as needed. A passing
-    /// failure is retried once; a final one is reported as such.
+    /// Opens a stream to the host node, opening the connection or reusing a
+    /// cached one as needed. Fails if retrying the connection fails.
     fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>>;
+
+    /// Run a transport-level ping to check the connection's health, with the
+    /// given deadline. Returns
+    /// - `Alive` if the connection is alive and well,
+    /// - `Dead` if an existing connection died (in which case it's also dropped),
+    /// - `NoConnection` if there was no cached connection to check.
+    ///
+    /// A terminal close code by the host is reported as such, as it is from
+    /// `open_stream`.
+    fn check_connection(
+        &self,
+        deadline: Duration,
+    ) -> BoxFuture<'_, Result<ConnectionCheck, TransportError>>;
+
+    /// Drops the cached connection, if any.
+    fn drop_connection(&self);
+}
+
+/// What `Transport::check_connection` found.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConnectionCheck {
+    /// Nothing cached; nothing was dialled.
+    NoConnection,
+    /// The cached connection answered.
+    Alive,
+    /// The cached connection did not answer, or was closed; it is dropped.
+    Dead,
 }
 
 pub enum TransportError {
