@@ -1,31 +1,32 @@
 package dev.wispers.access.android.proxy
 
-import dev.wispers.access.android.storage.ShareTerminalState
+import dev.wispers.access.sdk.ShareState
 
 /**
- * Result of a hub availability check for one share. ONLINE/OFFLINE/UNKNOWN are
- * transient observations; REMOVED/REVOKED are terminal — the hub has
- * definitively rejected this device, and the share can never come back.
+ * Availability of a share for the status dot and labels. ONLINE/OFFLINE/UNKNOWN
+ * are transient observations; REMOVED/REVOKED are terminal — the host node has
+ * definitively turned this device away.
  */
 enum class ShareAvailability {
-    /** The serving node holds a live hub connection. */
+    /** The host node answered. */
     ONLINE,
 
-    /** Hub reachable, serving node not connected. */
+    /** The host node could not be reached, or refused. */
     OFFLINE,
 
-    /** The check failed transiently — typically the hub is unreachable. */
+    /** The check failed for another reason. */
     UNKNOWN,
 
-    /** The share was removed on the server side (credentials rejected). */
+    /** The share was removed by its host, or this device forgotten. */
     REMOVED,
 
-    /** This device's access was revoked from the share's roster. */
+    /** This device's access was revoked. */
     REVOKED,
 }
 
-/** The persisted terminal state as an availability, for uniform rendering. */
-fun ShareTerminalState.toAvailability(): ShareAvailability = when (this) {
-    ShareTerminalState.REMOVED -> ShareAvailability.REMOVED
-    ShareTerminalState.REVOKED -> ShareAvailability.REVOKED
+/** The SDK's terminal states as availabilities; null while live. */
+fun ShareState.toAvailability(): ShareAvailability? = when (this) {
+    ShareState.LIVE -> null
+    ShareState.REMOVED -> ShareAvailability.REMOVED
+    ShareState.REVOKED -> ShareAvailability.REVOKED
 }

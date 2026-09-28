@@ -59,6 +59,23 @@ android {
     buildFeatures {
         compose = true
     }
+    packaging {
+        // JNA's AAR carries dispatch libraries for every ABI Android ever had;
+        // ship only the ones the SDK is built for.
+        jniLibs {
+            excludes += listOf("**/armeabi/*.so", "**/mips/*.so", "**/mips64/*.so", "**/x86/*.so")
+        }
+    }
+    splits {
+        // One APK per ABI for installing on a device or emulator (the SDK's
+        // native library is ~30 MB per ABI), plus the universal one.
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86_64")
+            isUniversalApk = true
+        }
+    }
 }
 
 ksp {
@@ -80,12 +97,10 @@ dependencies {
     implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
     implementation(libs.sqlcipher.android)
-    implementation(libs.wispers.connect)
+    implementation(project(":wispers-access-sdk"))
     implementation(libs.androidx.hilt.navigation.compose)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.compose.material.icons.core)
-    implementation(libs.ktor.server.core)
-    implementation(libs.ktor.server.cio)
     implementation(libs.zxing.android.embedded)
     implementation(libs.androidx.swiperefreshlayout)
     testImplementation(libs.junit)

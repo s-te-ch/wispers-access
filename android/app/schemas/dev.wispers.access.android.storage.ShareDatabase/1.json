@@ -2,57 +2,104 @@
   "formatVersion": 1,
   "database": {
     "version": 1,
-    "identityHash": "c2604ad27969881ae48005ccafeb045d",
+    "identityHash": "09fbd351dd640315ae6060482e2cc33a",
     "entities": [
       {
-        "tableName": "shares",
-        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `nickname` TEXT NOT NULL, `createdAt` INTEGER NOT NULL, `lastConnectedAt` INTEGER, `rootKey` BLOB, `registration` BLOB, PRIMARY KEY(`id`))",
+        "tableName": "secrets",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`share` TEXT NOT NULL, `key` TEXT NOT NULL, `value` BLOB NOT NULL, PRIMARY KEY(`share`, `key`))",
         "fields": [
           {
-            "fieldPath": "id",
-            "columnName": "id",
+            "fieldPath": "share",
+            "columnName": "share",
             "affinity": "TEXT",
             "notNull": true
           },
           {
-            "fieldPath": "nickname",
-            "columnName": "nickname",
+            "fieldPath": "key",
+            "columnName": "key",
             "affinity": "TEXT",
             "notNull": true
           },
           {
-            "fieldPath": "createdAt",
-            "columnName": "createdAt",
-            "affinity": "INTEGER",
+            "fieldPath": "value",
+            "columnName": "value",
+            "affinity": "BLOB",
             "notNull": true
-          },
-          {
-            "fieldPath": "lastConnectedAt",
-            "columnName": "lastConnectedAt",
-            "affinity": "INTEGER"
-          },
-          {
-            "fieldPath": "rootKey",
-            "columnName": "rootKey",
-            "affinity": "BLOB"
-          },
-          {
-            "fieldPath": "registration",
-            "columnName": "registration",
-            "affinity": "BLOB"
           }
         ],
         "primaryKey": {
           "autoGenerate": false,
           "columnNames": [
-            "id"
+            "share",
+            "key"
+          ]
+        }
+      },
+      {
+        "tableName": "share_activity",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`share` TEXT NOT NULL, `lastConnectedAt` INTEGER NOT NULL, PRIMARY KEY(`share`))",
+        "fields": [
+          {
+            "fieldPath": "share",
+            "columnName": "share",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastConnectedAt",
+            "columnName": "lastConnectedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "share"
+          ]
+        }
+      },
+      {
+        "tableName": "app_icons",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`share` TEXT NOT NULL, `app` TEXT NOT NULL, `png` BLOB NOT NULL, `rank` INTEGER NOT NULL, PRIMARY KEY(`share`, `app`))",
+        "fields": [
+          {
+            "fieldPath": "share",
+            "columnName": "share",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "app",
+            "columnName": "app",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "png",
+            "columnName": "png",
+            "affinity": "BLOB",
+            "notNull": true
+          },
+          {
+            "fieldPath": "rank",
+            "columnName": "rank",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "share",
+            "app"
           ]
         }
       }
     ],
     "setupQueries": [
       "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
-      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'c2604ad27969881ae48005ccafeb045d')"
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, '09fbd351dd640315ae6060482e2cc33a')"
     ]
   }
 }

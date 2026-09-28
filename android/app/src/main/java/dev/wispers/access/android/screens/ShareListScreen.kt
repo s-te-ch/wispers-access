@@ -22,10 +22,12 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.outlined.Info
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -43,48 +45,66 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
+import dev.wispers.access.android.BrowseKey
 import dev.wispers.access.android.R
+import dev.wispers.access.android.ShareManager
+import dev.wispers.access.android.demo.DemoMode
 import dev.wispers.access.android.proxy.ShareAvailability
 import dev.wispers.access.android.proxy.ShareStatusTracker
 import dev.wispers.access.android.proxy.toAvailability
-import dev.wispers.access.android.storage.Share
-import dev.wispers.access.android.storage.ShareId
-import dev.wispers.access.android.storage.ShareRepository
+import dev.wispers.access.android.storage.ShareExtras
 import dev.wispers.access.android.ui.theme.AccessOnSurfaceMedium
+import dev.wispers.access.sdk.Share
+import dev.wispers.access.sdk.ShareId
+import dev.wispers.access.sdk.ShareState
+import dev.wispers.access.sdk.SharedApp
 import java.time.Duration
 import java.time.Instant
 import javax.inject.Inject
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 
 @HiltViewModel
 class ShareListViewModel @Inject constructor(
-    repo: ShareRepository,
+    manager: ShareManager,
     statusTracker: ShareStatusTracker,
+    extras: ShareExtras,
 ) : ViewModel() {
 
-    /** Null until the first database emission, so "loading" isn't rendered as "no shares". */
-    val shares: StateFlow<List<Share>?> = repo.observeShares()
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.WhileSubscribed(5_000),
-            initialValue = null,
-        )
+    /** Null until the first load, so "loading" isn't rendered as "no shares". */
+    val shares: StateFlow<List<Share>?> = manager.shares
 
     /** Per-share availability; absent key = not checked yet. */
     val availability: StateFlow<Map<ShareId, ShareAvailability>> = statusTracker.statuses
+
+    val lastConnected: StateFlow<Map<ShareId, Instant>> =
+        (if (DemoMode.active) flowOf(DemoMode.lastConnected) else extras.observeLastConnected())
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    val icons: StateFlow<Map<BrowseKey, ByteArray>> =
+        (if (DemoMode.active) flowOf(DemoMode.icons) else extras.observeIcons())
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 }
 
+/**
+ * The roster: the apps shared with you, grouped by the share they come from.
+ * A share's header carries its name and status and leads to its detail
+ * screen; each app underneath is a card that opens in one tap.
+ */
 @Composable
 fun ShareListScreen(
     onAddClick: () -> Unit,
-    onShareClick: (ShareId) -> Unit,
+    onShareClick: (Share) -> Unit,
+    onAppClick: (BrowseKey) -> Unit,
     viewModel: ShareListViewModel = hiltViewModel(),
 ) {
     // Plain value read (not `by`) so the null check below smart-casts.
     val shares = viewModel.shares.collectAsState().value
     val availability by viewModel.availability.collectAsState()
+    val lastConnected by viewModel.lastConnected.collectAsState()
+    val icons by viewModel.icons.collectAsState()
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -95,7 +115,7 @@ fun ShareListScreen(
                 contentColor = MaterialTheme.colorScheme.onPrimary,
                 shape = CircleShape,
             ) {
-                Icon(Icons.Filled.Add, contentDescription = "Add app")
+                Icon(Icons.Filled.Add, contentDescription = "Add a share")
             }
         },
     ) { innerPadding ->
@@ -108,15 +128,18 @@ fun ShareListScreen(
             Spacer(Modifier.height(24.dp))
             BrandHeader()
             Spacer(Modifier.height(40.dp))
-            SectionHeader(count = shares?.size)
+            SectionHeader(count = shares?.sumOf { it.apps.size })
             Spacer(Modifier.height(12.dp))
             when {
                 shares == null -> LoadingShareList()
                 shares.isEmpty() -> EmptyShareList()
-                else -> ShareList(
+                else -> ShareSections(
                     shares = shares,
                     availability = availability,
+                    lastConnected = lastConnected,
+                    icons = icons,
                     onShareClick = onShareClick,
+                    onAppClick = onAppClick,
                 )
             }
         }
@@ -157,73 +180,168 @@ private fun SectionHeader(count: Int?) {
     }
 }
 
+/** One row of the list: a share's header or one of its app cards. */
+private sealed interface RosterRow {
+    val key: String
+
+    data class Header(val share: Share) : RosterRow {
+        override val key get() = "share:${share.id}"
+    }
+
+    data class AppRow(val share: Share, val app: SharedApp) : RosterRow {
+        override val key get() = "app:${share.id}/${app.id}"
+    }
+
+    data class NoApps(val share: Share) : RosterRow {
+        override val key get() = "no-apps:${share.id}"
+    }
+}
+
 @Composable
-private fun ShareList(
+private fun ShareSections(
     shares: List<Share>,
     availability: Map<ShareId, ShareAvailability>,
-    onShareClick: (ShareId) -> Unit,
+    lastConnected: Map<ShareId, Instant>,
+    icons: Map<BrowseKey, ByteArray>,
+    onShareClick: (Share) -> Unit,
+    onAppClick: (BrowseKey) -> Unit,
 ) {
+    val rows = shares.flatMap { share ->
+        listOf(RosterRow.Header(share)) +
+            if (share.apps.isEmpty()) listOf(RosterRow.NoApps(share))
+            else share.apps.map { RosterRow.AppRow(share, it) }
+    }
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp),
         contentPadding = PaddingValues(bottom = 96.dp),
     ) {
-        items(shares, key = { it.id.value }) { share ->
-            ShareCard(
-                share = share,
-                // The persisted terminal state wins over (and outlives) live checks.
-                availability = share.terminalState?.toAvailability() ?: availability[share.id],
-                onClick = { onShareClick(share.id) },
-            )
+        items(rows, key = { it.key }) { row ->
+            when (row) {
+                is RosterRow.Header -> ShareHeader(
+                    share = row.share,
+                    // The share's own terminal state wins over (and outlives) live checks.
+                    availability = row.share.state.toAvailability() ?: availability[row.share.id],
+                    lastConnected = lastConnected[row.share.id],
+                    onClick = { onShareClick(row.share) },
+                )
+                is RosterRow.AppRow -> {
+                    val key = BrowseKey(row.share.id, row.app.id)
+                    val live = row.share.state == ShareState.LIVE
+                    AppCard(
+                        app = row.app,
+                        iconPng = icons[key],
+                        enabled = live,
+                        // A terminal share's apps lead to the explanation instead.
+                        onClick = { if (live) onAppClick(key) else onShareClick(row.share) },
+                    )
+                }
+                is RosterRow.NoApps -> Text(
+                    text = "No apps shared yet.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 12.dp),
+                )
+            }
         }
     }
 }
 
+/** A share's line above its apps: status, name, and the ⓘ that leads to its detail screen. */
 @Composable
-private fun ShareCard(share: Share, availability: ShareAvailability?, onClick: () -> Unit) {
-    val terminal =
-        availability == ShareAvailability.REMOVED || availability == ShareAvailability.REVOKED
+private fun ShareHeader(
+    share: Share,
+    availability: ShareAvailability?,
+    lastConnected: Instant?,
+    onClick: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(horizontal = 8.dp, vertical = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                StatusDot(availability = availability)
+                Text(
+                    text = statusLine(availability, lastConnected),
+                    style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 1.sp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = share.name.ifBlank { "Untitled share" },
+                style = MaterialTheme.typography.headlineSmall,
+                color = AccessOnSurfaceMedium,
+            )
+        }
+        Icon(
+            imageVector = Icons.Outlined.Info,
+            contentDescription = "Share details",
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * One app's card: its icon (harvested while browsing, else a letter tile) and
+ * name; tapping the row opens the app. An optional [footer] sits inside the
+ * card under a divider, for actions that belong to this app, and is not part
+ * of the tap target.
+ */
+@Composable
+fun AppCard(
+    app: SharedApp,
+    iconPng: ByteArray?,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    footer: (@Composable () -> Unit)? = null,
+) {
+    val name = app.name.ifBlank { app.id }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         shape = RoundedCornerShape(16.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .clickable(onClick = onClick)
                 .padding(horizontal = 20.dp, vertical = 16.dp)
-                .alpha(if (terminal) 0.6f else 1f),
+                .alpha(if (enabled) 1f else 0.6f),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            ShareAvatar(nickname = share.nickname, iconPng = share.iconPng)
+            Avatar(nickname = name, iconPng = iconPng)
             Spacer(Modifier.width(16.dp))
-            Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    StatusDot(availability = availability)
-                    Text(
-                        text = statusLine(availability, share.lastConnectedAt),
-                        style = MaterialTheme.typography.labelMedium.copy(letterSpacing = 1.sp),
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                Spacer(Modifier.height(4.dp))
-                Text(
-                    text = share.nickname.ifBlank { "Untitled app" },
-                    style = MaterialTheme.typography.headlineSmall,
-                    color = AccessOnSurfaceMedium,
-                )
-            }
+            Text(
+                text = name,
+                style = MaterialTheme.typography.headlineSmall,
+                color = AccessOnSurfaceMedium,
+                modifier = Modifier.weight(1f),
+            )
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        if (footer != null) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                footer()
+            }
         }
     }
 }
@@ -274,7 +392,7 @@ private fun EmptyShareList() {
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text = "No apps yet. Tap + to add one.",
+            text = "No apps yet. Tap + to add a share.",
             style = MaterialTheme.typography.bodyMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )

@@ -6,6 +6,7 @@ import android.net.Network
 import android.util.Log
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.wispers.access.android.ForegroundTracker
+import dev.wispers.access.android.SdkHolder
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CoroutineScope
@@ -14,20 +15,20 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.launch
 
 /**
- * Evicts cached QUIC connections when the device's default network changes.
+ * Tells the SDK to drop its cached connections when the device's default
+ * network changes.
  *
  * This is what Chrome does on handover: the OS push signal beats waiting for
  * blackholed connections to hit their request timeouts, so the first request
  * after a Wi-Fi/cellular switch reconnects immediately instead of stalling.
- * While the app is visible the evicted connections are also re-established
- * eagerly, hiding the ICE setup cost from the user's next tap; in the
- * background we evict only, to avoid re-ICE-ing on every handover while the
- * phone roams unused.
+ * While the app is visible the SDK also redials the connections in use, hiding
+ * the setup cost from the user's next tap; in the background it only drops, to
+ * avoid redialling on every handover while the phone roams unused.
  */
 @Singleton
 class NetworkMonitor @Inject constructor(
     @param:ApplicationContext private val context: Context,
-    private val sessionManager: SessionManager,
+    private val sdk: SdkHolder,
     private val foregroundTracker: ForegroundTracker,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -42,13 +43,11 @@ class NetworkMonitor @Inject constructor(
                 val previous = lastNetwork
                 lastNetwork = network
                 if (previous != null && previous != network) {
-                    Log.i(TAG, "Default network changed, evicting cached connections")
-                    scope.launch {
-                        val evicted = sessionManager.evictAll()
-                        if (evicted.isNotEmpty() && foregroundTracker.isForeground) {
-                            Log.i(TAG, "Pre-warming ${evicted.size} connection(s)")
-                            sessionManager.prewarm(evicted)
-                        }
+                    Log.i(TAG, "Default network changed, dropping cached connections")
+                    val client = sdk.client ?: return
+                    client.closeConnections()
+                    if (foregroundTracker.isForeground) {
+                        scope.launch { client.checkConnections() }
                     }
                 }
             }

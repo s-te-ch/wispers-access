@@ -30,7 +30,7 @@
             </intent-filter>
         </activity>
         <activity
-            android:name=".ShareActivity"
+            android:name=".BrowseActivity"
             android:autoRemoveFromRecents="false"
             android:documentLaunchMode="intoExisting"
             android:exported="false"
