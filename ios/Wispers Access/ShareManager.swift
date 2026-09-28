@@ -76,6 +76,7 @@ final class ShareManager {
         let manager = ShareManager(client: client)
         relay.onChange = { [weak manager] in manager?.reload() }
         manager.reload()
+        manager.network.start { [weak manager] in manager?.networkChanged() }
         return manager
     }
 
@@ -133,6 +134,20 @@ final class ShareManager {
         backgroundedAt = nil
         guard Date().timeIntervalSince(since) >= Self.checkAfterBackground, let client else { return }
         Task { await client.checkConnections() }
+    }
+
+    /// Watches the device's network path; see `networkChanged`.
+    @ObservationIgnored private let network = NetworkMonitor()
+
+    /// Called when the device moved to another network. This drops existing
+    /// connections (they're now dead) and reconnects any recently used ones.
+    /// handover.
+    func networkChanged() {
+        guard let client else { return }
+        client.closeConnections()
+        if backgroundedAt == nil {
+            Task { await client.checkConnections() }
+        }
     }
 
     /// Re-reads the roster from the SDK's store.
