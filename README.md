@@ -65,13 +65,15 @@ Download the tarball for your platform from the
 [releases page](https://github.com/s-te-ch/wispers-access/releases) and put
 `waserver` on your `PATH`.
 
-Prefer containers? This one command replaces steps 2 and 3
-(see [waserver/docker](waserver/docker/README.md) for details):
+Prefer containers? Write the share config from step 3 to a file, say
+`team.toml`, with `upstream = "host.docker.internal:3000"`, and this one command
+replaces steps 2 and 3 (see [waserver/docker](waserver/docker/README.md) for
+details):
 
 ```sh
 docker run -d --name waserver --restart unless-stopped \
   -e WC_API_KEY=… \
-  -e "SHARES=myapp | My App | host.docker.internal:3000" \
+  -v "$PWD/team.toml:/config/team.toml:ro" \
   --add-host host.docker.internal:host-gateway \
   -v waserver-data:/data \
   ghcr.io/s-te-ch/wispers/access/waserver:latest
