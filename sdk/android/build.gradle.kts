@@ -34,8 +34,11 @@ dependencies {
     testImplementation(libs.junit)
 }
 
-// Where JNA finds libwispers_access_sdk.dylib for the host tests: the Rust
-// workspace's release output, which build-jnilibs.sh leaves behind.
+// Where JNA finds the host build of libwispers_access_sdk for the unit tests:
+// the Rust workspace's release output, which build-jnilibs.sh leaves behind.
+// A build with `--debug` leaves it in target/debug instead; point the tests
+// there with -PsdkHostLibDir=../target/debug (relative to the android/ root).
+val sdkHostLibDir = providers.gradleProperty("sdkHostLibDir").getOrElse("../target/release")
 tasks.withType<Test>().configureEach {
-    systemProperty("jna.library.path", rootProject.projectDir.resolve("../target/release").canonicalPath)
+    systemProperty("jna.library.path", rootProject.projectDir.resolve(sdkHostLibDir).canonicalPath)
 }

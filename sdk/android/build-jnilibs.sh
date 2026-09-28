@@ -16,20 +16,33 @@ set -euo pipefail
 #   - cargo install cargo-ndk
 #   - rustup target add aarch64-linux-android armv7-linux-androideabi x86_64-linux-android
 #
-# Usage: ./build-jnilibs.sh [--debug]
+# Usage: ./build-jnilibs.sh [--debug] [--abis "arm64-v8a armeabi-v7a x86_64"]
+#
+# --abis picks which ABIs go into jniLibs; the default is all three. CI builds
+# one, enough to prove the crate cross-compiles for Android.
 
 ANDROID_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_DIR="$(cd "$ANDROID_DIR/../.." && pwd)"
 CRATE=wispers-access-sdk
 LIB=libwispers_access_sdk.so
-ABIS="arm64-v8a armeabi-v7a x86_64"
 
 PROFILE="release"
 CARGO_FLAG="--release"
-if [[ "${1:-}" == "--debug" ]]; then
-    PROFILE="debug"
-    CARGO_FLAG=""
-fi
+ABIS="arm64-v8a armeabi-v7a x86_64"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --debug) PROFILE="debug"; CARGO_FLAG=""; shift ;;
+        --abis) ABIS="$2"; shift 2 ;;
+        *) echo "usage: $0 [--debug] [--abis \"arm64-v8a armeabi-v7a x86_64\"]"; exit 2 ;;
+    esac
+done
+
+# The host build the bindings are read from: a dylib on macOS, a .so on Linux.
+case "$(uname -s)" in
+    Darwin) HOST_LIB=libwispers_access_sdk.dylib ;;
+    Linux) HOST_LIB=libwispers_access_sdk.so ;;
+    *) echo "ERROR: unsupported host $(uname -s)"; exit 1 ;;
+esac
 
 if [[ -z "${ANDROID_NDK_HOME:-}" ]]; then
     SDK_ROOT="${ANDROID_HOME:-$HOME/Library/Android/sdk}"
@@ -56,6 +69,7 @@ for ABI in $ABIS; do
         arm64-v8a) TRIPLE=aarch64-linux-android ;;
         armeabi-v7a) TRIPLE=armv7-linux-androideabi ;;
         x86_64) TRIPLE=x86_64-linux-android ;;
+        *) echo "ERROR: unknown ABI '$ABI' (arm64-v8a, armeabi-v7a, x86_64)"; exit 2 ;;
     esac
     mkdir -p "$JNI_DIR/$ABI"
     cp "$TARGET_DIR/$TRIPLE/$PROFILE/$LIB" "$JNI_DIR/$ABI/$LIB"
@@ -67,7 +81,7 @@ echo "==> Generating the Kotlin bindings..."
 cargo build -p "$CRATE" $CARGO_FLAG --manifest-path "$REPO_DIR/Cargo.toml"
 rm -rf "$ANDROID_DIR/src/main/kotlin"
 cargo run -q -p uniffi-bindgen --manifest-path "$REPO_DIR/Cargo.toml" -- generate \
-    --library "$TARGET_DIR/$PROFILE/libwispers_access_sdk.dylib" \
+    --library "$TARGET_DIR/$PROFILE/$HOST_LIB" \
     --language kotlin --no-format \
     --out-dir "$ANDROID_DIR/src/main/kotlin"
 

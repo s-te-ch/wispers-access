@@ -1,6 +1,7 @@
 # Validation for every PR and push to main. This currently covers Rust (fmt,
-# clippy, tests on Linux; cargo check on Windows) and the Android app (unit
-# tests, debug build).
+# clippy, tests on Linux; cargo check on Windows), the SDK's Android package
+# (bindings generated from a host build, one ABI cross-compiled, host unit
+# tests over JNA) and the Android app (unit tests, debug build).
 #
 # TODO: Figure out how to cover iOS without making CI take forever.
 #
@@ -83,7 +84,7 @@ jobs:
 
   android:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 30
     defaults:
       run:
         working-directory: android
@@ -97,6 +98,28 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
 
+      # The SDK's Android package is generated from the Rust crate (see
+      # sdk/android/build-jnilibs.sh), so this job compiles the crate too:
+      # the same native deps as the rust job, plus the Android target and
+      # cargo-ndk. The runner image ships Rust and an NDK (ANDROID_NDK_HOME).
+      - name: Install native build deps
+        timeout-minutes: 5
+        run: |
+          APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
+          $APT update
+          $APT install -y --no-install-recommends protobuf-compiler libclang-dev
+          rustup target add aarch64-linux-android
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      # rust-cache restores ~/.cargo/bin, so this is a no-op on a warm cache.
+      - run: cargo install cargo-ndk --locked
+
+      # Debug: the .so is not shipped from here, and debug compiles faster.
+      - name: Build the SDK's Android package (arm64 only)
+        working-directory: sdk/android
+        run: ./build-jnilibs.sh --debug --abis arm64-v8a
+
       # Release signing is skipped automatically: keystore.properties is not in
       # the repo, so the build produces test/debug artifacts only.
-      - run: ./gradlew testDebugUnitTest assembleDebug
+      - run: ./gradlew testDebugUnitTest assembleDebug -PsdkHostLibDir=../target/debug
