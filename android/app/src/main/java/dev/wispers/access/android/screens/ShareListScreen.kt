@@ -27,6 +27,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
@@ -288,21 +289,31 @@ private fun ShareHeader(
     }
 }
 
-/** One app's card: its icon (harvested while browsing, else a letter tile) and name. */
+/**
+ * One app's card: its icon (harvested while browsing, else a letter tile) and
+ * name; tapping the row opens the app. An optional [footer] sits inside the
+ * card under a divider, for actions that belong to this app, and is not part
+ * of the tap target.
+ */
 @Composable
-fun AppCard(app: SharedApp, iconPng: ByteArray?, enabled: Boolean, onClick: () -> Unit) {
+fun AppCard(
+    app: SharedApp,
+    iconPng: ByteArray?,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    footer: (@Composable () -> Unit)? = null,
+) {
     val name = app.name.ifBlank { app.id }
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
         elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
         shape = RoundedCornerShape(16.dp),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick),
+        modifier = Modifier.fillMaxWidth(),
     ) {
         Row(
             modifier = Modifier
                 .fillMaxWidth()
+                .clickable(onClick = onClick)
                 .padding(horizontal = 20.dp, vertical = 16.dp)
                 .alpha(if (enabled) 1f else 0.6f),
             verticalAlignment = Alignment.CenterVertically,
@@ -320,6 +331,17 @@ fun AppCard(app: SharedApp, iconPng: ByteArray?, enabled: Boolean, onClick: () -
                 contentDescription = null,
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+        if (footer != null) {
+            HorizontalDivider(color = MaterialTheme.colorScheme.surfaceVariant)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 8.dp, vertical = 4.dp),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                footer()
+            }
         }
     }
 }

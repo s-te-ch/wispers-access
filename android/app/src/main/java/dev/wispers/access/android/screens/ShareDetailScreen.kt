@@ -263,12 +263,17 @@ private fun ShareDetailContent(
             }
             for (app in share.apps) {
                 val key = BrowseKey(share.id, app.id)
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    AppCard(app = app, iconPng = icons[key], enabled = true, onClick = { onOpenApp(key) })
-                    TextButton(onClick = { onAddToHomescreen(app) }) {
-                        Text("Add to homescreen", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    }
-                }
+                AppCard(
+                    app = app,
+                    iconPng = icons[key],
+                    enabled = true,
+                    onClick = { onOpenApp(key) },
+                    footer = {
+                        TextButton(onClick = { onAddToHomescreen(app) }) {
+                            Text("Add to homescreen")
+                        }
+                    },
+                )
             }
             Text(
                 "When the dialog appears, drag the icon onto your home screen. " +
