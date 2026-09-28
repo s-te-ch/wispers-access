@@ -67,8 +67,11 @@ impl serving::HostNode for HostNode {
         Box::pin(async move { self.mint_invite(node_name, user_id) })
     }
 
-    fn revoke_guest(&self, number: i64) -> Result<GuestNode> {
-        Ok(self.db.revoke_guest(number, Utc::now())?)
+    fn revoke_guest(&self, number: i64) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            self.db.revoke_guest(number, Utc::now())?;
+            Ok(())
+        })
     }
 
     fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
