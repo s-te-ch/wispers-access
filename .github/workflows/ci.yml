@@ -115,6 +115,19 @@ jobs:
       # rust-cache restores ~/.cargo/bin, so this is a no-op on a warm cache.
       - run: cargo install cargo-ndk --locked
 
+      # wispers-connect's build.rs picks link libraries with cfg!(target_os),
+      # which describes the build host, not the target: from a Linux host it
+      # asks for -lpthread on Android too, where Bionic has no such library
+      # (macOS hosts, like a dev machine, don't hit this). An empty archive,
+      # which is just the ar magic, satisfies the linker. Drop this once
+      # wispers-connect reads CARGO_CFG_TARGET_OS instead.
+      - name: Stub libpthread for the Android target
+        run: |
+          stub="$RUNNER_TEMP/pthread-stub"
+          mkdir -p "$stub"
+          printf '!<arch>\n' > "$stub/libpthread.a"
+          echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_RUSTFLAGS=-L $stub" >> "$GITHUB_ENV"
+
       # Debug: the .so is not shipped from here, and debug compiles faster.
       - name: Build the SDK's Android package (arm64 only)
         working-directory: sdk/android
