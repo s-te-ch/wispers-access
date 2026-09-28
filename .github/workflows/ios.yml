@@ -5,8 +5,12 @@
 # no new commits arrived since the last successful run. workflow_dispatch gives
 # an immediate manual run.
 #
-# Build-only, no simulator tests yet. Signing is disabled; the WispersConnect
-# simulator binary is arm64-only, hence ARCHS=arm64 (runner is Apple Silicon).
+# The app links the SDK through the local Swift package in sdk/swift, whose
+# XCFramework and generated bindings are not checked in: build-xcframework.sh
+# produces them from the Rust crate, here for the simulator slice only.
+#
+# Build-only, no simulator tests yet. Signing is disabled; the SDK's simulator
+# slice is arm64-only, hence ARCHS=arm64 (runner is Apple Silicon).
 #
 # Third-party actions are pinned to commit SHAs instead of version tags, so the
 # publisher can't change the tag and make us run something we don't want.
@@ -47,6 +51,24 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: steps.guard.outputs.skip != 'true'
+
+      # The runner image ships Rust and cmake. tonic/prost need protoc; the
+      # bindgen in boring-sys finds Xcode's libclang on its own.
+      - name: Install native build deps
+        if: steps.guard.outputs.skip != 'true'
+        timeout-minutes: 5
+        working-directory: .
+        run: |
+          brew install --quiet protobuf
+          rustup target add aarch64-apple-ios-sim
+
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        if: steps.guard.outputs.skip != 'true'
+
+      - name: Build the SDK's Swift package (simulator slice)
+        if: steps.guard.outputs.skip != 'true'
+        working-directory: sdk/swift
+        run: ./build-xcframework.sh --slices ios-simulator
 
       # -skipMacroValidation/-skipPackagePluginValidation: package macros and
       # plugins normally need interactive approval, which a headless runner
