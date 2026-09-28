@@ -37,10 +37,17 @@ class ShareExtras @Inject internal constructor(private val dao: ExtrasDao) {
         dao.icon(key.shareId, key.appId)?.png
     }
 
-    /** Stores a harvested icon if it out-ranks the cached one; true if it did. */
+    /**
+     * Stores a harvested icon unless the cached one out-ranks it, or is the
+     * same rank and the same bytes; true if it did. Same rank with different
+     * bytes replaces, so a site that changes its icon is picked up.
+     */
     suspend fun updateIcon(key: BrowseKey, png: ByteArray, rank: Int): Boolean =
         withContext(Dispatchers.IO) {
-            if (rank <= (dao.iconRank(key.shareId, key.appId) ?: 0)) return@withContext false
+            val cached = dao.icon(key.shareId, key.appId)
+            if (cached != null && (rank < cached.rank || (rank == cached.rank && cached.png.contentEquals(png)))) {
+                return@withContext false
+            }
             dao.putIcon(AppIconEntity(key.shareId, key.appId, png, rank))
             true
         }

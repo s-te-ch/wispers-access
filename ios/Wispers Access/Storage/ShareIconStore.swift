@@ -33,10 +33,14 @@ final class ShareIconStore {
     /// The rank of the cached icon (0 if none) — the bar a new one must beat.
     func rank(for key: BrowseKey) -> Int { records[Self.record(key)]?.rank ?? 0 }
 
-    /// Stores a harvested icon, but only if it out-ranks what's cached (a higher
-    /// rung of the ladder). The caller has already validated the bytes decode.
+    /// Stores a harvested icon unless the cached one out-ranks it (a higher
+    /// rung of the ladder), or is the same rank and the same bytes. Same rank
+    /// with different bytes replaces, so a site that changes its icon is
+    /// picked up. The caller has already validated the bytes decode.
     func update(_ png: Data, rank: Int, for key: BrowseKey) {
-        guard rank > self.rank(for: key) else { return }
+        if let cached = records[Self.record(key)] {
+            guard rank > cached.rank || (rank == cached.rank && cached.png != png) else { return }
+        }
         records[Self.record(key)] = IconRecord(rank: rank, png: png)
         persist()
     }

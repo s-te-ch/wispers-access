@@ -42,8 +42,6 @@ internal interface ExtrasDao {
     @Query("SELECT * FROM app_icons")
     fun observeIcons(): Flow<List<AppIconEntity>>
 
-    @Query("SELECT rank FROM app_icons WHERE share = :share AND app = :app")
-    fun iconRank(share: String, app: String): Int?
 
     @Query("SELECT * FROM app_icons WHERE share = :share AND app = :app")
     fun icon(share: String, app: String): AppIconEntity?

@@ -3,8 +3,10 @@ package dev.wispers.access.android
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.BitmapFactory
 import android.os.Bundle
 import android.util.Base64
+import android.util.Log
 import android.view.ViewGroup
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
@@ -162,9 +164,20 @@ class BrowseActivity : ComponentActivity() {
             val obj = runCatching { JSONObject(json) }.getOrNull() ?: return@launch
             val rank = obj.optInt("rank", 0)
             val dataUrl = obj.optString("dataUrl", "")
+            Log.d(TAG, "icon harvest for ${key.token}: rank=$rank, ${dataUrl.substringBefore(',').ifEmpty { "no data" }}, ${dataUrl.length} chars")
             if (rank <= 0 || dataUrl.isEmpty()) return@launch
             val bytes = decodeDataUrl(dataUrl) ?: return@launch
-            if (!extras.updateIcon(key, bytes, rank)) return@launch
+            // Only bytes native can render, so an undecodable icon can't claim
+            // a rung and block a good one.
+            if (BitmapFactory.decodeByteArray(bytes, 0, bytes.size) == null) {
+                Log.d(TAG, "icon harvest for ${key.token}: ${bytes.size} bytes do not decode")
+                return@launch
+            }
+            if (!extras.updateIcon(key, bytes, rank)) {
+                Log.d(TAG, "icon harvest for ${key.token}: cached icon kept")
+                return@launch
+            }
+            Log.i(TAG, "icon harvest for ${key.token}: stored rank $rank, ${bytes.size} bytes")
             val app = share.apps.firstOrNull { it.id == key.appId } ?: return@launch
             refreshShortcut(this@BrowseActivity, share, app, bytes)
         }
@@ -216,6 +229,8 @@ private fun TerminalShareNotice(state: ShareState) {
         }
     }
 }
+
+private const val TAG = "BrowseActivity"
 
 private fun shortcutId(key: BrowseKey) = "app-${key.token}"
 
@@ -300,15 +315,46 @@ private class IconBridge(private val onJson: (String) -> Unit) {
  * Same-origin JS that picks the best available site icon — manifest maskable (4) >
  * manifest (3) > apple-touch-icon (2) > favicon (1) — fetches it (with credentials,
  * so the proxy's identity header and any cookies apply and auth-gated icons
- * resolve), and — only when the response is OK and an actual image — hands it
- * back as a data URL via [IconBridge]. It runs on every page-finish; native
- * discards anything that doesn't out-rank the cached icon.
+ * resolve), and — only when the response is OK and an actual image — rasterises
+ * it to a PNG in the page, so SVG and ICO favicons work too, and hands it back
+ * as a data URL via [IconBridge]. It runs on every page-finish; native discards
+ * anything that doesn't decode or doesn't out-rank the cached icon.
  */
 private const val HARVEST_JS = """
 (function () {
   function abs(u) { try { return new URL(u, location.href).href; } catch (e) { return null; } }
   function done(rank, dataUrl) {
     try { WAIcon.onIcon(JSON.stringify({ rank: rank, dataUrl: dataUrl || '' })); } catch (e) {}
+  }
+  // A PNG data URL of the icon at SIZE px, drawn by the browser, which
+  // decodes what native code can't (SVG, ICO). Aspect ratio kept, centred
+  // on transparent. Falls back to the raw bytes if drawing fails.
+  var SIZE = 256;
+  function rasterise(blob) {
+    return new Promise(function (resolve) {
+      var url = URL.createObjectURL(blob);
+      var img = new Image();
+      img.onload = function () {
+        URL.revokeObjectURL(url);
+        try {
+          var w = img.naturalWidth || SIZE, h = img.naturalHeight || SIZE;
+          var s = SIZE / Math.max(w, h);
+          var dw = Math.round(w * s), dh = Math.round(h * s);
+          var c = document.createElement('canvas');
+          c.width = SIZE; c.height = SIZE;
+          c.getContext('2d').drawImage(img, (SIZE - dw) / 2, (SIZE - dh) / 2, dw, dh);
+          resolve(c.toDataURL('image/png'));
+        } catch (e) { rawDataUrl(blob, resolve); }
+      };
+      img.onerror = function () { URL.revokeObjectURL(url); rawDataUrl(blob, resolve); };
+      img.src = url;
+    });
+  }
+  function rawDataUrl(blob, resolve) {
+    var reader = new FileReader();
+    reader.onloadend = function () { resolve(reader.result); };
+    reader.onerror = function () { resolve(''); };
+    reader.readAsDataURL(blob);
   }
   async function run() {
     var best = null;
@@ -344,10 +390,7 @@ private const val HARVEST_JS = """
       if (!resp.ok) { done(0); return; }
       var blob = await resp.blob();
       if (!/^image\//.test(blob.type)) { done(0); return; }
-      var reader = new FileReader();
-      reader.onloadend = function () { done(best.rank, reader.result); };
-      reader.onerror = function () { done(0); };
-      reader.readAsDataURL(blob);
+      done(best.rank, await rasterise(blob));
     } catch (e) { done(0); }
   }
   run();
