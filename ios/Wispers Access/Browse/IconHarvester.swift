@@ -5,11 +5,12 @@ import WispersAccessSdk
 /// Harvests a browsed site's best icon and reports it via `onIcon`. A
 /// `WKScriptMessageHandler` that receives the page's pick — chosen by injected
 /// same-origin JS run on every page-finish — and hands back validated image bytes
-/// plus their rank. Ported from the Android `ShareActivity` harvester: the JS
+/// plus their rank. The same JS as Android's `BrowseActivity` harvester: it
 /// prefers manifest-maskable (4) > manifest (3) > apple-touch-icon (2) >
 /// favicon (1), fetches the winner with credentials (so it flows through the
-/// loopback proxy with the same cookies/identity as the page), and only returns
-/// an actual image on an OK response. Native discards anything that doesn't
+/// loopback proxy with the same cookies/identity as the page), only accepts an
+/// actual image on an OK response, and rasterises it to a PNG in the page, so
+/// SVG and ICO favicons work too. Native discards anything that doesn't
 /// out-rank the cached icon (see `ShareIconStore`).
 final class IconHarvester: NSObject, WKScriptMessageHandler {
     static let messageName = "waIcon"
@@ -54,6 +55,36 @@ final class IconHarvester: NSObject, WKScriptMessageHandler {
       function done(rank, dataUrl) {
         try { window.webkit.messageHandlers.waIcon.postMessage({ rank: rank, dataUrl: dataUrl || '' }); } catch (e) {}
       }
+      // A PNG data URL of the icon at SIZE px, drawn by the browser, which
+      // decodes what native code can't (SVG, ICO). Aspect ratio kept, centred
+      // on transparent. Falls back to the raw bytes if drawing fails.
+      var SIZE = 256;
+      function rasterise(blob) {
+        return new Promise(function (resolve) {
+          var url = URL.createObjectURL(blob);
+          var img = new Image();
+          img.onload = function () {
+            URL.revokeObjectURL(url);
+            try {
+              var w = img.naturalWidth || SIZE, h = img.naturalHeight || SIZE;
+              var s = SIZE / Math.max(w, h);
+              var dw = Math.round(w * s), dh = Math.round(h * s);
+              var c = document.createElement('canvas');
+              c.width = SIZE; c.height = SIZE;
+              c.getContext('2d').drawImage(img, (SIZE - dw) / 2, (SIZE - dh) / 2, dw, dh);
+              resolve(c.toDataURL('image/png'));
+            } catch (e) { rawDataUrl(blob, resolve); }
+          };
+          img.onerror = function () { URL.revokeObjectURL(url); rawDataUrl(blob, resolve); };
+          img.src = url;
+        });
+      }
+      function rawDataUrl(blob, resolve) {
+        var reader = new FileReader();
+        reader.onloadend = function () { resolve(reader.result); };
+        reader.onerror = function () { resolve(''); };
+        reader.readAsDataURL(blob);
+      }
       async function run() {
         var best = null;
         var ml = document.querySelector('link[rel~="manifest"]');
@@ -88,10 +119,7 @@ final class IconHarvester: NSObject, WKScriptMessageHandler {
           if (!resp.ok) { done(0); return; }
           var blob = await resp.blob();
           if (!/^image\\//.test(blob.type)) { done(0); return; }
-          var reader = new FileReader();
-          reader.onloadend = function () { done(best.rank, reader.result); };
-          reader.onerror = function () { done(0); };
-          reader.readAsDataURL(blob);
+          done(best.rank, await rasterise(blob));
         } catch (e) { done(0); }
       }
       run();
