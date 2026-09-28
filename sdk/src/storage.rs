@@ -40,6 +40,15 @@ impl std::fmt::Display for ShareId {
 }
 
 impl DB {
+    /// A store that lives in memory, for tests.
+    #[cfg(test)]
+    pub(crate) fn in_memory() -> Arc<Self> {
+        let conn = prepare(rusqlite::Connection::open_in_memory().unwrap()).unwrap();
+        Arc::new(DB {
+            conn: Mutex::new(conn),
+        })
+    }
+
     /// Opens `state.db` under `dir`, creating both as needed.
     pub fn open(dir: &Path) -> Result<Arc<Self>> {
         let conn = open_db(dir)?;
@@ -471,16 +480,9 @@ mod tests {
         migrations().validate().unwrap();
     }
 
-    fn in_memory() -> Arc<DB> {
-        let conn = prepare(rusqlite::Connection::open_in_memory().unwrap()).unwrap();
-        Arc::new(DB {
-            conn: Mutex::new(conn),
-        })
-    }
-
     #[test]
     fn share_info_round_trips_and_replaces() {
-        let db = in_memory();
+        let db = DB::in_memory();
         let row = db.new_row().unwrap();
         assert!(row.read_share_config_hash().unwrap().is_none());
         assert!(row.read_apps().unwrap().is_empty());
@@ -534,7 +536,7 @@ mod tests {
 
     #[test]
     fn hostnames_dedupe() {
-        let db = in_memory();
+        let db = DB::in_memory();
         let a = db.new_row().unwrap();
         let b = db.new_row().unwrap();
         assert_ne!(a.share_id().unwrap(), b.share_id().unwrap());

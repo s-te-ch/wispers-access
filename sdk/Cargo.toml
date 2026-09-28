@@ -25,5 +25,5 @@ uniffi = "0.32"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
 wispers-access-wire = { path = "../wire" }
-wispers-connect = "0.14.0"
+wispers-connect = "0.17.0-rc1"
 iroh = "1.2"

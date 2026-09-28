@@ -3,12 +3,14 @@
 use crate::guest_node;
 use crate::secrets::SecretStore;
 use crate::storage;
-use crate::transports::{BoxFuture, Stream, TerminalState, Transport, TransportError};
+use crate::transports::{
+    BoxFuture, ConnectionCheck, Stream, TerminalState, Transport, TransportError,
+};
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::OnceCell;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use wispers_access_wire as wire;
 
 /// The secret store key of this device's Ed25519 key for a share; its
@@ -103,8 +105,11 @@ pub struct Iroh {
     host: iroh::EndpointId,
     /// The live connection, established on first use. Replaced with a fresh
     /// cell when a stream fails to open on it, so the next caller redials.
-    conn: Mutex<Arc<OnceCell<iroh::endpoint::Connection>>>,
+    conn: Mutex<ConnectionCell>,
 }
+
+/// The cache slot for the connection: filled once, replaced whole.
+type ConnectionCell = Arc<OnceCell<iroh::endpoint::Connection>>;
 
 impl Iroh {
     /// Binds an endpoint with the share's stored key.
@@ -143,18 +148,36 @@ impl Iroh {
         })
     }
 
-    async fn try_open_stream(&self) -> Result<Stream, TransportError> {
+    /// The cached connection, or a freshly dialled one put in the cache.
+    async fn cached_connection_or_dial(&self) -> Result<ConnectionCell, TransportError> {
         let cell = self.conn.lock().expect("unpoisoned").clone();
-        let conn = match cell
-            .get_or_try_init(|| async {
-                info!("connecting to the host node over iroh");
-                self.endpoint.connect(self.host, wire::ALPN).await
-            })
-            .await
-        {
-            Ok(conn) => conn.clone(),
-            Err(e) => return Err(TransportError::Transient(e.into())),
-        };
+        cell.get_or_try_init(|| async {
+            info!("connecting to the host node over iroh");
+            self.endpoint.connect(self.host, wire::ALPN).await
+        })
+        .await
+        .map_err(|e| TransportError::Transient(e.into()))?;
+        Ok(cell)
+    }
+
+    /// The cache slot with the cached connection, if there is one; never
+    /// dials.
+    fn cached_connection(&self) -> Option<ConnectionCell> {
+        let cell = self.conn.lock().expect("unpoisoned").clone();
+        cell.initialized().then_some(cell)
+    }
+
+    /// Opens a stream on the connection in `cell`. If the stream cannot be
+    /// opened, the connection is dead, and that slot is emptied so the next
+    /// attempt dials a new one; a newer connection another task put in the
+    /// cache meanwhile is left alone.
+    async fn open_stream_or_drop_connection(
+        &self,
+        cell: &ConnectionCell,
+    ) -> Result<Stream, TransportError> {
+        let conn = cell
+            .get()
+            .expect("a cell handed to open_stream_or_drop_connection holds a connection");
         match conn.open_bi().await {
             Ok((send, recv)) => {
                 // The host node may have closed us right after the handshake;
@@ -165,13 +188,7 @@ impl Iroh {
                 Ok(Box::new(tokio::io::join(recv, send)))
             }
             Err(e) => {
-                // The connection has broken: evict it so the next attempt
-                // redials. Several tasks may race here, so only replace the
-                // cell that failed.
-                let mut current = self.conn.lock().expect("unpoisoned");
-                if Arc::ptr_eq(&*current, &cell) {
-                    *current = Arc::new(OnceCell::new());
-                }
+                self.evict(cell);
                 Err(match terminal_from_close(&e) {
                     Some(state) => TransportError::Terminal(state),
                     None => TransportError::Transient(e.into()),
@@ -179,22 +196,86 @@ impl Iroh {
             }
         }
     }
+
+    /// Forgets the connection `cell` holds. Several tasks may race here,
+    /// so only the cell that failed is replaced.
+    fn evict(&self, cell: &ConnectionCell) {
+        let mut current = self.conn.lock().expect("unpoisoned");
+        if Arc::ptr_eq(&*current, cell) {
+            *current = Arc::new(OnceCell::new());
+        }
+    }
 }
 
 impl Transport for Iroh {
     fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>> {
         Box::pin(async {
-            match self.try_open_stream().await {
-                Err(TransportError::Transient(e)) => {
-                    warn!(
-                        error = format!("{e:#}"),
-                        "opening a stream failed, retrying once"
-                    );
-                    self.try_open_stream().await
+            // A cached connection may have died unnoticed. A stream that
+            // fails to open on it evicts it, and one dial follows.
+            if let Some(cell) = self.cached_connection() {
+                match self.open_stream_or_drop_connection(&cell).await {
+                    Ok(stream) => return Ok(stream),
+                    Err(TransportError::Terminal(state)) => {
+                        return Err(TransportError::Terminal(state));
+                    }
+                    Err(TransportError::Transient(e)) => {
+                        warn!(
+                            error = format!("{e:#}"),
+                            "cached connection is dead; redialling"
+                        );
+                    }
                 }
-                other => other,
+            }
+            let cell = self.cached_connection_or_dial().await?;
+            self.open_stream_or_drop_connection(&cell).await
+        })
+    }
+
+    /// A unidirectional stream, opened and finished without a byte: the
+    /// host node's QUIC stack acknowledges it without the host node doing
+    /// anything, which is the whole check. The host discards such streams.
+    fn check_connection(
+        &self,
+        deadline: Duration,
+    ) -> BoxFuture<'_, Result<ConnectionCheck, TransportError>> {
+        Box::pin(async move {
+            let Some(cell) = self.cached_connection() else {
+                return Ok(ConnectionCheck::NoConnection);
+            };
+            let conn = cell.get().expect("a cached connection");
+            if let Some(reason) = conn.close_reason() {
+                self.evict(&cell);
+                return match terminal_from_close(&reason) {
+                    Some(state) => Err(TransportError::Terminal(state)),
+                    None => Ok(ConnectionCheck::Dead),
+                };
+            }
+            let probe = async {
+                let mut send = conn.open_uni().await?;
+                send.finish()?;
+                send.stopped().await?;
+                Ok::<(), anyhow::Error>(())
+            };
+            match tokio::time::timeout(deadline, probe).await {
+                Ok(Ok(())) => Ok(ConnectionCheck::Alive),
+                Ok(Err(e)) => {
+                    debug!(error = format!("{e:#}"), "probe failed");
+                    self.evict(&cell);
+                    match conn.close_reason().as_ref().and_then(terminal_from_close) {
+                        Some(state) => Err(TransportError::Terminal(state)),
+                        None => Ok(ConnectionCheck::Dead),
+                    }
+                }
+                Err(_) => {
+                    self.evict(&cell);
+                    Ok(ConnectionCheck::Dead)
+                }
             }
         })
+    }
+
+    fn drop_connection(&self) {
+        *self.conn.lock().expect("unpoisoned") = Arc::new(OnceCell::new());
     }
 }
 

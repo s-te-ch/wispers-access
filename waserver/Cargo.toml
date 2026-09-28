@@ -29,7 +29,7 @@ tracing-appender = "0.2"
 toml = "0.8"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wispers-access-wire = { path = "../wire" }
-wispers-connect = "0.14.0"
+wispers-connect = "0.17.0-rc1"
 qrcode = "0.14"
 rand = "0.10"
 image = { version = "0.25", default-features = false, features = ["png"] }
