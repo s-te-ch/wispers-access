@@ -156,7 +156,7 @@ pub enum Request {
         node_name: String,
         user_id: String,
     },
-    /// iroh only: mark a guest revoked and close its live connections.
+    /// Mark a guest revoked and close its live connections.
     RevokeGuest {
         number: i64,
     },

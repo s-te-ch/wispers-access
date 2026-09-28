@@ -72,7 +72,7 @@ pub trait HostNode: Send + Sync {
 
     /// Marks a guest revoked. Called by `ServingHandle::revoke_guest`, which
     /// then closes the guest's live connections.
-    fn revoke_guest(&self, number: i64) -> Result<storage::GuestNode>;
+    fn revoke_guest(&self, number: i64) -> BoxFuture<'_, Result<()>>;
 
     /// Stops serving. Called by `ServingHandle::shutdown`, which already tells
     /// every live connection to close beforehand.
@@ -92,6 +92,10 @@ pub enum ExitReason {
 
 /// How long to wait for the IPC server to answer a `stop` command.
 const IPC_REPLY_GRACE: Duration = Duration::from_secs(5);
+
+/// How long `close_connections` waits for the closed connections to go away.
+const CLOSE_GRACE: Duration = Duration::from_secs(2);
+const CLOSE_POLL: Duration = Duration::from_millis(50);
 
 #[derive(Clone)]
 pub struct ServingHandle {
@@ -278,32 +282,58 @@ impl ServingHandle {
 
     /// Marks the guest revoked and closes its live connections with the
     /// `revoked` code, so it learns at once.
-    pub async fn revoke_guest(&self, number: i64) -> Result<storage::GuestNode> {
-        let guest = self.inner.host_node.revoke_guest(number)?;
+    pub async fn revoke_guest(&self, number: i64) -> Result<()> {
+        self.inner.host_node.revoke_guest(number).await?;
         self.close_connections(|c| i64::from(c.number) == number, wire::CloseCode::Revoked)
             .await;
-        Ok(guest)
+        Ok(())
     }
 
-    /// Stops serving. When this is called, live connections have already been
-    /// told to close first, so no need to close them in an orderly fashion.
+    /// Tells every live connection to close, waits for those closes to go
+    /// out, then stops the transport.
     pub async fn shutdown(&self) -> Result<()> {
         self.close_connections(|_| true, wire::CloseCode::Closing)
             .await;
         self.inner.host_node.shutdown().await
     }
 
+    /// Asks the connections' own tasks to close with `code`, and waits until
+    /// they have unregistered, or `CLOSE_GRACE` has passed, so the close
+    /// frames are on the wire before the caller tears the transport down.
     async fn close_connections(
         &self,
         which: impl Fn(&GuestNodeConnection) -> bool,
         code: wire::CloseCode,
     ) {
+        let mut asked = 0;
         for c in self.inner.connections.read().await.values() {
             if which(c)
                 && let Some(close) = &c.closer
             {
                 close(code);
+                asked += 1;
             }
+        }
+        if asked == 0 {
+            return;
+        }
+        let deadline = tokio::time::Instant::now() + CLOSE_GRACE;
+        loop {
+            let pending = self
+                .inner
+                .connections
+                .read()
+                .await
+                .values()
+                .filter(|c| which(c) && c.closer.is_some())
+                .count();
+            if pending == 0 || tokio::time::Instant::now() >= deadline {
+                if pending > 0 {
+                    warn!(pending, "gave up waiting for connections to close");
+                }
+                return;
+            }
+            tokio::time::sleep(CLOSE_POLL).await;
         }
     }
 }

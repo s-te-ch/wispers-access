@@ -1,15 +1,16 @@
 //! The Wispers Connect transport implementation.
 
 use crate::initialization::Rollback;
+use crate::ipc;
 use crate::protocol::{self, Peer};
-use crate::serving::{self, BoxFuture, ExitReason, ServingHandle, shutdown_signal};
+use crate::serving::{self, BoxFuture, Closer, ExitReason, ServingHandle, shutdown_signal};
 use crate::status::{GuestStatus, InviteStatus, TransportReport, TransportStatus, invite_status};
 use crate::storage;
 use crate::wcbe;
 use anyhow::{Context, Result};
 use chrono::Utc;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, watch};
 use tracing::{error, info, warn};
 use wispers_access_wire as wire;
 use wispers_connect as wc;
@@ -152,13 +153,12 @@ impl serving::HostNode for HostNode {
         Box::pin(self.mint_invite(node_name, user_id))
     }
 
-    /// Not used on this transport: `waserver revoke` restores its own copy of
-    /// the host node and signs the roster revocation there (see `revoke`
-    /// below), rather than asking the daemon. The daemon does not learn of
-    /// it: its cached roster stays stale and the guest's live connection is
-    /// not closed. To be fixed together with close codes on this transport.
-    fn revoke_guest(&self, _number: i64) -> Result<storage::GuestNode> {
-        anyhow::bail!("on this transport, revocation does not go through the daemon")
+    fn revoke_guest(&self, number: i64) -> BoxFuture<'_, Result<()>> {
+        Box::pin(async move {
+            let node_number =
+                i32::try_from(number).map_err(|_| anyhow::anyhow!("no node {number}"))?;
+            revoke_on_hub(&self.node, &self.wcbe_client, node_number).await
+        })
     }
 
     fn shutdown(&self) -> BoxFuture<'_, Result<()>> {
@@ -281,12 +281,23 @@ async fn handle_quic_conn(
     };
     info!(peer, user_id = %user_id, "resolved peer identity");
 
-    // Track the connection for `waserver status` while it lives.
+    // Track the connection for `waserver status`, and hand out a closer for
+    // `revoke` and shutdown. The connection can only be closed by value, so
+    // the closer does not close: it sends the code here, and the loop below
+    // closes on this task, which owns the connection.
+    let (close_requests, mut close_request) = watch::channel(None);
+    let closer: Closer = Box::new(move |code| {
+        let _ = close_requests.send(Some(code));
+    });
     let registration = serving_handle
-        .register_connection(peer, user_id.clone(), None)
+        .register_connection(peer, user_id.clone(), Some(closer))
         .await;
-    loop {
-        match conn.accept_stream().await {
+    let close_with = loop {
+        let stream = tokio::select! {
+            r = conn.accept_stream() => r,
+            _ = close_request.changed() => break *close_request.borrow(),
+        };
+        match stream {
             Ok(stream) => {
                 let peer = Peer {
                     // The node number, authenticated by the library against
@@ -308,8 +319,15 @@ async fn handle_quic_conn(
             }
             Err(e) => {
                 warn!(peer, error = %e, "QUIC connection closed");
-                break;
+                break None;
             }
+        }
+    };
+    if let Some(code) = close_with {
+        info!(peer, code = code.code(), "closing the connection");
+        let reason = String::from_utf8_lossy(code.reason()).into_owned();
+        if let Err(e) = conn.close_with_error(u64::from(code.code()), &reason).await {
+            warn!(peer, error = %e, "closing the connection failed");
         }
     }
     serving_handle.unregister_connection(registration).await;
@@ -353,7 +371,10 @@ fn handle_session_end(
 
 //-- `waserver revoke` implementation ------------------------------------------
 
-/// Revokes on the hub, then deregisters the node there.
+/// Revokes the node. Through the daemon when it runs, so the serving host
+/// node signs the revocation (its roster stays current) and the guest's live
+/// connection gets the `revoked` close. Otherwise with a restored copy of the
+/// host node, and the guest learns on its next dial.
 pub async fn revoke(
     share: &str,
     dir: storage::ShareDir,
@@ -363,8 +384,28 @@ pub async fn revoke(
     if node_number == HOST_NODE_NUMBER {
         anyhow::bail!("Node {node_number} is the host and cannot be revoked");
     }
+    match ipc::Client::connect(share).await {
+        Ok(mut client) => {
+            let number = i64::from(node_number);
+            match client.request(&ipc::Request::RevokeGuest { number }).await {
+                Ok(ipc::Response::Success { .. }) => {}
+                Ok(ipc::Response::Error { error, .. }) => anyhow::bail!("{error}"),
+                Err(e) => anyhow::bail!("error sending command to server: {e}"),
+            }
+        }
+        Err(_) => revoke_offline(share, dir, backend, node_number).await?,
+    }
+    println!("Node {node_number} is now revoked and deregistered");
+    Ok(())
+}
 
-    // Restore the node.
+/// `revoke` without a daemon: restores the host node and revokes with that.
+async fn revoke_offline(
+    share: &str,
+    dir: storage::ShareDir,
+    backend: Option<String>,
+    node_number: i32,
+) -> Result<()> {
     let state = dir.open_state()?;
     let Some(wcs) = state.wispers_connect_state()? else {
         anyhow::bail!("Share {} has no Wispers Connect credentials", share);
@@ -374,7 +415,13 @@ pub async fn revoke(
         node_storage.override_hub_addr(backend);
     }
     let node = node_storage.restore_or_init_node().await?;
+    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref()));
+    revoke_on_hub(&node, &client, node_number).await
+}
 
+/// Revokes the node in the group's roster, then deregisters it on the hub,
+/// which frees its quota slot.
+async fn revoke_on_hub(node: &wc::Node, client: &wcbe::Client, node_number: i32) -> Result<()> {
     // Check group info for the node first, revoke if activated, and deal with
     // other states accordingly.
     let info = node.group_info().await?;
@@ -396,11 +443,12 @@ pub async fn revoke(
 
     // At this point we can be sure the node is revoked, so we proceed to
     // deregistering it.
-    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref()));
+    let Some(group_id) = node.connectivity_group_id() else {
+        anyhow::bail!("host node not registered");
+    };
     client
-        .delete_node(&wcs.connectivity_group_id, node_number)
+        .delete_node(&group_id.to_string(), node_number)
         .await?;
-    println!("Node {node_number} is now revoked and deregistered");
     Ok(())
 }
 
