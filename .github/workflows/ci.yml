@@ -3,10 +3,11 @@
 # (bindings generated from a host build, one ABI cross-compiled, host unit
 # tests over JNA) and the Android app (unit tests, debug build).
 #
-# TODO: Figure out how to cover iOS without making CI take forever.
+# iOS is covered by ios.yml: a macOS build on a six-hour schedule rather than
+# per push, because macOS runners are slow and expensive.
 #
 # Third-party actions are pinned to commit SHAs instead of version tags, so the
-# publisher can't change the tag and make use run something we don't want.
+# publisher can't change the tag and make us run something we don't want.
 
 name: CI
 
