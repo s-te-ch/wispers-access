@@ -38,26 +38,28 @@ enum DemoMode {
             shares.append(
                 Share(
                     id: entry.slug,
-                    name: entry.nickname,
+                    name: entry.name,
                     label: entry.slug,
                     transport: .iroh,
-                    apps: [SharedApp(id: "app", name: entry.nickname, kind: .web)],
+                    apps: entry.apps.map { SharedApp(id: $0.slug, name: $0.name, kind: .web) },
                     state: .live,
                     joinedAt: now.addingTimeInterval(-entry.joined)
                 )
             )
             activity.markConnected(entry.slug, at: now.addingTimeInterval(-entry.lastConnected))
-            if let url = Bundle.main.url(forResource: entry.slug, withExtension: "png"),
-                let png = try? Data(contentsOf: url)
-            {
-                icons.update(png, rank: 1, for: BrowseKey(shareID: entry.slug, appID: "app"))
+            for app in entry.apps {
+                if let url = Bundle.main.url(forResource: app.slug, withExtension: "png"),
+                    let png = try? Data(contentsOf: url)
+                {
+                    icons.update(png, rank: 1, for: BrowseKey(shareID: entry.slug, appID: app.slug))
+                }
             }
         }
         return ShareManager(client: nil, icons: icons, activity: activity, shares: shares)
     }
 
-    /// A screen to open on launch (`--demo-detail <slug>`, e.g. `grafana`), so
-    /// capture scripts can shoot the detail screen without synthesizing taps.
+    /// A screen to open on launch (`--demo-detail <share slug>`, e.g. `home`),
+    /// so capture scripts can shoot the detail screen without synthesizing taps.
     static var initialRoute: ShareRoute? {
         guard active else { return nil }
         let args = ProcessInfo.processInfo.arguments
@@ -84,47 +86,55 @@ enum DemoMode {
         Dictionary(uniqueKeysWithValues: roster.map { ($0.slug, $0.availability) })
     }
 
-    // Known self-hosted tools anchor the "that's my stack" reaction; one bespoke
-    // entry shows shares aren't limited to famous products. Names are nominative
-    // word-mark use; the icons are our own brand-colored glyphs, not the logos.
+    // Shares as a host would name them, each with the apps behind it. Known
+    // self-hosted tools anchor the "that's my stack" reaction; one bespoke app
+    // shows shares aren't limited to famous products. Product names are
+    // nominative word-mark use; the icons are our own brand-colored glyphs,
+    // not the logos. Availability is per share, as in the real app.
     private static let roster = [
-        Entry(
-            nickname: "Stats (Grafana)",
-            slug: "grafana",
+        ShareEntry(
+            name: "Home server",
+            slug: "home",
             availability: .online,
             lastConnected: 2 * 60,
-            joined: 24 * day
+            joined: 24 * day,
+            apps: [
+                AppEntry(name: "Stats (Grafana)", slug: "grafana"),
+                AppEntry(name: "Files (Nextcloud)", slug: "nextcloud"),
+            ]
         ),
-        Entry(
-            nickname: "ERP (Odoo)",
-            slug: "odoo",
+        ShareEntry(
+            name: "Bakery",
+            slug: "bakery",
             availability: .online,
             lastConnected: 60 * 60,
-            joined: 18 * day
+            joined: 18 * day,
+            apps: [AppEntry(name: "ERP (Odoo)", slug: "odoo")]
         ),
-        Entry(
-            nickname: "Files (Nextcloud)",
-            slug: "nextcloud",
-            availability: .online,
-            lastConnected: 30 * 60,
-            joined: 11 * day
-        ),
-        Entry(
-            nickname: "Duty Roster",
-            slug: "duty-roster",
+        ShareEntry(
+            name: "Fire brigade",
+            slug: "fire-brigade",
             availability: .offline,
             lastConnected: 1 * day,
-            joined: 5 * day
+            joined: 5 * day,
+            apps: [AppEntry(name: "Duty Roster", slug: "duty-roster")]
         ),
     ]
 
     private static let day: TimeInterval = 24 * 60 * 60
 
-    private struct Entry {
-        let nickname: String
+    private struct ShareEntry {
+        let name: String
         let slug: String
         let availability: Availability
         let lastConnected: TimeInterval
         let joined: TimeInterval
+        let apps: [AppEntry]
+    }
+
+    /// `slug` is the app id and the name of its bundled icon PNG.
+    private struct AppEntry {
+        let name: String
+        let slug: String
     }
 }

@@ -23,7 +23,7 @@ struct AddShareScreen: View {
                 AccessColor.background.ignoresSafeArea()
                 content.padding(16)
             }
-            .navigationTitle("Add an app")
+            .navigationTitle("Add a share")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if isIdle {
@@ -79,7 +79,7 @@ struct AddShareScreen: View {
                 .textInputAutocapitalization(.never)
                 .autocorrectionDisabled()
                 .font(.body.monospaced())
-                .lineLimit(2...4)
+                .lineLimit(2...6)
                 .padding(12)
                 .background(AccessColor.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
 
