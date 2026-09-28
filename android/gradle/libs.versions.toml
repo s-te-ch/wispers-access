@@ -12,10 +12,8 @@ hilt = "2.59.2"
 ksp = "2.3.7"
 room = "2.8.4"
 sqlcipher = "4.15.0"
-wispersConnect = "0.14.0"
 hiltNavigationCompose = "1.2.0"
 navigationCompose = "2.9.8"
-ktor = "3.2.3"
 zxingEmbedded = "4.3.0"
 swipeRefresh = "1.1.0"
 jna = "5.17.0"
@@ -45,12 +43,9 @@ androidx-room-runtime = { group = "androidx.room", name = "room-runtime", versio
 androidx-room-ktx = { group = "androidx.room", name = "room-ktx", version.ref = "room" }
 androidx-room-compiler = { group = "androidx.room", name = "room-compiler", version.ref = "room" }
 sqlcipher-android = { group = "net.zetetic", name = "sqlcipher-android", version.ref = "sqlcipher" }
-wispers-connect = { group = "dev.wispers", name = "connect", version.ref = "wispersConnect" }
 androidx-hilt-navigation-compose = { group = "androidx.hilt", name = "hilt-navigation-compose", version.ref = "hiltNavigationCompose" }
 androidx-navigation-compose = { group = "androidx.navigation", name = "navigation-compose", version.ref = "navigationCompose" }
 androidx-compose-material-icons-core = { group = "androidx.compose.material", name = "material-icons-core" }
-ktor-server-core = { group = "io.ktor", name = "ktor-server-core", version.ref = "ktor" }
-ktor-server-cio = { group = "io.ktor", name = "ktor-server-cio", version.ref = "ktor" }
 
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }

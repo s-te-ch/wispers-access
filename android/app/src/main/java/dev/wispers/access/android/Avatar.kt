@@ -23,8 +23,8 @@ private const val LETTER_FRACTION = 0.5f
 private fun tileLetter(nickname: String): Char =
     nickname.firstOrNull { it.isLetter() }?.lowercaseChar() ?: 'w'
 
-/** Renders a share's sage letter tile: a lowercase DM Serif initial on light sage. */
-fun shareLetterTile(context: Context, nickname: String): Bitmap {
+/** Renders the sage letter tile for a share or app: a lowercase DM Serif initial on light sage. */
+fun letterTile(context: Context, nickname: String): Bitmap {
     val bitmap = Bitmap.createBitmap(TILE_SIZE, TILE_SIZE, Bitmap.Config.ARGB_8888)
     val canvas = Canvas(bitmap)
     canvas.drawColor(TILE_BACKGROUND)
@@ -44,19 +44,19 @@ fun shareLetterTile(context: Context, nickname: String): Bitmap {
 private fun decodeCached(iconPng: ByteArray?): Bitmap? =
     iconPng?.let { BitmapFactory.decodeByteArray(it, 0, it.size) }
 
-/** The share's display bitmap: the harvested site icon if cached, else the letter tile. */
-fun shareBitmap(context: Context, nickname: String, iconPng: ByteArray?): Bitmap =
-    decodeCached(iconPng) ?: shareLetterTile(context, nickname)
+/** A share's or app's display bitmap: the harvested site icon if cached, else the letter tile. */
+fun avatarBitmap(context: Context, nickname: String, iconPng: ByteArray?): Bitmap =
+    decodeCached(iconPng) ?: letterTile(context, nickname)
 
 /**
- * Home-screen-shortcut icon for a share. A harvested site icon is used as a
+ * Home-screen-shortcut icon for an app. A harvested site icon is used as a
  * legacy (standalone) icon; the generated tile is full-bleed adaptive.
  */
-fun shareIcon(context: Context, nickname: String, iconPng: ByteArray?): IconCompat {
+fun shortcutIcon(context: Context, nickname: String, iconPng: ByteArray?): IconCompat {
     val cached = decodeCached(iconPng)
     return if (cached != null) {
         IconCompat.createWithBitmap(cached)
     } else {
-        IconCompat.createWithAdaptiveBitmap(shareLetterTile(context, nickname))
+        IconCompat.createWithAdaptiveBitmap(letterTile(context, nickname))
     }
 }

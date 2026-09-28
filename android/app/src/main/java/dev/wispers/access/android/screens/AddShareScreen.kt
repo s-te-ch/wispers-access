@@ -42,39 +42,34 @@ import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
-import dev.wispers.access.android.InviteCode
-import dev.wispers.access.android.storage.ShareId
-import dev.wispers.access.android.storage.ShareRepository
-import dev.wispers.access.android.storage.restoreOrInitNode
-import dev.wispers.connect.handles.Node
+import dev.wispers.access.android.ShareManager
+import dev.wispers.access.sdk.SdkException
+import dev.wispers.access.sdk.Share
+import dev.wispers.access.sdk.Transport
+import dev.wispers.access.sdk.validateInvite
 import javax.inject.Inject
-import kotlin.coroutines.cancellation.CancellationException
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 
 @HiltViewModel
 class AddShareViewModel @Inject constructor(
-    private val repo: ShareRepository,
+    private val manager: ShareManager,
 ) : ViewModel() {
 
     enum class Tab { ENTER_CODE, SCAN_QR }
 
     enum class JoinStep(val label: String) {
         VALIDATING("Validating invitation code…"),
-        INITIALIZING("Generating node identity…"),
-        REGISTERING("Registering…"),
-        ACTIVATING("Activating…"),
+        JOINING("Joining through the host…"),
     }
 
     sealed interface Phase {
         data object Idle : Phase
         data class Joining(val completed: Set<JoinStep>, val current: JoinStep) : Phase
-        data class Joined(val shareId: ShareId, val nickname: String) : Phase
+        data class Joined(val share: Share) : Phase
     }
 
     data class State(
@@ -93,78 +88,50 @@ class AddShareViewModel @Inject constructor(
 
     fun onJoinClick() {
         if (_state.value.phase !is Phase.Idle) return
-        val invite = InviteCode.parse(_state.value.code).getOrElse { e ->
-            _state.update { it.copy(error = e.message ?: "Invite codes look like wax_…") }
-            return
-        }
-        viewModelScope.launch { runJoin(invite) }
+        val code = _state.value.code.trim()
+        if (!validate(code)) return
+        viewModelScope.launch { runJoin(code) }
     }
 
     /** Handles a scanned QR payload: joins on a valid invite code, errors otherwise. */
     fun onScanResult(contents: String) {
         if (_state.value.phase !is Phase.Idle) return
-        val invite = InviteCode.parse(contents).getOrElse { e ->
-            _state.update { it.copy(error = e.message ?: "That QR code is not a Wispers invite.") }
-            return
-        }
-        _state.update { it.copy(code = contents.trim(), error = null) }
-        viewModelScope.launch { runJoin(invite) }
+        val code = contents.trim()
+        if (!validate(code)) return
+        _state.update { it.copy(code = code, error = null) }
+        viewModelScope.launch { runJoin(code) }
     }
 
-    private suspend fun runJoin(invite: InviteCode) {
-        var createdId: ShareId? = null
-        var node: Node? = null
+    /** Which transport the code names, shown once it parses. */
+    fun transportOf(code: String): Transport? =
+        runCatching { validateInvite(code.trim()) }.getOrNull()
+
+    /** Pre-validates so a bad code shows its real reason inline, without the progress steps. */
+    private fun validate(code: String): Boolean {
         try {
-            startStep(JoinStep.VALIDATING)
-            completeStep(JoinStep.VALIDATING)
+            validateInvite(code)
+            return true
+        } catch (e: SdkException) {
+            _state.update { it.copy(error = e.message ?: "Invite codes look like wax1_…") }
+            return false
+        }
+    }
 
-            startStep(JoinStep.INITIALIZING)
-            val id = repo.createShare(backend = invite.backend)
-            createdId = id
-            val storage = repo.storageFor(id)
-            node = storage.restoreOrInitNode().first
-            completeStep(JoinStep.INITIALIZING)
-
-            startStep(JoinStep.REGISTERING)
-            node.register(invite.registrationToken)
-            completeStep(JoinStep.REGISTERING)
-
-            startStep(JoinStep.ACTIVATING)
-            node.activate(invite.activationCode)
-            repo.markConnected(id)
-            completeStep(JoinStep.ACTIVATING)
-
-            // Adopt the connectivity group's display name as the share's label, but make it
-            // best-effort. The share is already joined and usable at this point, so a failure
-            // fetching group info must not fail the join.
-            runCatching { node.groupInfo().name }
-                .getOrNull()
-                ?.takeIf { it.isNotBlank() }
-                ?.let { repo.setNickname(id, it) }
-
-            val nickname = repo.getShare(id)?.nickname.orEmpty()
-            _state.update { it.copy(phase = Phase.Joined(shareId = id, nickname = nickname)) }
-        } catch (e: CancellationException) {
-            withContext(NonCancellable) { rollBack(node, createdId) }
-            throw e
+    private suspend fun runJoin(code: String) {
+        startStep(JoinStep.VALIDATING)
+        completeStep(JoinStep.VALIDATING)
+        startStep(JoinStep.JOINING)
+        try {
+            // The SDK registers, activates and fetches the share, and rolls a
+            // failed join back so nothing is left behind.
+            val share = manager.join(code)
+            completeStep(JoinStep.JOINING)
+            _state.update { it.copy(phase = Phase.Joined(share)) }
         } catch (e: Exception) {
-            rollBack(node, createdId)
             _state.update {
                 it.copy(phase = Phase.Idle, error = e.message ?: "Failed to join.")
             }
         }
-    }
-
-    /**
-     * Rolls back a partial join. The logout is best-effort and matters once
-     * `register` has succeeded: it revokes + deregisters the node, so the hub
-     * doesn't keep a never-activated registration whose quota usage no
-     * per-node operation can reclaim. Before registration it fails without
-     * having reached the hub, and the local delete is all that's needed.
-     */
-    private suspend fun rollBack(node: Node?, createdId: ShareId?) {
-        node?.let { runCatching { it.logout() } }
-        createdId?.let { repo.deleteShare(it) }
     }
 
     private fun startStep(step: JoinStep) {
@@ -186,7 +153,7 @@ class AddShareViewModel @Inject constructor(
 @Composable
 fun AddShareScreen(
     onBack: () -> Unit,
-    onOpenShare: (ShareId) -> Unit,
+    onOpenShare: (Share) -> Unit,
     viewModel: AddShareViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
@@ -195,7 +162,7 @@ fun AddShareScreen(
         containerColor = MaterialTheme.colorScheme.background,
         topBar = {
             TopAppBar(
-                title = { Text("Add an app") },
+                title = { Text("Add a share") },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
@@ -220,6 +187,7 @@ fun AddShareScreen(
                 AddShareViewModel.Phase.Idle -> IdleContent(
                     tab = state.tab,
                     code = state.code,
+                    transport = viewModel.transportOf(state.code),
                     error = state.error,
                     onTabChange = viewModel::onTabChange,
                     onCodeChange = viewModel::onCodeChange,
@@ -229,7 +197,7 @@ fun AddShareScreen(
                 is AddShareViewModel.Phase.Joining -> JoinProgress(phase = phase)
                 is AddShareViewModel.Phase.Joined -> JoinSuccess(
                     phase = phase,
-                    onOpen = { onOpenShare(phase.shareId) },
+                    onOpen = { onOpenShare(phase.share) },
                     onBackToList = onBack,
                 )
             }
@@ -241,6 +209,7 @@ fun AddShareScreen(
 private fun IdleContent(
     tab: AddShareViewModel.Tab,
     code: String,
+    transport: Transport?,
     error: String?,
     onTabChange: (AddShareViewModel.Tab) -> Unit,
     onCodeChange: (String) -> Unit,
@@ -262,6 +231,7 @@ private fun IdleContent(
     when (tab) {
         AddShareViewModel.Tab.ENTER_CODE -> EnterCodeContent(
             code = code,
+            transport = transport,
             error = error,
             onCodeChange = onCodeChange,
             onJoin = onJoin,
@@ -276,6 +246,7 @@ private fun IdleContent(
 @Composable
 private fun EnterCodeContent(
     code: String,
+    transport: Transport?,
     error: String?,
     onCodeChange: (String) -> Unit,
     onJoin: () -> Unit,
@@ -286,7 +257,7 @@ private fun EnterCodeContent(
         OutlinedTextField(
             value = code,
             onValueChange = onCodeChange,
-            placeholder = { Text("wax_…") },
+            placeholder = { Text("wax1_…") },
             singleLine = true,
             isError = error != null,
             trailingIcon = {
@@ -298,6 +269,17 @@ private fun EnterCodeContent(
             },
             modifier = Modifier.fillMaxWidth(),
         )
+        if (transport != null) {
+            Text(
+                when (transport) {
+                    Transport.WISPERS_CONNECT -> "Via Wispers Connect"
+                    Transport.IROH -> "Peer to peer (iroh)"
+                    Transport.TAILSCALE -> "Via Tailscale"
+                },
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
         if (error != null) {
             Text(
                 error,
@@ -382,14 +364,14 @@ private fun JoinSuccess(
             StepRow(label = step.label, status = StepStatus.DONE)
         }
         StepRow(
-            label = if (phase.nickname.isBlank()) "Joined" else "Joined \"${phase.nickname}\"",
+            label = if (phase.share.name.isBlank()) "Joined" else "Joined \"${phase.share.name}\"",
             status = StepStatus.DONE,
         )
         Button(
             onClick = onOpen,
             modifier = Modifier.fillMaxWidth(),
         ) {
-            Text("Open app")
+            Text(if (phase.share.apps.size == 1) "Open app" else "Show apps")
         }
         OutlinedButton(
             onClick = onBackToList,

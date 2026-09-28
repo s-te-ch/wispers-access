@@ -30,6 +30,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -41,33 +42,35 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.pm.ShortcutInfoCompat
 import androidx.core.content.pm.ShortcutManagerCompat
-import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
 import dagger.hilt.android.AndroidEntryPoint
-import dev.wispers.access.android.proxy.ProxyServer
+import dev.wispers.access.android.proxy.ProxyHolder
 import dev.wispers.access.android.screens.TerminalShareExplanation
-import dev.wispers.access.android.storage.ShareId
-import dev.wispers.access.android.storage.ShareRepository
-import dev.wispers.access.android.storage.ShareTerminalState
+import dev.wispers.access.android.storage.ShareExtras
 import dev.wispers.access.android.ui.theme.WispersAccessTheme
+import dev.wispers.access.sdk.Share
+import dev.wispers.access.sdk.ShareState
+import dev.wispers.access.sdk.SharedApp
 import javax.inject.Inject
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 /**
- * Hosts a single WebView pointed at the local proxy for one share.
+ * Hosts a single WebView pointed at the SDK's proxy for one app of one share.
  *
- * Launched via [launch] with `Intent.FLAG_ACTIVITY_NEW_DOCUMENT` + a unique data URI
- * per share, which combined with `documentLaunchMode="intoExisting"` in the manifest
- * gives each share its own task entry in Recents and brings the existing one forward
- * on re-launch.
+ * Launched via [launch] with `Intent.FLAG_ACTIVITY_NEW_DOCUMENT` + a unique data
+ * URI per app, which combined with `documentLaunchMode="intoExisting"` in the
+ * manifest gives each app its own task entry in Recents and brings the existing
+ * one forward on re-launch.
  */
 @AndroidEntryPoint
-class ShareActivity : ComponentActivity() {
+class BrowseActivity : ComponentActivity() {
 
-    @Inject lateinit var repo: ShareRepository
-    @Inject lateinit var proxyServer: ProxyServer
+    @Inject lateinit var manager: ShareManager
+    @Inject lateinit var proxy: ProxyHolder
+    @Inject lateinit var extras: ShareExtras
 
     private var webView: WebView? = null
 
@@ -87,7 +90,7 @@ class ShareActivity : ComponentActivity() {
             ),
         )
 
-        val shareId = intent.data?.lastPathSegment?.let(::ShareId) ?: run {
+        val key = intent.data?.path?.trimStart('/')?.let(BrowseKey::parse) ?: run {
             finish()
             return
         }
@@ -96,17 +99,27 @@ class ShareActivity : ComponentActivity() {
             WispersAccessTheme {
                 // A pinned shortcut can outlive the share; a terminal share gets
                 // the explanation instead of a WebView that can only error.
-                val share by repo.observeShare(shareId).collectAsState(initial = null)
-                val terminal = share?.terminalState
-                if (terminal != null) {
-                    TerminalShareNotice(state = terminal)
-                } else {
-                    ShareWebViewScreen(
-                        url = "http://${shareId.value}.localhost:${proxyServer.port}/",
-                        savedState = savedInstanceState,
-                        onWebViewReady = { webView = it },
-                        onIconJson = { json -> handleHarvestedIcon(shareId, json) },
-                    )
+                val shares by manager.shares.collectAsState()
+                val share = shares?.firstOrNull { it.id == key.shareId }
+                when {
+                    shares == null -> ConnectingOverlay(Modifier.fillMaxSize())
+                    share == null -> TerminalShareNotice(state = ShareState.REMOVED)
+                    share.state != ShareState.LIVE -> TerminalShareNotice(state = share.state)
+                    else -> {
+                        var url by remember { mutableStateOf<String?>(null) }
+                        LaunchedEffect(key) { url = proxy.baseUrl(key) + "/" }
+                        val ready = url
+                        if (ready == null) {
+                            ConnectingOverlay(Modifier.fillMaxSize())
+                        } else {
+                            BrowseWebViewScreen(
+                                url = ready,
+                                savedState = savedInstanceState,
+                                onWebViewReady = { webView = it },
+                                onIconJson = { json -> handleHarvestedIcon(share, key, json) },
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -124,8 +137,9 @@ class ShareActivity : ComponentActivity() {
         })
 
         lifecycleScope.launch {
-            val nickname = repo.getShare(shareId)?.nickname?.ifBlank { null }
-            val label = nickname ?: getString(R.string.app_name)
+            val share = manager.share(key.shareId)
+            val app = share?.apps?.firstOrNull { it.id == key.appId }
+            val label = app?.name?.ifBlank { null } ?: share?.name ?: getString(R.string.app_name)
             // TaskDescription.Builder is API 33+, but minSdk is 28 — use the older
             // (deprecated) String constructor, which is valid back to API 21.
             @Suppress("DEPRECATION")
@@ -143,34 +157,33 @@ class ShareActivity : ComponentActivity() {
      * icon only if it out-ranks what's cached, then refreshes any pinned shortcut in
      * place. Best-effort — a failure just leaves the existing icon untouched.
      */
-    private fun handleHarvestedIcon(shareId: ShareId, json: String) {
+    private fun handleHarvestedIcon(share: Share, key: BrowseKey, json: String) {
         lifecycleScope.launch {
             val obj = runCatching { JSONObject(json) }.getOrNull() ?: return@launch
             val rank = obj.optInt("rank", 0)
             val dataUrl = obj.optString("dataUrl", "")
             if (rank <= 0 || dataUrl.isEmpty()) return@launch
-            if (rank <= repo.currentIconRank(shareId)) return@launch
             val bytes = decodeDataUrl(dataUrl) ?: return@launch
-            repo.updateIcon(shareId, bytes, rank)
-            val nickname = repo.getShare(shareId)?.nickname.orEmpty()
-            refreshShortcut(this@ShareActivity, shareId, nickname, bytes)
+            if (!extras.updateIcon(key, bytes, rank)) return@launch
+            val app = share.apps.firstOrNull { it.id == key.appId } ?: return@launch
+            refreshShortcut(this@BrowseActivity, share, app, bytes)
         }
     }
 
     companion object {
-        fun launch(context: Context, shareId: ShareId) {
-            context.startActivity(intentFor(context, shareId))
+        fun launch(context: Context, key: BrowseKey) {
+            context.startActivity(intentFor(context, key))
         }
 
         /**
-         * Intent that opens [shareId]'s WebView. The unique data URI doubles as the
-         * per-share Recents task key (see `documentLaunchMode="intoExisting"`); the
+         * Intent that opens the app's WebView. The unique data URI doubles as the
+         * per-app Recents task key (see `documentLaunchMode="intoExisting"`); the
          * ACTION_VIEW is required because pinned-shortcut intents must carry an action.
          */
-        fun intentFor(context: Context, shareId: ShareId): Intent =
-            Intent(context, ShareActivity::class.java).apply {
+        fun intentFor(context: Context, key: BrowseKey): Intent =
+            Intent(context, BrowseActivity::class.java).apply {
                 action = Intent.ACTION_VIEW
-                data = "wispers-access://share/${shareId.value}".toUri()
+                data = "wispers-access://app/${key.token}".toUri()
                 addFlags(Intent.FLAG_ACTIVITY_NEW_DOCUMENT)
             }
     }
@@ -178,7 +191,7 @@ class ShareActivity : ComponentActivity() {
 
 /** Full-screen terminal-share explanation with a way back into the app. */
 @Composable
-private fun TerminalShareNotice(state: ShareTerminalState) {
+private fun TerminalShareNotice(state: ShareState) {
     val context = androidx.compose.ui.platform.LocalContext.current
     Box(
         modifier = Modifier
@@ -204,41 +217,44 @@ private fun TerminalShareNotice(state: ShareTerminalState) {
     }
 }
 
+private fun shortcutId(key: BrowseKey) = "app-${key.token}"
+
 private fun buildShortcut(
     context: Context,
-    shareId: ShareId,
-    nickname: String,
+    share: Share,
+    app: SharedApp,
     iconPng: ByteArray?,
 ): ShortcutInfoCompat {
-    val label = nickname.ifBlank { "Untitled app" }
-    return ShortcutInfoCompat.Builder(context, "share-${shareId.value}")
+    val key = BrowseKey(share.id, app.id)
+    val label = app.name.ifBlank { app.id }
+    return ShortcutInfoCompat.Builder(context, shortcutId(key))
         .setShortLabel(label)
-        .setLongLabel(label)
-        .setIcon(shareIcon(context, nickname, iconPng))
-        .setIntent(ShareActivity.intentFor(context, shareId))
+        .setLongLabel("$label · ${share.name}")
+        .setIcon(shortcutIcon(context, label, iconPng))
+        .setIntent(BrowseActivity.intentFor(context, key))
         .build()
 }
 
 /**
- * Requests that the launcher pin a home-screen shortcut that opens [shareId].
+ * Requests that the launcher pin a home-screen shortcut that opens the app.
  * Returns false if the current launcher doesn't support pinning shortcuts.
  *
- * Also registers the share as a dynamic shortcut. This is deliberate, for two
- * reasons: it puts the share in the app icon's long-press menu (quick access),
- * and — crucially — that menu's pin (+) affordance uses the launcher's own
- * drag-pin path, which reliably places the icon. The programmatic
- * requestPinShortcut below silently wedges on the Pixel Launcher (Android 16):
- * the pin registers but the icon never lands on the workspace. So the dynamic
- * shortcut is the working fallback; the UI points users to it.
+ * Also registers the app as a dynamic shortcut. This is deliberate, for two
+ * reasons: it puts the app in the launcher icon's long-press menu (quick
+ * access), and — crucially — that menu's pin (+) affordance uses the
+ * launcher's own drag-pin path, which reliably places the icon. The
+ * programmatic requestPinShortcut below silently wedges on the Pixel Launcher
+ * (Android 16): the pin registers but the icon never lands on the workspace.
+ * So the dynamic shortcut is the working fallback; the UI points users to it.
  */
 fun addToHomescreen(
     context: Context,
-    shareId: ShareId,
-    nickname: String,
+    share: Share,
+    app: SharedApp,
     iconPng: ByteArray?,
 ): Boolean {
     if (!ShortcutManagerCompat.isRequestPinShortcutSupported(context)) return false
-    val shortcut = buildShortcut(context, shareId, nickname, iconPng)
+    val shortcut = buildShortcut(context, share, app, iconPng)
     runCatching { ShortcutManagerCompat.pushDynamicShortcut(context, shortcut) }
     return ShortcutManagerCompat.requestPinShortcut(context, shortcut, null)
 }
@@ -247,23 +263,24 @@ fun addToHomescreen(
  * Updates an already-pinned shortcut's icon/label in place. A no-op unless a
  * pinned or dynamic shortcut with this id exists, so it's safe to call always.
  */
-fun refreshShortcut(context: Context, shareId: ShareId, nickname: String, iconPng: ByteArray?) {
+fun refreshShortcut(context: Context, share: Share, app: SharedApp, iconPng: ByteArray?) {
     ShortcutManagerCompat.updateShortcuts(
         context,
-        listOf(buildShortcut(context, shareId, nickname, iconPng)),
+        listOf(buildShortcut(context, share, app, iconPng)),
     )
 }
 
 /**
- * Tears down a removed share's shortcuts: drops the dynamic entry (so it leaves
- * the app's long-press menu) and disables any pinned home-screen shortcut. Apps
- * can't delete pinned shortcuts — disabling greys the icon and shows [message]
- * when tapped. Safe to call when no shortcut exists.
+ * Tears down a removed share's shortcuts, one per app: drops the dynamic
+ * entries (so they leave the launcher's long-press menu) and disables any
+ * pinned home-screen shortcut. Apps can't delete pinned shortcuts — disabling
+ * greys the icon and shows [message] when tapped. Safe to call when none exist.
  */
-fun disableShortcut(context: Context, shareId: ShareId, message: String) {
-    val id = "share-${shareId.value}"
-    ShortcutManagerCompat.removeDynamicShortcuts(context, listOf(id))
-    ShortcutManagerCompat.disableShortcuts(context, listOf(id), message)
+fun disableShortcuts(context: Context, share: Share, message: String) {
+    val ids = share.apps.map { shortcutId(BrowseKey(share.id, it.id)) }
+    if (ids.isEmpty()) return
+    ShortcutManagerCompat.removeDynamicShortcuts(context, ids)
+    ShortcutManagerCompat.disableShortcuts(context, ids, message)
 }
 
 /** Decodes a `data:` URL's base64 payload, or null if malformed. */
@@ -338,7 +355,7 @@ private const val HARVEST_JS = """
 """
 
 @Composable
-private fun ShareWebViewScreen(
+private fun BrowseWebViewScreen(
     url: String,
     savedState: Bundle?,
     onWebViewReady: (WebView) -> Unit,

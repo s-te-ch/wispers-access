@@ -18,12 +18,19 @@ import dev.wispers.access.android.screens.AddShareScreen
 import dev.wispers.access.android.screens.ShareDetailScreen
 import dev.wispers.access.android.screens.ShareListScreen
 import dev.wispers.access.android.ui.theme.WispersAccessTheme
+import dev.wispers.access.sdk.Share
+import dev.wispers.access.sdk.ShareState
+import javax.inject.Inject
 
 @AndroidEntryPoint
 class MainActivity : ComponentActivity() {
+
+    @Inject lateinit var manager: ShareManager
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         DemoMode.maybeActivate(this)
+        if (DemoMode.active) manager.reload()
         // The app theme is always light, so pick dark bar icons explicitly instead
         // of letting edge-to-edge follow the system dark-mode setting.
         enableEdgeToEdge(
@@ -57,23 +64,25 @@ private fun AppNavHost() {
     val navController = rememberNavController()
     NavHost(navController = navController, startDestination = Route.SHARE_LIST) {
         composable(Route.SHARE_LIST) {
+            val context = LocalContext.current
             ShareListScreen(
                 onAddClick = { navController.navigate(Route.ADD_SHARE) },
-                onShareClick = { id -> navController.navigate(Route.shareDetail(id.value)) },
+                onShareClick = { share -> navController.navigate(Route.shareDetail(share.id)) },
+                onAppClick = { key -> BrowseActivity.launch(context, key) },
             )
         }
         composable(Route.ADD_SHARE) {
             val context = LocalContext.current
             AddShareScreen(
                 onBack = { navController.popBackStack() },
-                onOpenShare = { id ->
-                    // Open the share itself; park the nav stack on the detail
-                    // screen so leaving the WebView doesn't land back on the
-                    // completed join flow.
-                    navController.navigate(Route.shareDetail(id.value)) {
+                onOpenShare = { share ->
+                    // Park the nav stack on the detail screen so leaving the
+                    // WebView doesn't land back on the completed join flow.
+                    navController.navigate(Route.shareDetail(share.id)) {
                         popUpTo(Route.SHARE_LIST)
                     }
-                    ShareActivity.launch(context, id)
+                    // A share with one app opens it; several stay on detail.
+                    share.onlyApp()?.let { BrowseActivity.launch(context, it) }
                 },
             )
         }
@@ -84,8 +93,12 @@ private fun AppNavHost() {
             val context = LocalContext.current
             ShareDetailScreen(
                 onBack = { navController.popBackStack() },
-                onOpenShare = { id -> ShareActivity.launch(context, id) },
+                onOpenApp = { key -> BrowseActivity.launch(context, key) },
             )
         }
     }
 }
+
+/** The one app to open straight away, if a live share has exactly one. */
+fun Share.onlyApp(): BrowseKey? =
+    if (state == ShareState.LIVE && apps.size == 1) BrowseKey(id, apps[0].id) else null
