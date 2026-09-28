@@ -1,0 +1,19 @@
+# One share, in the format `waserver init` writes. Mount it at
+# /config/<name>.toml — the file name is the share's id — and the container
+# inits and serves the share from it. Editing the file and restarting the
+# container applies the change.
+#
+# `name` is the share as guests see it. Keep each app's `id` stable, guest
+# nodes refer to it. `upstream` is host:port on the Docker network (a compose
+# service is just its name), or :port for the container itself.
+
+name = "WS Echo Demo"
+
+[transport]
+kind = "wispers-connect"
+# backend = "https://hub.example"   # self-hosted Wispers Connect backend
+
+[[app]]
+id = "echo"
+name = "WS Echo"
+upstream = "app:8080"

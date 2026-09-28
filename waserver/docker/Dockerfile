@@ -19,12 +19,16 @@ WORKDIR /src
 RUN apt-get update \
     && apt-get install -y --no-install-recommends cmake clang libclang-dev protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
-# Only the workspace crates are needed to build waserver. (target/ is excluded
-# by .dockerignore.) No dependency-caching layer yet — see README for the
-# cargo-chef optimisation when iteration speed matters.
+# Every workspace member must be present for cargo to resolve the workspace,
+# though only waserver and what it depends on (wire) get compiled. (target/
+# and the mobile packages' generated output are excluded by .dockerignore.)
+# No dependency-caching layer yet — see README for the cargo-chef
+# optimisation when iteration speed matters.
 COPY Cargo.toml Cargo.lock ./
 COPY waserver ./waserver
 COPY waclient ./waclient
+COPY wire ./wire
+COPY sdk ./sdk
 RUN cargo build --release -p waserver
 
 # --- runtime --------------------------------------------------------------

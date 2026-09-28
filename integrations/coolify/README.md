@@ -1,30 +1,32 @@
 # Wispers Access on Coolify
 
-A thin recipe over the generic [`waserver` container](../../waserver/docker/). Coolify
-is "docker compose + a UI," so this is just the cross-stack pattern — one `waserver`
-container joining Coolify's shared `coolify` network to front private apps — with
-Coolify's specific gestures named.
+A thin recipe over the generic [`waserver` container](../../waserver/docker/).
+Coolify is "docker compose + a UI," so this is just the cross-stack pattern —
+one `waserver` container joining Coolify's shared `coolify` network to front
+private apps — with Coolify's specific gestures named.
 
 ## Steps
 
 1. **Deploy the container.** New Resource → *Docker Compose Empty* → paste
    [`compose.yaml`](./compose.yaml) → Deploy.
 2. **Give each fronted app a stable network name.** Coolify renames application
-   containers on every redeploy (`<uuid>-<timestamp>`), so you can't use the container neame. Instead:
+   containers on every redeploy (`<uuid>-<timestamp>`), so you can't use the container name. Instead:
    - *Application* (git / Dockerfile / Docker Image): set **Custom Network
      Aliases** (Network settings) to a short name, e.g. `odoo`.
    - *Compose resource / one-click service*: the compose
      **service name** already is a stable alias. Nothing for you to do. 
-3. **Set two env vars** (Environment Variables tab):
-   - `WC_API_KEY` — your Wispers Connect API key.
-   - `SHARES` — one or more shares, `;`-separated, each
-     `name | display | <alias>:<port>`, with `<alias>` the stable name from
-     step 2.
-4. **Expose the apps privately.** On each app you want reachable, enable
+3. **Edit the share config** in the compose file's `content:` block: the share's
+   name as guests see it, and one `[[app]]` per app with
+   `upstream = "<alias>:<port>"`, `<alias>` being the stable name from step 2.
+   Coolify writes the block to a file and mounts it at `/config/team.toml`; the
+   file name is the share's id. Another share is another such volume entry.
+4. **Set the env var** `WC_API_KEY` (Environment Variables tab) — your Wispers
+   Connect API key. `WC_BACKEND` is optional, for a self-hosted hub.
+5. **Expose the apps privately.** On each app you want reachable, enable
    **"Connect To Predefined Network"** so it joins the `coolify` network. Give it **no
    domain and no published ports** — it stays off the public Internet, reachable only
    through Wispers.
-5. **Hand out access.** From this resource's **Terminal**:
+6. **Hand out access.** From this resource's **Terminal**:
    ```
    waserver invite <share> <device-name> <user@email>   # prints an invite code / QR
    waserver status <share>                               # share detail incl. guests
@@ -33,8 +35,10 @@ Coolify's specific gestures named.
 
 ## Why this isn't Coolify-specific
 
-The only Coolify token in `compose.yaml` is the **network name** `coolify`. Swap it for
-any shared external network and the same file works on plain multi-stack docker, Nomad,
+The Coolify tokens in `compose.yaml` are the **network name** `coolify` and the
+`content:` key on the file mount, Coolify's way of creating a mounted file from
+the compose file. Swap the network for any shared external network and put the
+TOML in a real file, and the same setup works on plain multi-stack docker, Nomad,
 etc. Adding another platform is a sibling folder under `integrations/`, not a change to
 the container.
 
@@ -44,8 +48,9 @@ the container.
   The ghcr package is currently **Internal**, so Coolify needs registry credentials
   to pull it (Server → Registries, or `docker login ghcr.io` on the host) until the
   package goes public.
-- **Adding an app:** append `; name | display | alias:port` to `SHARES`, tick the
-  app's "Connect To Predefined Network", redeploy. No new container.
+- **Adding an app:** add an `[[app]]` block to the share's `content:`, tick the
+  app's "Connect To Predefined Network", redeploy. No new container. A second
+  share is a second file mount at `/config/<name>.toml`.
 - **Redeploys are safe:** the alias (or service name) survives app redeploys, so
   the share keeps working without touching this resource. Verified against
   Coolify 4.1.2.

@@ -1,12 +1,19 @@
-# Keep the Docker build context small and exclude build artifacts. The waserver
-# container image only needs the Rust workspace crates (Cargo.toml, Cargo.lock,
-# waserver/, waclient/).
+# Keep the Docker build context small and exclude build artifacts.
 target
 **/target
 .git
 android
+ios
 assets
 demo
 integrations
 *.md
 **/compose.yaml
+sdk/swift/*.xcframework
+sdk/swift/build
+sdk/swift/.build
+sdk/swift/Sources/WispersAccessSdk/WispersAccessSdk.swift
+sdk/android/build
+sdk/android/.gradle
+sdk/android/src/main/jniLibs
+sdk/android/src/main/kotlin

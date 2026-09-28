@@ -2,61 +2,48 @@
 #
 # waserver container entrypoint.
 #
-# 1. Read the desired shares from a config file (one `name | display | upstream`
-#    per line).
-# 2. `waserver init` any that don't exist yet. Identity (connectivity group +
-#    keys) is created once and then lives on the /data volume.
-# 3. Generate one supervisord program per share, each running `waserver serve`.
-# 4. exec supervisord as PID 1; it owns signal fan-out, restart, and reaping.
+# 1. Find the desired shares: one `/config/<name>.toml` per share, using the
+#    same format as the `share.toml` files that waserver itself writes (name,
+#    transport, apps).
+# 2. `waserver init` any shares that don't exist yet. Identity (connectivity
+#    group + keys) is created once and then lives on the /data volume.
+# 3. Copy each of the TOML files over its share's `share.toml`, so the mounted
+#    config is the source of truth on every start.
+# 4. Generate one supervisord program per share, each running `waserver serve`.
+# 5. exec supervisord as PID 1; it owns signal fan-out, restart, and reaping.
 set -euo pipefail
 
 : "${WC_API_KEY:?WC_API_KEY must be set (the Wispers Connect API key)}"
 
-SHARES_FILE="${SHARES_FILE:-/config/shares.conf}"
+# One share config per share, named after it.
+CONFIG_DIR="${CONFIG_DIR:-/config}"
 SUPERVISORD_CONF="/etc/supervisor/supervisord.conf"
 CONF_DIR="/etc/supervisor/conf.d"
+# Where waserver keeps each share's `share.toml` (its config dir, under $HOME).
+SHARES_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/waserver/shares"
 
-log()  { printf '[entrypoint] %s\n' "$*"; }
-trim() {
-  local s="$1";
-  s="${s#"${s%%[![:space:]]*}"}";
-  s="${s%"${s##*[![:space:]]}"}";
-  printf '%s' "$s";
-}
+log() { printf '[entrypoint] %s\n' "$*"; }
 
-# Shares can come from the SHARES env var (the Coolify-native path — pasted/edited
-# in the UI) or a mounted file (SHARES_FILE, default /config/shares.conf). SHARES
-# holds one 'name | display | upstream' per line; ';' also separates lines so a
-# single-line value works too. When set, SHARES wins over the file.
-if [[ -n "${SHARES:-}" ]]; then
-  SHARES_FILE="$(mktemp)"
-  printf '%s\n' "${SHARES//;/$'\n'}" > "$SHARES_FILE"
-  log "using shares from \$SHARES env var"
-fi
-
-if [[ ! -f "$SHARES_FILE" ]]; then
-  log "ERROR: no shares configured — set the SHARES env var or mount a file at $SHARES_FILE"
-  log "       format: one 'name | display name | host:port' per line"
-  exit 1
-fi
-
-# --- Parse desired shares -------------------------------------------------
-declare -a NAMES DISPLAYS UPSTREAMS
-while IFS='|' read -r name display upstream || [[ -n "$name" ]]; do
-  name="$(trim "$name")"
-  [[ -z "$name" || "$name" == \#* ]] && continue   # skip blanks and comments
-  display="$(trim "${display:-}")"
-  upstream="$(trim "${upstream:-}")"
-  [[ -z "$display" ]] && display="$name"
-  if [[ -z "$upstream" ]]; then
-    log "ERROR: share '$name' has no upstream (expected: name | display | host:port)"
+# --- Desired shares -------------------------------------------------------
+# The display name `init` registers is the file's top-level `name`; the file
+# itself becomes the share's config below, so a plain `name = "…"` line above
+# the first section is all that is read here.
+toml_name() { sed -n -E '/^\[/q; s/^name[[:space:]]*=[[:space:]]*["'"'"'](.*)["'"'"'][[:space:]]*$/\1/p' "$1" | head -1; }
+NAMES=(); DISPLAYS=()
+for file in "$CONFIG_DIR"/*.toml; do
+  [[ -f "$file" ]] || continue
+  name="$(basename "$file" .toml)"
+  display="$(toml_name "$file")"
+  if [[ -z "$display" ]]; then
+    log "ERROR: $file has no 'name = \"…\"' line"
     exit 1
   fi
-  NAMES+=("$name"); DISPLAYS+=("$display"); UPSTREAMS+=("$upstream")
-done < "$SHARES_FILE"
+  NAMES+=("$name"); DISPLAYS+=("$display")
+done
 
 if [[ ${#NAMES[@]} -eq 0 ]]; then
-  log "ERROR: no shares defined in $SHARES_FILE"
+  log "ERROR: no shares configured — mount one share config per share at $CONFIG_DIR/<name>.toml"
+  log "       (the format 'waserver init' writes: name, [transport], one [[app]] per app)"
   exit 1
 fi
 
@@ -77,26 +64,37 @@ for i in "${!NAMES[@]}"; do
   fi
 done
 
-# --- Shares present on disk but no longer in config -----------------------
+# --- Shares present on disk but no longer configured ----------------------
 # Deliberately NOT auto-deleted: `waserver deinit` destroys the connectivity
-# group and every member on the backend, irreversibly. Removal stays a manual,
-# deliberate action. A config typo must never nuke a share's members.
+# group and every guest node on the backend, irreversibly. Removal stays a
+# manual, deliberate action. A config typo must never nuke a share's guest
+# nodes.
 if [[ -n "$existing" ]]; then
   while read -r name; do
     [[ -z "$name" ]] && continue
-    is_desired "$name" || log "NOTE: '$name' is initialised but not in $SHARES_FILE; leaving it intact (run 'waserver deinit $name' to remove)"
+    is_desired "$name" || log "NOTE: '$name' is initialised but no longer configured; leaving it intact (run 'waserver deinit $name' to remove)"
   done <<<"$existing"
 fi
+
+# --- The mounted config is the share's config -----------------------------
+for name in "${NAMES[@]}"; do
+  toml="$SHARES_DIR/$name/share.toml"
+  if [[ ! -d "$(dirname "$toml")" ]]; then
+    log "ERROR: share '$name' has no directory at $(dirname "$toml") after init"
+    exit 1
+  fi
+  cp "$CONFIG_DIR/$name.toml" "$toml"
+  log "share '$name': config from $CONFIG_DIR/$name.toml"
+done
 
 # --- Generate one supervised 'serve' per share ----------------------------
 mkdir -p "$CONF_DIR"
 rm -f "$CONF_DIR"/share-*.conf
-for i in "${!NAMES[@]}"; do
-  name="${NAMES[$i]}"; upstream="${UPSTREAMS[$i]}"
-  log "serving '$name' -> $upstream"
-  cat > "$CONF_DIR/share-$name.conf" <<EOF
+for name in "${NAMES[@]}"; do
+  log "serving '$name'"
+  cat > "$CONF_DIR/share-$name.conf" <<EOT
 [program:share-$name]
-command=waserver serve $name $upstream
+command=waserver serve $name
 autostart=true
 autorestart=true
 startsecs=3
@@ -107,7 +105,7 @@ stdout_logfile=/dev/stdout
 stdout_logfile_maxbytes=0
 stderr_logfile=/dev/stderr
 stderr_logfile_maxbytes=0
-EOF
+EOT
 done
 
 log "starting supervisord with ${#NAMES[@]} share(s)"

@@ -2,36 +2,41 @@
 #
 # A thin recipe over the generic waserver container (see waserver/docker/). It
 # fronts one or more *private* Coolify apps (no domain, no published ports) and
-# makes them reachable through Wispers Access instead of the public Internet — you
-# hand out invite codes, not a URL. One waserver container per server hosts many
-# shares, so "expose another app" is one more entry in SHARES, not a new container.
+# makes them reachable through Wispers Access instead of the public Internet —
+# you hand out invite codes, not a URL. One waserver container per server hosts
+# many shares, so "expose another app" is an [[app]] block in a share's config,
+# or one more share config, not a new container.
 #
 # Setup in Coolify:
-#   1. New Resource → Docker Compose Empty → paste this file → Deploy.
+#   1. New Resource → Docker Compose Empty → paste this file.
 #   2. Give each fronted app a stable network name (Coolify renames application
-       containers on every redeploy):
-#        - application (git/Dockerfile/image): set "Custom Network Aliases"
-#          in its Network settings, e.g. odoo
+#      containers on every redeploy):
+#        - application (git/Dockerfile/image): set "Custom Network Aliases" in
+#          its Network settings, e.g. odoo
 #        - compose resource / one-click service: its service name already works
-#   3. Set the environment variables (Environment Variables tab):
-#        WC_API_KEY  your Wispers Connect API key
-#        SHARES      one or more shares, ';'-separated, each:
-#                       name | display name | <alias>:<port>
-#                    e.g.  odoo | Odoo | odoo:8069 ; wiki | Wiki | wiki:3000
-#                    (<alias> is the stable name from step 2, resolvable on the
-#                     shared 'coolify' network.)
-#        WC_BACKEND  (optional) base URL of a self-hosted Wispers Connect hub,
-#                    e.g. https://myhub.example.com (https only). Leave blank to
-#                    use the managed backend. Pinned per-share at first deploy and
-#                    carried in invite codes, so guests join the same hub.
-#   4. On each app you want reachable, enable "Connect To Predefined Network".
-#   5. Mint invites from this resource's Terminal:
-#        waserver invite <share> <device-name> <user@email>
-#        waserver status <share>         # share detail
-#        waserver revoke <share> <node>  # cut one off
+#   3. Edit the share config below (the `content:` block): the share's name as
+#      guests see it, and one [[app]] per app with `upstream =
+#      "<alias>:<port>"`, <alias> being the stable name from step 2. Coolify
+#      writes the block to a file and mounts it; the file name is the share's
+#      id. Another share is another such volume entry, mounted at
+#      /config/<name>.toml.
+#   4. Set the environment variables (Environment Variables tab): WC_API_KEY
+#        your Wispers Connect API key WC_BACKEND  (optional) base URL of a
+#        self-hosted Wispers Connect hub, e.g. https://myhub.example.com (https
+#        only). Leave blank to use the managed backend. Pinned per-share at
+#        first deploy and carried in invite codes, so guests join the same hub.
+#   5. Deploy. On each app you want reachable, enable "Connect To Predefined
+#      Network".
+#   6. Mint invites from this resource's Terminal: waserver invite <share>
+#        <device-name> <user@email> waserver status <share>         # share
+#        detail incl. guests waserver revoke <share> <node>  # cut one off
 #
-# The only Coolify-specific token here is the network name 'coolify'; swap it for
-# any shared external network and this is a generic cross-stack setup.
+# Changing a share later: edit its block here and redeploy; the container
+# rewrites the share's config from it on every start.
+#
+# The only Coolify-specific tokens here are the network name 'coolify' and the
+# `content:` key on the file mount (Coolify creates the file). On plain compose,
+# put the same TOML in a file next to this one and mount that.
 #
 services:
   waserver:
@@ -40,12 +45,11 @@ services:
     networks:
       - coolify
     environment:
-      # These come up as empty *required* fields in Coolify's Environment Variables
-      # tab — fill them there (format in the setup notes above). The empty ':?' is
-      # deliberate: Coolify pre-fills the field with whatever text follows ':?', so a
-      # hint string there gets deployed as the literal value (crash-loops the share).
+      # These come up as empty fields in Coolify's Environment Variables tab —
+      # fill them there. The empty ':?' is deliberate: Coolify pre-fills the field
+      # with whatever text follows ':?', so a hint string there gets deployed as
+      # the literal value (crash-loops the share).
       WC_API_KEY: ${WC_API_KEY:?}
-      SHARES: ${SHARES:?}
       # Optional; blank = managed backend.
       WC_BACKEND: ${WC_BACKEND:-}
     volumes:
@@ -53,6 +57,21 @@ services:
       # without it, every redeploy mints a new connectivity group and existing
       # invites stop working.
       - waserver-state:/data
+      # The share: id "team" (from the file name), the apps behind it. The
+      # format is the one `waserver init` writes.
+      - type: bind
+        source: ./config/team.toml
+        target: /config/team.toml
+        content: |
+          name = "Awesome Team"
+
+          [transport]
+          kind = "wispers-connect"
+
+          [[app]]
+          id = "odoo"
+          name = "Odoo"
+          upstream = "odoo:8069"
 
 volumes:
   waserver-state:
