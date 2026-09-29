@@ -5,13 +5,9 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
-# Keep JNA and the wispers-connect bridge: JNA resolves callback classes and
-# native method mappings reflectively, so R8 must not strip or rename them.
-# (Same rules as the Files app. The WebView @JavascriptInterface bridge is
-# already kept by the default Android rules.)
--keep class com.sun.jna.** { *; }
--keep class dev.wispers.connect.** { *; }
--dontwarn com.sun.jna.**
+# The keep rules for the SDK's native bridge (JNA) come with the SDK module
+# itself, from sdk/android/consumer-rules.pro. The WebView @JavascriptInterface
+# bridge is already kept by the default Android rules.
 
 # Readable release stack traces.
 -keepattributes SourceFile,LineNumberTable

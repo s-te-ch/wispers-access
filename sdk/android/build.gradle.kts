@@ -16,6 +16,8 @@ android {
     }
     defaultConfig {
         minSdk = 28
+        // Keep rules for JNA's reflection, applied to any app that shrinks.
+        consumerProguardFiles("consumer-rules.pro")
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_11
