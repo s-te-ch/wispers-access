@@ -8162,6 +8162,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
+ "wispers-access-sdk",
 ]
 
 [[package]]

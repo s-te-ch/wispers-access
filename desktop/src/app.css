@@ -1,0 +1,12 @@
+@import "tailwindcss";
+
+@theme {
+  --color-wbeige: #f7f7f2;
+  --color-wcontainer: #EFEFE6;
+  --color-wbeige-dark: #999166;
+}
+
+body {
+  color: var(--color-wblack);
+  background-color: var(--color-wbeige);
+}
