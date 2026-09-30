@@ -7,6 +7,7 @@ import dev.wispers.access.android.storage.SqlCipherSecretStore
 import dev.wispers.access.sdk.Client
 import dev.wispers.access.sdk.ClientConfig
 import dev.wispers.access.sdk.Observer
+import dev.wispers.access.sdk.ProxyAuthMode
 import dev.wispers.access.sdk.RequiredCookie
 import dev.wispers.access.sdk.Share
 import dev.wispers.access.sdk.ShareState
@@ -60,8 +61,8 @@ class SdkRoundTripTest {
 
             // The proxy: refused without the cookie, served with it.
             val cookie = RequiredCookie("__wispers_proxy_auth", "s3cret")
-            val proxy = client.startHostRoutedProxy(0u, cookie)
-            val host = "${app.id}.${share.label}.localhost"
+            val proxy = client.startHostRoutedProxy(0u, ProxyAuthMode.AppCookie(cookie))
+            val host = "${app.id}.${share.label}.wa.localhost"
             assertEquals(403, request(proxy.port().toInt(), host, null))
             assertEquals(200, request(proxy.port().toInt(), host, "${cookie.name}=${cookie.value}"))
 

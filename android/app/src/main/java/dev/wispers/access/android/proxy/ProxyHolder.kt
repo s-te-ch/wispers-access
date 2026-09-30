@@ -4,6 +4,7 @@ import android.util.Log
 import dev.wispers.access.android.BrowseKey
 import dev.wispers.access.android.SdkHolder
 import dev.wispers.access.sdk.HostRoutedProxy
+import dev.wispers.access.sdk.ProxyAuthMode
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlinx.coroutines.CompletableDeferred
@@ -15,7 +16,7 @@ import kotlinx.coroutines.launch
 /**
  * The SDK's host-routed proxy for the whole app, on the fixed port the
  * pre-SDK app used, started at process start and guarded by [ProxyAuth].
- * Every app is served at `http://<app>.<share>.localhost:<port>/`, so each
+ * Every app is served at `http://<app>.<share>.wa.localhost:<port>/`, so each
  * keeps its own origin in the WebView.
  */
 @Singleton
@@ -31,7 +32,7 @@ class ProxyHolder @Inject constructor(
         val client = sdk.client ?: return
         scope.launch {
             try {
-                proxy.complete(client.startHostRoutedProxy(FIXED_PORT.toUShort(), auth.requiredCookie))
+                proxy.complete(client.startHostRoutedProxy(FIXED_PORT.toUShort(), ProxyAuthMode.AppCookie(auth.requiredCookie)))
                 Log.i(TAG, "Proxy listening on port $FIXED_PORT")
             } catch (e: Exception) {
                 Log.e(TAG, "could not start the proxy", e)

@@ -1,7 +1,7 @@
 //! The Wispers Connect transport implementation.
 
 use crate::guest_node;
-use crate::secrets::{SecretStore, SecretStoreError};
+use crate::secrets::{SecretScope, SecretStore, SecretStoreError};
 use crate::storage::{self, ShareId};
 use crate::transports::{
     BoxFuture, ConnectionCheck, Stream, TerminalState, Transport, TransportError,
@@ -316,10 +316,14 @@ impl NodeSecrets {
     }
 
     fn delete_all(&self) -> Result<(), SecretStoreError> {
-        self.secrets
-            .delete(self.share.clone(), ROOT_KEY.to_owned())?;
-        self.secrets
-            .delete(self.share.clone(), REGISTRATION.to_owned())
+        self.secrets.delete(self.scope(), ROOT_KEY.to_owned())?;
+        self.secrets.delete(self.scope(), REGISTRATION.to_owned())
+    }
+
+    fn scope(&self) -> SecretScope {
+        SecretScope::Share {
+            id: self.share.clone(),
+        }
     }
 }
 
@@ -327,7 +331,7 @@ impl wc::NodeStateStore for NodeSecrets {
     fn load(&self) -> Result<Option<wc::PersistedNodeState>, wc::StorageError> {
         let Some(root_key) = self
             .secrets
-            .load(self.share.clone(), ROOT_KEY.to_owned())
+            .load(self.scope(), ROOT_KEY.to_owned())
             .map_err(to_wc_error)?
         else {
             // No root key: nothing has been saved yet.
@@ -338,7 +342,7 @@ impl wc::NodeStateStore for NodeSecrets {
             .map_err(|_| wc::StorageError::InvalidRootKey)?;
         let registration = self
             .secrets
-            .load(self.share.clone(), REGISTRATION.to_owned())
+            .load(self.scope(), REGISTRATION.to_owned())
             .map_err(to_wc_error)?
             .and_then(|b| wc::deserialize_registration(&b).ok());
         Ok(Some(wc::PersistedNodeState::from_stored(key, registration)))
@@ -347,7 +351,7 @@ impl wc::NodeStateStore for NodeSecrets {
     fn save(&self, state: &wc::PersistedNodeState) -> Result<(), wc::StorageError> {
         self.secrets
             .save(
-                self.share.clone(),
+                self.scope(),
                 ROOT_KEY.to_owned(),
                 state.root_key_bytes().to_vec(),
             )
@@ -356,14 +360,14 @@ impl wc::NodeStateStore for NodeSecrets {
             Some(registration) => self
                 .secrets
                 .save(
-                    self.share.clone(),
+                    self.scope(),
                     REGISTRATION.to_owned(),
                     wc::serialize_registration(registration),
                 )
                 .map_err(to_wc_error),
             None => self
                 .secrets
-                .delete(self.share.clone(), REGISTRATION.to_owned())
+                .delete(self.scope(), REGISTRATION.to_owned())
                 .map_err(to_wc_error),
         }
     }

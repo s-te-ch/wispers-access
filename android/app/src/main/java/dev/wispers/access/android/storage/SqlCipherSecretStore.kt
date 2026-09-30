@@ -1,8 +1,8 @@
 package dev.wispers.access.android.storage
 
+import dev.wispers.access.sdk.SecretScope
 import dev.wispers.access.sdk.SecretStore
 import dev.wispers.access.sdk.SecretStoreException
-import dev.wispers.access.sdk.ShareId
 
 /**
  * The SDK's secret store on the SQLCipher database: a share's key material
@@ -12,16 +12,30 @@ import dev.wispers.access.sdk.ShareId
  */
 internal class SqlCipherSecretStore(private val dao: SecretDao) : SecretStore {
 
-    override fun load(share: ShareId, key: String): ByteArray? = guard {
-        dao.get(share, key)
+    override fun load(scope: SecretScope, key: String): ByteArray? = guard {
+        dao.get(scope.shareColumnValue(), key)
     }
 
-    override fun save(share: ShareId, key: String, value: ByteArray) = guard {
-        dao.put(SecretEntity(share, key, value))
+    override fun save(scope: SecretScope, key: String, value: ByteArray) = guard {
+        dao.put(SecretEntity(scope.shareColumnValue(), key, value))
     }
 
-    override fun delete(share: ShareId, key: String) = guard {
-        dao.delete(share, key)
+    override fun delete(scope: SecretScope, key: String) = guard {
+        dao.delete(scope.shareColumnValue(), key)
+    }
+
+    /**
+     * What the `share` column holds for a scope - the share's id, or a
+     * reserved word for the client's own secrets, which no share id (a UUID)
+     * can be.
+     */
+    private fun SecretScope.shareColumnValue(): String = when (this) {
+        is SecretScope.Share -> id
+        SecretScope.Client -> CLIENT_SHARE_COLUMN_VALUE
+    }
+
+    private companion object {
+        const val CLIENT_SHARE_COLUMN_VALUE = "client"
     }
 
     private inline fun <T> guard(block: () -> T): T = try {

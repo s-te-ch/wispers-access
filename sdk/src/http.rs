@@ -1,8 +1,11 @@
 //! The loopback HTTP proxy.
 //!
-//! The user's browser talks to `http://<app>.<share>.localhost:<port>`, and
-//! every request becomes one DATA stream to the share's host node.
+//! The user's browser talks to `http://<app>.<share>.wa.localhost:<port>`, and
+//! every request becomes one DATA stream to the share's host node. The bare
+//! `http://wa.localhost:<port>` is used for browser pairing (see
+//! [`crate::pairing`]).
 
+use crate::pairing::CookieIssuer;
 use crate::transports::{TerminalState, TransportError};
 use crate::{Client, Lookup, ShareId};
 use anyhow::{Context, Result};
@@ -13,8 +16,10 @@ use hyper::body::Incoming;
 use hyper::client::conn::http1 as http1_client;
 use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
 
@@ -60,10 +65,53 @@ fn no_ipv6_loopback(e: &std::io::Error) -> bool {
     )
 }
 
-/// A cookie every request must carry, or the proxy answers 403 before it
-/// touches a stream. The loopback port is reachable by every process on the
-/// device; the app mints the value and installs the cookie in the client it
-/// drives, so only that client gets through.
+/// The host-routed proxy's domain. Every browser resolves `*.localhost` to
+/// loopback, and the pairing cookie needs a dotted parent to be scoped to.
+/// Apps get served at `<app>.<share>.wa.localhost`.
+pub const PROXY_DOMAIN: &str = "wa.localhost";
+
+/// Authenticates requests to a proxy port. Demands `cookie` on every request,
+/// rejects with 403 otherwise. When in "pairing" mode, also issues the cookie.
+#[derive(Clone)]
+pub struct Authenticator {
+    cookie: RequiredCookie,
+    issuer: Option<Arc<CookieIssuer>>,
+}
+
+impl Authenticator {
+    /// Create an authenticator for app-cookie mode.
+    pub fn for_cookie(cookie: RequiredCookie) -> Self {
+        Self {
+            cookie,
+            issuer: None,
+        }
+    }
+
+    /// Create an authenticator for pairing mode.
+    pub fn for_pairing(issuer: CookieIssuer) -> Self {
+        Self {
+            cookie: issuer.required_cookie().clone(),
+            issuer: Some(Arc::new(issuer)),
+        }
+    }
+
+    /// True if the request passes authentication.
+    fn admits(&self, req: &hyper::Request<Incoming>) -> bool {
+        self.cookie.is_presented_in(req.headers())
+    }
+
+    /// Removes the cookie from the request, so the proxied app can't read it.
+    fn scrub(&self, req: &mut hyper::Request<Incoming>) {
+        self.cookie.strip_from(req.headers_mut());
+    }
+
+    /// What issues the cookie to browsers, in pairing mode.
+    pub fn issuer(&self) -> Option<&CookieIssuer> {
+        self.issuer.as_deref()
+    }
+}
+
+/// A cookie the proxy demands on every request.
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct RequiredCookie {
     pub name: String,
@@ -82,9 +130,47 @@ impl RequiredCookie {
             .filter_map(|pair| pair.trim().split_once('='))
             .any(|(name, value)| name == self.name && constant_time_eq(value, &self.value))
     }
+
+    /// Removes the cookie from the request's `Cookie` headers, so the app
+    /// behind the proxy can't read it.
+    fn strip_from(&self, headers: &mut hyper::HeaderMap) {
+        use hyper::header::{COOKIE, HeaderValue};
+
+        // A `name=value` pair of a `Cookie` header, ours by name.
+        let is_ours = |pair: &str| {
+            pair.split_once('=')
+                .is_some_and(|(name, _)| name == self.name)
+        };
+        // One `Cookie` header without our pair, or nothing if that was all
+        // it carried.
+        let without_ours = |header: &HeaderValue| -> Option<HeaderValue> {
+            let rest = header
+                .to_str()
+                .ok()?
+                .split(';')
+                .map(str::trim)
+                .filter(|pair| !is_ours(pair))
+                .collect::<Vec<_>>()
+                .join("; ");
+            if rest.is_empty() {
+                return None;
+            }
+            HeaderValue::from_str(&rest).ok()
+        };
+
+        let kept: Vec<HeaderValue> = headers
+            .get_all(COOKIE)
+            .iter()
+            .filter_map(without_ours)
+            .collect();
+        headers.remove(COOKIE);
+        for value in kept {
+            headers.append(COOKIE, value);
+        }
+    }
 }
 
-fn constant_time_eq(a: &str, b: &str) -> bool {
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;
@@ -92,33 +178,32 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
-/// How a listener knows which app a request is for.
+/// Where a listener's requests get their route from.
 #[derive(Clone)]
-pub enum Route {
-    /// From the `Host` header: `<app>.<share>.localhost`.
-    FromHost,
-    /// The listener serves this one app.
+pub enum RouteSource {
+    /// The `Host` header: `<app>.<share>.wa.localhost`, or the proxy's own
+    /// `wa.localhost`.
+    HostHeader,
+    /// Every request goes to this one app.
     Fixed { share: ShareId, app: String },
 }
 
-/// Serves every connection against the client's shares, until cancelled:
-/// requests are routed to an app as `route` says, and refused without
-/// `required_cookie`, if one is set.
+/// Serves every connection against the client's shares, until cancelled.
 pub async fn accept_loop(
     listener: TcpListener,
     client: Client,
-    route: Route,
-    required_cookie: Option<RequiredCookie>,
+    route_source: RouteSource,
+    authenticator: Option<Authenticator>,
 ) {
     loop {
         match listener.accept().await {
             Ok((tcp_stream, _)) => {
                 let client = client.clone();
-                let route = route.clone();
-                let required_cookie = required_cookie.clone();
+                let route_source = route_source.clone();
+                let authenticator = authenticator.clone();
                 tokio::spawn(async move {
                     if let Err(e) =
-                        handle_connection(tcp_stream, client, route, required_cookie).await
+                        handle_connection(tcp_stream, client, route_source, authenticator).await
                     {
                         warn!(error = format!("{e:#}"), "connection error");
                     }
@@ -134,12 +219,17 @@ pub async fn accept_loop(
 async fn handle_connection(
     tcp_stream: TcpStream,
     client: Client,
-    route: Route,
-    required_cookie: Option<RequiredCookie>,
+    route_source: RouteSource,
+    authenticator: Option<Authenticator>,
 ) -> Result<()> {
     let tcp_stream = TokioIo::new(tcp_stream);
     let service = hyper::service::service_fn(move |req| {
-        forward(req, client.clone(), route.clone(), required_cookie.clone())
+        forward(
+            req,
+            client.clone(),
+            route_source.clone(),
+            authenticator.clone(),
+        )
     });
     let served = http1_server::Builder::new()
         .serve_connection(tcp_stream, service)
@@ -162,32 +252,38 @@ type BoxedBody = BoxBody<Bytes, std::io::Error>;
 async fn forward(
     mut req: hyper::Request<Incoming>,
     client: Client,
-    route: Route,
-    required_cookie: Option<RequiredCookie>,
+    route_source: RouteSource,
+    authenticator: Option<Authenticator>,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
-    // Only the app's own client gets past here.
-    if let Some(cookie) = &required_cookie
-        && !cookie.is_presented_in(req.headers())
-    {
-        return Ok(error_response(StatusCode::FORBIDDEN, "forbidden"));
-    }
-
     // Determine the share and app...
-    let (share, app) = match route {
-        Route::Fixed { share, app } => (share.to_string(), app),
-        Route::FromHost => {
+    let (share, app) = match route_source {
+        RouteSource::Fixed { share, app } => (share.to_string(), app),
+        RouteSource::HostHeader => {
             let Ok(host) = extract_host(&req) else {
                 return Ok(error_response(
                     StatusCode::BAD_REQUEST,
                     "missing host header",
                 ));
             };
-            match extract_target(&host) {
-                Ok((share, app)) => (share, app),
+            match parse_host(&host) {
+                Ok(Route::App { share, app }) => (share, app),
+                Ok(Route::Proxy) => {
+                    return Ok(answer_own_host(&req, &host, authenticator.as_ref()));
+                }
                 Err(e) => return Ok(error_response(StatusCode::NOT_FOUND, &e.to_string())),
             }
         }
     };
+
+    // Only the user's own browser gets past here, and the app itself never
+    // sees the cookie.
+    if let Some(authenticator) = &authenticator {
+        if !authenticator.admits(&req) {
+            return Ok(error_response(StatusCode::FORBIDDEN, "forbidden"));
+        }
+        authenticator.scrub(&mut req);
+    }
+
     let share = match client.guest_node(&share).await {
         Ok(Lookup::Live(share)) => share,
         Ok(Lookup::Dead(state)) => return Ok(gone(state)),
@@ -335,6 +431,90 @@ async fn forward(
     Ok(hyper::Response::from_parts(parts, body))
 }
 
+/// A request to the proxy's own host, `wa.localhost`. Pairing, when the
+/// proxy pairs browsers, and nothing else.
+fn answer_own_host(
+    req: &hyper::Request<Incoming>,
+    host: &str,
+    authenticator: Option<&Authenticator>,
+) -> hyper::Response<BoxedBody> {
+    match (req.uri().path(), authenticator.and_then(|a| a.issuer())) {
+        ("/pair", Some(issuer)) => answer_pair(req, host, issuer),
+        _ => error_response(
+            StatusCode::NOT_FOUND,
+            &format!("apps are served at http://<app>.<share>.{PROXY_DOMAIN}:<port>"),
+        ),
+    }
+}
+
+/// The pairing URL for a given token and app. Answered by [`answer_pair`].
+pub fn pair_url(port: u16, token: &str, share: &str, app: &str) -> String {
+    format!("http://{PROXY_DOMAIN}:{port}/pair?token={token}&share={share}&app={app}")
+}
+
+/// Answers `GET /pair?token=…&share=…&app=…[&path=…]`, `host` being the
+/// request's `Host` header, port included. A paired browser is redirected to
+/// the app unconditionally, an unpaired one with a live token gets
+/// the cookie and a redirect. Any gets told it is not paired.
+fn answer_pair(
+    req: &hyper::Request<Incoming>,
+    host: &str,
+    issuer: &CookieIssuer,
+) -> hyper::Response<BoxedBody> {
+    let params = parse_query(req.uri().query().unwrap_or(""));
+    let (Some(share), Some(app)) = (params.get("share"), params.get("app")) else {
+        return error_response(StatusCode::BAD_REQUEST, "missing share or app");
+    };
+    if !is_dns_label(share) || !is_dns_label(app) {
+        return error_response(StatusCode::BAD_REQUEST, "invalid share or app");
+    }
+    let path = params.get("path").copied().unwrap_or("/");
+    if !path.starts_with('/') {
+        return error_response(StatusCode::BAD_REQUEST, "path must be absolute");
+    }
+    // Prepend app and share (and optionally append the path) to get the
+    // redirect location.
+    let location = format!("http://{app}.{share}.{host}{path}");
+    if issuer.required_cookie().is_presented_in(req.headers()) {
+        return redirect(&location, None);
+    }
+    if params.get("token").is_some_and(|t| issuer.consume_token(t)) {
+        return redirect(&location, Some(issuer.set_cookie_header()));
+    }
+    error_response(
+        StatusCode::FORBIDDEN,
+        "This browser is not paired with Wispers Access. Open the app from Wispers Access again to pair it.",
+    )
+}
+
+/// Parse the query's `name=value` pairs, without decoding them. Our values are
+/// tokens and DNS labels, and `path` is passed on encoded as it came.
+fn parse_query(query: &str) -> HashMap<&str, &str> {
+    query
+        .split('&')
+        .filter_map(|pair| pair.split_once('='))
+        .collect()
+}
+
+/// True if s is DNS safe, i.e. can be used as a hostname label.
+fn is_dns_label(s: &str) -> bool {
+    !s.is_empty() && s.len() <= 63 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
+fn redirect(location: &str, set_cookie: Option<String>) -> hyper::Response<BoxedBody> {
+    let mut builder = hyper::Response::builder()
+        .status(StatusCode::FOUND)
+        .header(hyper::header::LOCATION, location);
+    if let Some(cookie) = set_cookie {
+        builder = builder.header(hyper::header::SET_COOKIE, cookie);
+    }
+    match builder.body(empty_body()) {
+        Ok(response) => response,
+        // Only a path with characters no header may carry gets here.
+        Err(_) => error_response(StatusCode::BAD_REQUEST, "invalid path"),
+    }
+}
+
 /// Relay raw bytes both ways between the browser side and the QUIC-stream side
 /// after a successful protocol upgrade. Each direction ends at its own EOF — a
 /// half-close on one side is forwarded as a FIN while the opposite direction
@@ -377,8 +557,16 @@ fn extract_host(req: &hyper::Request<Incoming>) -> Result<String> {
 /// the proxy can be told from one the app sent.
 const ERROR_HEADER: &str = "x-wispers-access-error";
 
-/// `<app>.<share>.localhost[:port]` → (share, app).
-fn extract_target(host: &str) -> Result<(String, String)> {
+/// Where a request goes, as its `Host` header says.
+enum Route {
+    /// `<app>.<share>.wa.localhost`, an app of a share.
+    App { share: String, app: String },
+    /// `wa.localhost` itself, the proxy's own pages.
+    Proxy,
+}
+
+/// `<app>.<share>.wa.localhost[:port]` or `wa.localhost[:port]`.
+fn parse_host(host: &str) -> Result<Route> {
     let host = host.rsplit_once(':').map_or(host, |(h, port)| {
         if port.chars().all(|c| c.is_ascii_digit()) {
             h
@@ -386,13 +574,20 @@ fn extract_target(host: &str) -> Result<(String, String)> {
             host
         }
     });
-    match host.split('.').collect::<Vec<_>>().as_slice() {
-        [app, share, "localhost"] if !app.is_empty() && !share.is_empty() => {
-            Ok(((*share).to_owned(), (*app).to_owned()))
-        }
+    if host == PROXY_DOMAIN {
+        return Ok(Route::Proxy);
+    }
+    let labels = host
+        .strip_suffix(PROXY_DOMAIN)
+        .and_then(|prefix| prefix.strip_suffix('.'))
+        .map(|prefix| prefix.split('.').collect::<Vec<_>>());
+    match labels.as_deref() {
+        Some([app, share]) if !app.is_empty() && !share.is_empty() => Ok(Route::App {
+            share: (*share).to_owned(),
+            app: (*app).to_owned(),
+        }),
         _ => anyhow::bail!(
-            "unknown host {}: apps are served at http://<app>.<share>.localhost:<port>",
-            host
+            "unknown host {host}: apps are served at http://<app>.<share>.{PROXY_DOMAIN}:<port>"
         ),
     }
 }
@@ -530,20 +725,62 @@ mod tests {
     }
 
     #[test]
-    fn targets_are_app_dot_share() {
+    fn the_required_cookie_is_stripped_and_the_others_kept() {
+        let cookie = RequiredCookie {
+            name: "__wispers_proxy_auth".into(),
+            value: "s3cret".into(),
+        };
+        let mut headers = hyper::HeaderMap::new();
+        headers.append(
+            hyper::header::COOKIE,
+            "a=1; __wispers_proxy_auth=s3cret; b=2".parse().unwrap(),
+        );
+        headers.append(
+            hyper::header::COOKIE,
+            "__wispers_proxy_auth=other".parse().unwrap(),
+        );
+        cookie.strip_from(&mut headers);
+        let left: Vec<_> = headers.get_all(hyper::header::COOKIE).iter().collect();
+        assert_eq!(left, ["a=1; b=2"]);
+    }
+
+    #[test]
+    fn only_labels_and_absolute_paths_make_a_pair_target() {
+        assert!(is_dns_label("round-trip"));
+        assert!(!is_dns_label(""));
+        assert!(!is_dns_label("a.b"));
+        assert!(!is_dns_label("evil.com/"));
+        let params = parse_query("token=t&share=s&app=a&path=/x?y=1");
+        assert_eq!(params["path"], "/x?y=1");
+        assert_eq!(params.len(), 4);
+    }
+
+    fn target(host: &str) -> Result<(String, String)> {
+        match parse_host(host)? {
+            Route::App { share, app } => Ok((share, app)),
+            Route::Proxy => anyhow::bail!("the proxy's own host"),
+        }
+    }
+
+    #[test]
+    fn targets_are_app_dot_share_under_the_proxy_domain() {
         assert_eq!(
-            extract_target("echo.round-trip.localhost:8000").unwrap(),
+            target("echo.round-trip.wa.localhost:8000").unwrap(),
             ("round-trip".to_owned(), "echo".to_owned())
         );
         assert_eq!(
-            extract_target("echo.round-trip.localhost").unwrap(),
+            target("echo.round-trip.wa.localhost").unwrap(),
             ("round-trip".to_owned(), "echo".to_owned())
         );
-        // One label is not enough, and neither is a foreign host.
-        assert!(extract_target("round-trip.localhost:8000").is_err());
-        assert!(extract_target("localhost:8000").is_err());
-        assert!(extract_target("echo.round-trip.example.com").is_err());
-        assert!(extract_target(".round-trip.localhost").is_err());
-        assert!(extract_target("a.b.c.localhost").is_err());
+        assert!(matches!(parse_host("wa.localhost:8000"), Ok(Route::Proxy)));
+        assert!(matches!(parse_host("wa.localhost"), Ok(Route::Proxy)));
+        // One label is not enough, and neither is a foreign host or the old shape.
+        assert!(target("round-trip.wa.localhost:8000").is_err());
+        assert!(target("localhost:8000").is_err());
+        assert!(target("echo.round-trip.localhost").is_err());
+        assert!(target("echo.round-trip.example.com").is_err());
+        assert!(target(".round-trip.wa.localhost").is_err());
+        assert!(target("a.b.c.wa.localhost").is_err());
+        assert!(target("evilwa.localhost").is_err());
     }
 }

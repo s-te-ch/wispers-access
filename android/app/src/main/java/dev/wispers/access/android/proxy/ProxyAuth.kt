@@ -8,7 +8,7 @@ import java.security.SecureRandom
  * Authenticates loopback-proxy requests as coming from this app's own web
  * views. The loopback port is reachable by every process on the device, so
  * the SDK's proxy demands a secret only our web views hold: a cookie set for
- * each app's `<app>.<share>.localhost` origin before its first load. The
+ * each app's `<app>.<share>.wa.localhost` origin before its first load. The
  * secret is fresh per launch.
  */
 class ProxyAuth {

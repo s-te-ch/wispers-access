@@ -15,6 +15,7 @@ mod guest_node;
 mod http;
 mod iroh_transport;
 mod logging;
+mod pairing;
 mod secrets;
 mod storage;
 mod transports;
@@ -22,7 +23,7 @@ mod wispers_connect_transport;
 
 pub use http::RequiredCookie;
 pub use logging::{LogLevel, LogSink, install_log_sink};
-pub use secrets::{FileSecretStore, SecretStore, SecretStoreError};
+pub use secrets::{FileSecretStore, SecretScope, SecretStore, SecretStoreError};
 pub use storage::ShareId;
 pub use wispers_access_wire::{AppKind, SharedApp, Transport};
 
@@ -31,6 +32,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::OnceCell;
 use transports::TerminalState;
 use wispers_access_wire as wire;
@@ -119,7 +121,7 @@ pub struct Share {
     pub id: ShareId,
     /// The share's name, as the host node reports it.
     pub name: String,
-    /// The `<share>` in `http://<app>.<share>.localhost`. Unique per device,
+    /// The `<share>` in `http://<app>.<share>.wa.localhost`. Unique per device,
     /// derived from the name at join.
     pub label: String,
     pub transport: Transport,
@@ -325,16 +327,20 @@ impl Client {
         }
     }
 
-    /// Starts a loopback proxy on one port, routing by the `Host` header:
-    /// `http://<app>.<share>.localhost:<port>`. For desktop and Android. It
-    /// serves every share the client knows, including ones joined later,
-    /// until the proxy is dropped. With a `required_cookie`, requests
-    /// without it get a 403.
+    /// Starts a loopback proxy on one port, serving all shares this client has
+    /// joined. Requests get routed by their `Host` header, using the scheme
+    /// `http://<app>.<share>.wa.localhost:<port>`.
     pub async fn start_host_routed_proxy(
         &self,
         port: u16,
-        required_cookie: Option<RequiredCookie>,
+        auth_mode: ProxyAuthMode,
     ) -> Result<Arc<HostRoutedProxy>> {
+        let authenticator = match auth_mode {
+            ProxyAuthMode::AppCookie { cookie } => http::Authenticator::for_cookie(cookie),
+            ProxyAuthMode::Pairing { token_lifetime } => http::Authenticator::for_pairing(
+                pairing::CookieIssuer::restore_or_mint(&*self.inner.secrets, token_lifetime)?,
+            ),
+        };
         let client = self.clone();
         self.on_runtime(async move {
             let (port, listeners) = http::bind_loopback_port(port)
@@ -346,13 +352,14 @@ impl Client {
                     client.inner.runtime.spawn(http::accept_loop(
                         listener,
                         client.clone(),
-                        http::Route::FromHost,
-                        required_cookie.clone(),
+                        http::RouteSource::HostHeader,
+                        Some(authenticator.clone()),
                     ))
                 })
                 .collect();
             Ok(Arc::new(HostRoutedProxy {
                 client,
+                authenticator,
                 bound_port: BoundPort { port, accept_loops },
             }))
         })
@@ -542,11 +549,27 @@ fn host_slug(name: &str) -> Option<String> {
     (!s.is_empty()).then(|| s.to_string())
 }
 
+/// How a browser authenticates to a proxy port. The port is reachable by every
+/// process on the device, so the proxy demands a cookie on every request. The
+/// mode says who mints it and how it reaches the browser.
+#[derive(Clone, Debug, uniffi::Enum)]
+pub enum ProxyAuthMode {
+    /// The app mints a cookie and injects it directly into the webview that
+    /// talks to the proxy. The proxy only checks that the cookie is present.
+    AppCookie { cookie: RequiredCookie },
+    /// The proxy pairs with the user's browser to write the cookie. The app
+    /// generates a registration token and a URL like
+    /// http://wa.localhost:<port>/pair?token=T&share=S&app=A. When the user
+    /// follows the URL, the proxy checks the token, then redirects to the app.
+    Pairing { token_lifetime: Duration },
+}
+
 /// A running loopback proxy on one port; the app and share are in the
 /// `Host` header. Dropping it stops accepting connections.
 #[derive(uniffi::Object)]
 pub struct HostRoutedProxy {
     client: Client,
+    authenticator: http::Authenticator,
     bound_port: BoundPort,
 }
 
@@ -556,16 +579,42 @@ impl HostRoutedProxy {
         self.bound_port.port
     }
 
-    /// What to open for an app of a share:
-    /// `http://<app>.<share>.localhost:<port>`.
+    /// Where to send the browser for a given shared app. Uses the pairing
+    /// endpoint with [`ProxyAuthMode::Pairing`], the app's base URL with
+    /// [`ProxyAuthMode::AppCookie`].
+    pub fn browse_url(&self, share: ShareId, app_id: String) -> Result<String> {
+        let label = self.share_label(&share)?;
+        Ok(match self.authenticator.issuer() {
+            Some(issuer) => http::pair_url(self.port(), &issuer.mint_token(), &label, &app_id),
+            None => self.app_origin(&label, &app_id),
+        })
+    }
+
+    /// The URL where a given shared app is served, without any pairing logic.
+    /// With [`ProxyAuthMode::AppCookie`], this is the domain for the injected
+    /// cookie.
     pub fn base_url(&self, share: ShareId, app_id: String) -> Result<String> {
-        let label = self
+        let label = self.share_label(&share)?;
+        Ok(self.app_origin(&label, &app_id))
+    }
+}
+
+impl HostRoutedProxy {
+    fn app_origin(&self, label: &str, app_id: &str) -> String {
+        format!(
+            "http://{app_id}.{label}.{}:{}",
+            http::PROXY_DOMAIN,
+            self.port()
+        )
+    }
+
+    fn share_label(&self, share: &ShareId) -> Result<String> {
+        Ok(self
             .client
-            .row(&share)?
+            .row(share)?
             .read_names()
             .map_err(SdkError::storage)?
-            .2;
-        Ok(format!("http://{app_id}.{label}.localhost:{}", self.port()))
+            .2)
     }
 }
 
@@ -630,15 +679,19 @@ impl PerAppProxy {
                         Ok((port, listeners))
                     })
                     .await?;
-                let route = http::Route::Fixed { share, app: app_id };
+                let route_source = http::RouteSource::Fixed { share, app: app_id };
+                let authenticator = self
+                    .required_cookie
+                    .clone()
+                    .map(http::Authenticator::for_cookie);
                 let accept_loops = listeners
                     .into_iter()
                     .map(|listener| {
                         self.client.inner.runtime.spawn(http::accept_loop(
                             listener,
                             self.client.clone(),
-                            route.clone(),
-                            self.required_cookie.clone(),
+                            route_source.clone(),
+                            authenticator.clone(),
                         ))
                     })
                     .collect();
@@ -720,7 +773,15 @@ mod tests {
     async fn a_client_can_be_dropped_inside_another_runtime() {
         let data_dir = scratch_dir();
         let client = client_in(&data_dir);
-        let proxy = client.start_host_routed_proxy(0, None).await.unwrap();
+        let proxy = client
+            .start_host_routed_proxy(
+                0,
+                ProxyAuthMode::Pairing {
+                    token_lifetime: Duration::from_secs(60),
+                },
+            )
+            .await
+            .unwrap();
         let port = proxy.port();
         assert_ne!(port, 0);
         // Both loopback families answer; IPv6 only where the machine has it.
@@ -769,7 +830,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_required_cookie_gates_every_request() {
+    async fn a_required_cookie_is_demanded_on_every_request() {
         let data_dir = scratch_dir();
         let client = client_in(&data_dir);
         let cookie = RequiredCookie {
@@ -777,36 +838,147 @@ mod tests {
             value: "s3cret".into(),
         };
         let proxy = client
-            .start_host_routed_proxy(0, Some(cookie.clone()))
+            .start_host_routed_proxy(
+                0,
+                ProxyAuthMode::AppCookie {
+                    cookie: cookie.clone(),
+                },
+            )
             .await
             .unwrap();
-        let url = format!("http://127.0.0.1:{}/", proxy.port());
-        let status = |req: hyper::Request<String>| async {
-            let stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port()))
-                .await
-                .unwrap();
-            let (mut sender, conn) =
-                hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
-                    .await
-                    .unwrap();
-            tokio::spawn(conn);
-            sender.send_request(req).await.unwrap().status()
-        };
-        let without = hyper::Request::get(&url)
-            .header("host", "echo.nope.localhost")
+        let without = hyper::Request::get("/")
+            .header("host", "echo.nope.wa.localhost")
             .body(String::new())
             .unwrap();
-        assert_eq!(status(without).await, hyper::StatusCode::FORBIDDEN);
-        let with = hyper::Request::get(&url)
-            .header("host", "echo.nope.localhost")
+        assert_eq!(
+            send(proxy.port(), without).await.status(),
+            hyper::StatusCode::FORBIDDEN
+        );
+        let with = hyper::Request::get("/")
+            .header("host", "echo.nope.wa.localhost")
             .header("cookie", format!("{}={}", cookie.name, cookie.value))
             .body(String::new())
             .unwrap();
-        // Past the gate: the share is what's unknown now.
-        assert_eq!(status(with).await, hyper::StatusCode::NOT_FOUND);
+        // Past the check: the share is what's unknown now.
+        assert_eq!(
+            send(proxy.port(), with).await.status(),
+            hyper::StatusCode::NOT_FOUND
+        );
+        // There is no pairing to be had under an app's own cookie: the
+        // browser goes straight to the app.
+        let row = client.inner.db.new_row().unwrap();
+        row.write_deduped_hostname("rt").unwrap();
+        row.mark_complete().unwrap();
+        let share = row.share_id().unwrap();
+        assert_eq!(
+            proxy.browse_url(share.clone(), "echo".into()).unwrap(),
+            proxy.base_url(share, "echo".into()).unwrap()
+        );
+        let pair = hyper::Request::get("/pair?token=x&share=nope&app=echo")
+            .header("host", "wa.localhost")
+            .body(String::new())
+            .unwrap();
+        assert_eq!(
+            send(proxy.port(), pair).await.status(),
+            hyper::StatusCode::NOT_FOUND
+        );
         drop(proxy);
         drop(client);
         std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_browse_url_pairs_the_browser_once() {
+        let data_dir = scratch_dir();
+        let client = client_in(&data_dir);
+        let row = client.inner.db.new_row().unwrap();
+        row.write_deduped_hostname("rt").unwrap();
+        row.mark_complete().unwrap();
+        let share = row.share_id().unwrap();
+        let auth_mode = ProxyAuthMode::Pairing {
+            token_lifetime: Duration::from_secs(60),
+        };
+        let proxy = client
+            .start_host_routed_proxy(0, auth_mode.clone())
+            .await
+            .unwrap();
+        let port = proxy.port();
+        let host = format!("wa.localhost:{port}");
+        let browse_url = proxy.browse_url(share.clone(), "echo".into()).unwrap();
+        let path_and_query = browse_url.strip_prefix(&format!("http://{host}")).unwrap();
+        let pair = |cookie: Option<&str>| {
+            let mut req = hyper::Request::get(path_and_query).header("host", &host);
+            if let Some(cookie) = cookie {
+                req = req.header("cookie", cookie);
+            }
+            req.body(String::new()).unwrap()
+        };
+
+        // First visit: the cookie arrives with the redirect to the app.
+        let paired = send(port, pair(None)).await;
+        assert_eq!(paired.status(), hyper::StatusCode::FOUND);
+        assert_eq!(
+            paired.headers()["location"],
+            format!("http://echo.rt.wa.localhost:{port}/")
+        );
+        let set_cookie = paired.headers()["set-cookie"].to_str().unwrap().to_owned();
+        assert!(
+            set_cookie.contains("; Domain=wa.localhost; "),
+            "{set_cookie}"
+        );
+        assert!(
+            set_cookie.contains("; HttpOnly; SameSite=Lax"),
+            "{set_cookie}"
+        );
+        let cookie = set_cookie.split(';').next().unwrap().to_owned();
+
+        // The token is spent, the cookie is what counts from now on.
+        assert_eq!(
+            send(port, pair(None)).await.status(),
+            hyper::StatusCode::FORBIDDEN
+        );
+        let again = send(port, pair(Some(&cookie))).await;
+        assert_eq!(again.status(), hyper::StatusCode::FOUND);
+        assert!(!again.headers().contains_key("set-cookie"));
+
+        // A paired browser gets past the check on the app hosts; the app
+        // itself never sees the cookie, so an unknown share is all it finds.
+        let app = hyper::Request::get("/")
+            .header("host", format!("echo.nope.wa.localhost:{port}"))
+            .header("cookie", &cookie)
+            .body(String::new())
+            .unwrap();
+        assert_eq!(send(port, app).await.status(), hyper::StatusCode::NOT_FOUND);
+
+        // The pairing outlives the proxy: the next one honours the same cookie.
+        drop(proxy);
+        let proxy = client.start_host_routed_proxy(0, auth_mode).await.unwrap();
+        let port = proxy.port();
+        let app = hyper::Request::get("/")
+            .header("host", format!("echo.nope.wa.localhost:{port}"))
+            .header("cookie", &cookie)
+            .body(String::new())
+            .unwrap();
+        assert_eq!(send(port, app).await.status(), hyper::StatusCode::NOT_FOUND);
+        drop(proxy);
+        drop(client);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    /// One HTTP/1.1 request to a proxy port.
+    async fn send(
+        port: u16,
+        req: hyper::Request<String>,
+    ) -> hyper::Response<hyper::body::Incoming> {
+        let stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+            .await
+            .unwrap();
+        let (mut sender, conn) =
+            hyper::client::conn::http1::handshake(hyper_util::rt::TokioIo::new(stream))
+                .await
+                .unwrap();
+        tokio::spawn(conn);
+        sender.send_request(req).await.unwrap()
     }
 
     #[test]
