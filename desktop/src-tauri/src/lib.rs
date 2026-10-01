@@ -12,7 +12,7 @@ use wispers_access_sdk as sdk;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     init_logging();
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
@@ -20,6 +20,7 @@ pub fn run() {
             app.manage(desktop);
             Ok(())
         })
+        .on_window_event(hide_instead_of_closing)
         .invoke_handler(tauri::generate_handler![
             shares::shares,
             shares::check_share,
@@ -28,8 +29,38 @@ pub fn run() {
             shares::join,
             shares::leave,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application");
+    app.run(show_on_reopen);
+}
+
+/// On macOS the app outlives its window. The proxy keeps serving the browser
+/// while the window is away, and the dock icon brings it back. Quit is in the
+/// app menu. Elsewhere there is no dock to come back from yet, so the window
+/// closes.
+fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
+    if cfg!(target_os = "macos")
+        && let tauri::WindowEvent::CloseRequested { api, .. } = event
+    {
+        api.prevent_close();
+        if let Err(e) = window.hide() {
+            tracing::warn!(error = %e, "could not hide the window");
+        }
+    }
+}
+
+/// The dock icon was clicked while the window was hidden. The event only
+/// exists on macOS.
+fn show_on_reopen(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    #[cfg(target_os = "macos")]
+    if let tauri::RunEvent::Reopen { .. } = event
+        && let Some(window) = app.get_webview_window("main")
+    {
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = (app, event);
 }
 
 /// The main state struct.
