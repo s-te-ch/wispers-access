@@ -1,8 +1,14 @@
 <script lang="ts">
   import type { ShareManager } from "$lib/shares.svelte";
+  import type { UpdateChecker } from "$lib/updates.svelte";
   import ShareRow from "./ShareRow.svelte";
+  import UpdateNotice from "./UpdateNotice.svelte";
 
-  let { manager, onadd }: { manager: ShareManager; onadd: () => void } = $props();
+  let {
+    manager,
+    updates,
+    onadd,
+  }: { manager: ShareManager; updates: UpdateChecker; onadd: () => void } = $props();
 </script>
 
 <!-- The window has no title bar on macOS, so the whole sidebar drags it,
@@ -38,6 +44,8 @@
       />
     {/each}
   </div>
+
+  <UpdateNotice {updates} />
 
   <button
     type="button"

@@ -1,0 +1,10 @@
+{
+  "version": "0.1.0",
+  "pub_date": "2026-10-01T15:19:12Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v0.1.0/Wispers.Access.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVRelBRZ25KSjltYllDY0ZMcGZqL2V3U0llbWNxSFZRNHQ4emx4RDg0c3hwZXQ4cjFNUWhsR08wQlJkR2l4VGxCVW56WXBnK0pMNU1ZelBnaDdUQ295UDFDYzNZOHFGTVFBPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwODYyODcyCWZpbGU6V2lzcGVycyBBY2Nlc3MuYXBwLnRhci5negl2ZXJzaW9uOjAuMS4wCjF4UWtWSWFTaUFtV2t1eVcxN0RVay85d2VyRHhDclNXTlBKdm9DUEU5TU5WZ1QrcU9xWnBPOEgwU2F3aDI1bHllUWVPR2JpNTlMMDhpcWo3R2ZpU0NBPT0K"
+    }
+  }
+}
