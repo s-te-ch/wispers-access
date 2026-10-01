@@ -32,7 +32,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # boring-sys needs libclang (bindgen); tonic/prost need protoc. cmake and
-      # the C/C++ toolchain are preinstalled on the runner image.
+      # the C/C++ toolchain are preinstalled on the runner image. The desktop
+      # app's Tauri crate links WebKitGTK 4.1 (and with it GTK 3, libsoup 3
+      # and JavaScriptCore) through pkg-config.
       #
       # The runners' Azure-hosted apt mirrors stall out semi-regularly; the
       # Acquire options turn a silent hang into retries, and the step timeout
@@ -42,7 +44,8 @@ jobs:
         run: |
           APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
           $APT update
-          $APT install -y --no-install-recommends protobuf-compiler libclang-dev
+          $APT install -y --no-install-recommends protobuf-compiler libclang-dev \
+            libwebkit2gtk-4.1-dev
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (stable)
         with:
