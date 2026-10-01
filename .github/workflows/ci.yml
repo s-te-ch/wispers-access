@@ -38,9 +38,11 @@ jobs:
       #
       # The runners' Azure-hosted apt mirrors stall out semi-regularly; the
       # Acquire options turn a silent hang into retries, and the step timeout
-      # turns a dead mirror into a fast fail instead of a wedged job.
+      # turns a dead mirror into a fast fail instead of a wedged job. The
+      # WebKitGTK packages are a few hundred MB, so a merely slow mirror needs
+      # more than the minutes two small packages did.
       - name: Install native build deps
-        timeout-minutes: 5
+        timeout-minutes: 10
         run: |
           APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
           $APT update
