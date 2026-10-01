@@ -21,9 +21,9 @@ import Testing
 @Test func foreignCallbacksPlugIn() throws {
     final class MemorySecrets: SecretStore, @unchecked Sendable {
         var items: [String: Data] = [:]
-        func load(share: ShareId, key: String) throws -> Data? { items["\(share)/\(key)"] }
-        func save(share: ShareId, key: String, value: Data) throws { items["\(share)/\(key)"] = value }
-        func delete(share: ShareId, key: String) throws { items["\(share)/\(key)"] = nil }
+        func load(scope: SecretScope, key: String) throws -> Data? { items["\(scope)/\(key)"] }
+        func save(scope: SecretScope, key: String, value: Data) throws { items["\(scope)/\(key)"] = value }
+        func delete(scope: SecretScope, key: String) throws { items["\(scope)/\(key)"] = nil }
     }
     final class Changes: Observer, @unchecked Sendable {
         var seen: [Share] = []

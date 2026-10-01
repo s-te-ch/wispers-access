@@ -1,7 +1,7 @@
 //! The iroh transport implementation.
 
 use crate::guest_node;
-use crate::secrets::SecretStore;
+use crate::secrets::{SecretScope, SecretStore};
 use crate::storage;
 use crate::transports::{
     BoxFuture, ConnectionCheck, Stream, TerminalState, Transport, TransportError,
@@ -40,7 +40,9 @@ pub async fn join(
     transport.endpoint.close().await;
     row.write_iroh_endpoint_id(&host.to_string())?;
     secrets.save(
-        row.share_id()?,
+        SecretScope::Share {
+            id: row.share_id()?,
+        },
         SECRET_KEY.to_owned(),
         key.to_bytes().to_vec(),
     )?;
@@ -78,7 +80,8 @@ pub async fn leave(row: &storage::Row, secrets: &Arc<dyn SecretStore>) {
     }
     match row.share_id() {
         Ok(share) => {
-            if let Err(e) = secrets.delete(share, SECRET_KEY.to_owned()) {
+            if let Err(e) = secrets.delete(SecretScope::Share { id: share }, SECRET_KEY.to_owned())
+            {
                 warn!(error = %e, "could not delete the share's iroh key");
             }
         }
@@ -124,7 +127,12 @@ impl Iroh {
                 .parse()
                 .context("stored host endpoint ID is invalid")?;
             let secret: [u8; 32] = secrets
-                .load(row.share_id()?, SECRET_KEY.to_owned())?
+                .load(
+                    SecretScope::Share {
+                        id: row.share_id()?,
+                    },
+                    SECRET_KEY.to_owned(),
+                )?
                 .context("share has no iroh key")?
                 .try_into()
                 .map_err(|_| anyhow::anyhow!("stored iroh key has the wrong length"))?;

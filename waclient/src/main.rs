@@ -18,7 +18,7 @@ enum Command {
         invite_code: String,
     },
     /// Serve every joined share's apps on localhost, as
-    /// `http://<app>.<share>.localhost:<port>`.
+    /// `http://<app>.<share>.wa.localhost:<port>`.
     Serve { port: u16 },
     /// Show all joined shares, their apps and their state.
     List,
@@ -158,11 +158,21 @@ async fn remove(client: &sdk::Client, share: &str) -> Result<()> {
 }
 
 async fn serve(client: &sdk::Client, port: u16) -> Result<()> {
-    let proxy = client.start_host_routed_proxy(port, None).await?;
-    println!("Listening on localhost:{}", proxy.port());
+    // The URLs are printed once and opened whenever the user gets to them,
+    // so their pairing tokens last as long as this process does.
+    let auth_mode = sdk::ProxyAuthMode::Pairing {
+        token_lifetime: std::time::Duration::MAX,
+    };
+    let proxy = client.start_host_routed_proxy(port, auth_mode).await?;
+    println!("Listening on wa.localhost:{}", proxy.port());
 
     // Every share as last seen. Report but don't serve dead ones.
-    println!("Available apps (as last seen; refreshed in the background):");
+    println!("Available apps (as last seen. Refreshed in the background).");
+    println!("Each URL pairs your browser on first use. After that, the plain");
+    println!(
+        "http://<app>.<share>.wa.localhost:{} URLs work too:",
+        proxy.port()
+    );
     let shares = client.shares()?;
     for share in &shares {
         if share.state != sdk::ShareState::Live {
@@ -212,7 +222,7 @@ fn print_app_urls(proxy: &sdk::HostRoutedProxy, share: &sdk::Share) {
     }
     for app in &share.apps {
         let url = proxy
-            .base_url(share.id.clone(), app.id.clone())
+            .browse_url(share.id.clone(), app.id.clone())
             .unwrap_or_else(|e| format!("({e})"));
         println!("    {:<16} {}", app.name, url);
     }

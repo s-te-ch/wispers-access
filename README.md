@@ -142,8 +142,9 @@ waclient join wax_…            # the invite code from step 4
 waclient serve 8000
 ```
 
-It prints each app's URL, e.g. `http://myapp.team.localhost:8000` — open it
-in your normal browser.
+It prints a URL per app — open it in your normal browser. The first one pairs
+the browser with `waclient`. From then on, the apps answer directly at
+`http://<app>.<share>.wa.localhost:8000`.
 
 ---
 

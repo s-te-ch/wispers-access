@@ -18,7 +18,7 @@ use wispers_access_wire as wire;
 /// its row in the store, and the guest API calls it makes. Restored on the
 /// share's first use, by `Client::guest_node`.
 pub struct GuestNode {
-    /// The `<share>` label in `<app>.<share>.localhost`.
+    /// The `<share>` label in `<app>.<share>.wa.localhost`.
     label: String,
     row: storage::Row,
     transport: Box<dyn Transport>,

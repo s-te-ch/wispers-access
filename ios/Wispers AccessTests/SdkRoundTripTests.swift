@@ -62,7 +62,7 @@ struct SdkRoundTripTests {
         try await client.leave(share: share.id)
         #expect(try client.shares().isEmpty)
         // The Keychain holds nothing of the share anymore.
-        #expect(try KeychainSecretStore().load(share: share.id, key: "iroh_secret") == nil)
+        #expect(try KeychainSecretStore().load(scope: .share(id: share.id), key: "iroh_secret") == nil)
     }
 
     nonisolated final class Changes: Observer, @unchecked Sendable {
