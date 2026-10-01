@@ -15,7 +15,11 @@ pub struct PlatformSecretStore {
 impl PlatformSecretStore {
     /// The store for this platform, or `None` where there is none yet.
     pub fn open(service: &str) -> Option<Self> {
-        keyring_core::set_default_store(credential_store()?);
+        let Some(store) = credential_store() else {
+            tracing::warn!("no credential store on this platform, keeping secrets in files");
+            return None;
+        };
+        keyring_core::set_default_store(store);
         Some(Self {
             service: service.to_owned(),
         })

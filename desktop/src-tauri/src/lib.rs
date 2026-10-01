@@ -53,9 +53,6 @@ impl Desktop {
     async fn start(app: tauri::AppHandle) -> anyhow::Result<Self> {
         let data_dir = app.path().app_data_dir()?;
         let secrets = secrets::PlatformSecretStore::open(&app.config().identifier);
-        if secrets.is_none() {
-            tracing::warn!("no credential store on this platform, keeping secrets in files");
-        }
         let client = sdk::Client::new(sdk::ClientConfig {
             data_dir: data_dir.join("sdk").to_string_lossy().into_owned(),
             secrets: secrets.map(|store| Arc::new(store) as Arc<dyn sdk::SecretStore>),

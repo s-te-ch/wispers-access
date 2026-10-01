@@ -22,3 +22,9 @@ The native side keeps one SDK client and one loopback proxy on
 lifetime. Secrets go to the platform credential store, the macOS Keychain
 today (`src-tauri/src/secrets.rs`); state under the app's data directory,
 `~/Library/Application Support/dev.wispers.access.desktop` on macOS.
+
+On macOS, `tauri dev` builds through `src-tauri/cargo-with-codesign.sh`, which
+signs the binary with your Apple Development certificate before running it. The
+Keychain recognises the app by its signature, so without this every rebuild
+would prompt for every secret. Set `WISPERS_ACCESS_DEV_SIGNING_IDENTITY` to pick
+another identity.
