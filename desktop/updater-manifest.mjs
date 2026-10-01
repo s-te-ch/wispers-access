@@ -69,6 +69,8 @@ if (manifest.version !== version) {
   console.warn(`latest.json is for ${manifest.version}, starting it over for ${version}. If another platform has released ${version} already, pull main and run this again.`);
   manifest = { version, platforms: {} };
 }
+// The first platform's machine creates the release, the next ones add to it.
+const releaseExists = Object.keys(manifest.platforms).some((key) => key !== host.key);
 manifest.pub_date = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 manifest.platforms[host.key] = {
   url: `https://github.com/s-te-ch/wispers-access/releases/download/${release}/${asset}`,
@@ -78,10 +80,13 @@ writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
 const extra = platform === "darwin" ? readdirSync(join(bundleDir, "dmg")).filter((f) => f.endsWith(".dmg")).map((f) => join(bundleDir, "dmg", f)) : [];
 const files = [...extra, host.bundle, `${host.bundle}.sig`].map((f) => `"${f}"`).join(" ");
+const publish = releaseExists
+  ? `gh release upload ${release} ${files}`
+  : `gh release create ${release} --title "Wispers Access desktop ${version}" --generate-notes ${files}`;
 console.log(`
 Wrote desktop/latest.json for ${version} (${Object.keys(manifest.platforms).join(", ")}). To publish:
 
-  gh release create ${release} --title "Wispers Access desktop ${version}" --generate-notes ${files}
+  ${publish}
 
-(or \`gh release upload ${release} …\` if the release exists), then commit desktop/latest.json to main.
+then commit desktop/latest.json to main.
 `);
