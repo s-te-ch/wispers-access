@@ -3,19 +3,20 @@ import Security
 import WispersAccessSdk
 
 /// The SDK's secret store on the Keychain: one generic-password item per
-/// share and key, the account namespaced by the share id so every joined
-/// share keeps its own key material under one service.
+/// scope and key, the account namespaced by the share id, or `client` for
+/// the client's own secrets, so every joined share keeps its own key
+/// material under one service.
 ///
 /// The SDK calls these from its own threads, so the type is `nonisolated`
 /// and holds only immutable state.
 nonisolated final class KeychainSecretStore: SecretStore, @unchecked Sendable {
     private let service = "dev.wispers.access.ios"
 
-    func load(share: ShareId, key: String) throws -> Data? {
+    func load(scope: SecretScope, key: String) throws -> Data? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account(share, key),
+            kSecAttrAccount as String: account(scope, key),
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne,
         ]
@@ -28,12 +29,12 @@ nonisolated final class KeychainSecretStore: SecretStore, @unchecked Sendable {
         }
     }
 
-    func save(share: ShareId, key: String, value: Data) throws {
+    func save(scope: SecretScope, key: String, value: Data) throws {
         // Upsert: try to update an existing item, fall back to adding one.
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account(share, key),
+            kSecAttrAccount as String: account(scope, key),
         ]
         let attrs: [String: Any] = [
             kSecValueData as String: value,
@@ -52,11 +53,11 @@ nonisolated final class KeychainSecretStore: SecretStore, @unchecked Sendable {
         }
     }
 
-    func delete(share: ShareId, key: String) throws {
+    func delete(scope: SecretScope, key: String) throws {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
-            kSecAttrAccount as String: account(share, key),
+            kSecAttrAccount as String: account(scope, key),
         ]
         let status = SecItemDelete(query as CFDictionary)
         if status != errSecSuccess && status != errSecItemNotFound {
@@ -64,7 +65,13 @@ nonisolated final class KeychainSecretStore: SecretStore, @unchecked Sendable {
         }
     }
 
-    private func account(_ share: ShareId, _ key: String) -> String { "\(share)/\(key)" }
+    /// Share IDs are UUIDs, so the client's namespace never collides with one.
+    private func account(_ scope: SecretScope, _ key: String) -> String {
+        switch scope {
+        case .share(let id): "\(id)/\(key)"
+        case .client: "client/\(key)"
+        }
+    }
 
     private static func describe(_ status: OSStatus) -> String {
         let message = SecCopyErrorMessageString(status, nil) as String? ?? "Keychain error"
