@@ -33,9 +33,9 @@ class SmokeTest {
     fun foreignCallbacksPlugIn() {
         class MemorySecrets : SecretStore {
             val items = HashMap<String, ByteArray>()
-            override fun load(share: ShareId, key: String) = items["$share/$key"]
-            override fun save(share: ShareId, key: String, value: ByteArray) { items["$share/$key"] = value }
-            override fun delete(share: ShareId, key: String) { items.remove("$share/$key") }
+            override fun load(scope: SecretScope, key: String) = items["$scope/$key"]
+            override fun save(scope: SecretScope, key: String, value: ByteArray) { items["$scope/$key"] = value }
+            override fun delete(scope: SecretScope, key: String) { items.remove("$scope/$key") }
         }
         class Changes : Observer {
             val seen = ArrayList<Share>()
