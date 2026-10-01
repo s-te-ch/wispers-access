@@ -41,7 +41,8 @@
     "longDescription": "Wispers Access lets you use web apps that someone shares with you, in your own browser, without exposing them to the internet. This app joins shares with an invitation code and opens their apps.",
     "copyright": "Copyright © 2026 Scheidegger Technology GmbH",
     "macOS": {
-      "minimumSystemVersion": "13.3"
+      "minimumSystemVersion": "13.3",
+      "signingIdentity": "Developer ID Application"
     }
   }
 }
