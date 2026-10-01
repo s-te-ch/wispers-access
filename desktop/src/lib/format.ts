@@ -35,10 +35,11 @@ export function describeAvailability(availability: Availability | "checking"): s
   }
 }
 
+/** The transport by its product name. */
 export function describeTransport(transport: Share["transport"]): string {
   switch (transport) {
     case "iroh":
-      return "Peer to peer (iroh)";
+      return "iroh";
     case "wispers-connect":
       return "Wispers Connect";
     case "tailscale":
