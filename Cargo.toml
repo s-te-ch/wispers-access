@@ -6,4 +6,5 @@ members = [
     "sdk",
     "sdk/uniffi-bindgen",
     "wire",
+    "desktop/src-tauri",
 ]
