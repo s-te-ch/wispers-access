@@ -5,6 +5,7 @@
   import FirstRun from "$lib/components/FirstRun.svelte";
   import ShareDetail from "$lib/components/ShareDetail.svelte";
   import Sidebar from "$lib/components/Sidebar.svelte";
+  import { dragRegion } from "$lib/platform";
   import { onMount } from "svelte";
 
   const manager = new ShareManager();
@@ -29,8 +30,10 @@
 <div class="flex h-dvh w-full">
   <Sidebar {manager} {updates} onadd={() => (adding = true)} />
   <main class="relative min-w-0 flex-1 overflow-y-auto px-10">
-    <!-- The title bar's worth of the detail pane drags the window too. -->
-    <div class="absolute inset-x-0 top-0 h-7" data-tauri-drag-region="deep"></div>
+    {#if dragRegion}
+      <!-- The title bar's worth of the detail pane drags the window too. -->
+      <div class="absolute inset-x-0 top-0 h-7" data-tauri-drag-region={dragRegion}></div>
+    {/if}
     {#if manager.selected}
       {#key manager.selected.id}
         <ShareDetail share={manager.selected} {manager} />

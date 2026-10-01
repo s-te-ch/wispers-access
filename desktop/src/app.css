@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* Room for the macOS title bar the content sits under, see $lib/platform.ts. */
+@custom-variant under-title-bar (&:where([data-under-title-bar], [data-under-title-bar] *));
+
 /* The mobile apps' fonts, bundled: Nunito Sans (variable) for text, DM
    Serif Text for headings. */
 @font-face {

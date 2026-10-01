@@ -43,16 +43,36 @@ if (!host || !existsSync(`${host.bundle}.sig`)) {
   process.exit(1);
 }
 
+// The bundler only warns when the private key isn't the public key's half,
+// and installed apps would reject the update.
+const signature = readFileSync(`${host.bundle}.sig`, "utf8").trim();
+const config = JSON.parse(readFileSync(join(here, "src-tauri", "tauri.conf.json"), "utf8"));
+if (keyId(signature) !== keyId(config.plugins.updater.pubkey)) {
+  console.error(`${host.bundle}.sig is not by the key in tauri.conf.json; build with the updater key`);
+  process.exit(1);
+}
+
+/** The key ID in a base64'd minisign key or signature file. */
+function keyId(file) {
+  const line = Buffer.from(file, "base64").toString("utf8").split("\n")[1];
+  return Buffer.from(line, "base64").subarray(2, 10).toString("hex");
+}
+
 const release = `desktop-v${version}`;
 // GitHub turns the spaces in asset names into dots.
 const asset = basename(host.bundle).replaceAll(" ", ".");
 
 let manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, "utf8")) : {};
-if (manifest.version !== version) manifest = { version, platforms: {} };
+if (manifest.version !== version) {
+  // Each platform's machine adds its own entry, so the other's must already
+  // be in this checkout when it was first.
+  console.warn(`latest.json is for ${manifest.version}, starting it over for ${version}. If another platform has released ${version} already, pull main and run this again.`);
+  manifest = { version, platforms: {} };
+}
 manifest.pub_date = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
 manifest.platforms[host.key] = {
   url: `https://github.com/s-te-ch/wispers-access/releases/download/${release}/${asset}`,
-  signature: readFileSync(`${host.bundle}.sig`, "utf8").trim(),
+  signature,
 };
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 

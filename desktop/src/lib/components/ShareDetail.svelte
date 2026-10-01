@@ -33,7 +33,7 @@
   }
 </script>
 
-<div class="mx-auto max-w-[680px] pt-[72px] pb-16">
+<div class="mx-auto max-w-[680px] pt-[60px] pb-16 under-title-bar:pt-[72px]">
   <div class="flex items-center gap-2 text-[11px] font-semibold tracking-[0.16em] text-on-surface-variant uppercase">
     <StatusDot {availability} size={8} />
     {describeAvailability(availability)}
