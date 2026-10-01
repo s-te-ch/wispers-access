@@ -366,19 +366,24 @@ async fn invite(
     Ok(())
 }
 
-/// Render a QR code to a terminal string that scans regardless of terminal theme.
+/// Render a QR code to a terminal string that scans regardless of terminal
+/// theme.
 ///
 /// `qrcode`'s `unicode::Dense1x2` renderer draws modules in the terminal's
-/// *foreground* colour on its *background*, so on a dark terminal the QR comes out
-/// inverted (light modules on dark) and scanners — which expect dark-on-light —
-/// reject it. Here every module gets an explicit truecolour black/white, so it is
-/// always dark-on-light. `▀` (upper half block) packs two module rows per line: the
-/// glyph's foreground is the top module, its background the bottom one. (`--png`
-/// stays the colour-independent fallback for terminals that strip ANSI.)
+/// *foreground* colour on its *background*, so on a dark terminal the QR comes
+/// out inverted (light modules on dark) and scanners — which expect
+/// dark-on-light — reject it. Here every module gets an explicit black/white,
+/// so it is always dark-on-light. The colours come from the 256-colour palette,
+/// not truecolour because a terminal without 24-bit support drops the
+/// truecolour codes and renders every line as one solid bar in its default
+/// colours, while the palette works everywhere. `▀` (upper half block) packs
+/// two module rows per line: the glyph's foreground is the top module, its
+/// background the bottom one. (`--png` stays the colour-independent fallback
+/// for terminals that strip ANSI.)
 fn render_qr_ansi(qr: &qrcode::QrCode) -> String {
     const QUIET: usize = 4; // standard quiet zone, in modules
-    const BLACK: &str = "0;0;0";
-    const WHITE: &str = "255;255;255";
+    const BLACK: &str = "16"; // palette index of #000000
+    const WHITE: &str = "231"; // palette index of #ffffff
 
     let w = qr.width();
     let modules = qr.to_colors();
@@ -401,7 +406,7 @@ fn render_qr_ansi(qr: &qrcode::QrCode) -> String {
             } else {
                 WHITE
             };
-            out.push_str(&format!("\x1b[38;2;{fg}m\x1b[48;2;{bg}m\u{2580}"));
+            out.push_str(&format!("\x1b[38;5;{fg}m\x1b[48;5;{bg}m\u{2580}"));
         }
         out.push_str("\x1b[0m\n"); // reset colours at end of each line
         y += 2;
