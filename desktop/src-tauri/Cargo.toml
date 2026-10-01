@@ -1,6 +1,6 @@
 [package]
 name = "wispers-access-desktop"
-version = "0.1.0"
+version = "0.1.1"
 description = "The Wispers Access desktop app — browse web apps without having to publish them to the internet"
 edition = "2024"
 

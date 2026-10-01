@@ -1,0 +1,11 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "targets": ["nsis"],
+    "windows": {
+      "certificateThumbprint": "D874944FB088188DA9D0891E2F99E663E3C59045",
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://time.certum.pl"
+    }
+  }
+}

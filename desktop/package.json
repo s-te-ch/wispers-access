@@ -11,7 +11,7 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
     "tauri": "tauri",
-    "release": "./release.sh",
+    "release": "node release.mjs",
     "updater-manifest": "node updater-manifest.mjs"
   },
   "license": "MIT",
