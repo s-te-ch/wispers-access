@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Wispers Access",
-  "version": "0.1.0",
   "identifier": "dev.wispers.access.desktop",
   "build": {
     "beforeDevCommand": "npm run dev",
@@ -23,7 +22,8 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:",
+      "devCsp": "default-src 'self' http://127.0.0.1:1420 ws://127.0.0.1:1420; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
     }
   },
   "bundle": {
@@ -35,6 +35,13 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "category": "Utility",
+    "shortDescription": "Open the apps shared with you through Wispers Access",
+    "longDescription": "Wispers Access lets you use web apps that someone shares with you, in your own browser, without exposing them to the internet. This app joins shares with an invitation code and opens their apps.",
+    "copyright": "Copyright © 2026 Scheidegger Technology GmbH",
+    "macOS": {
+      "minimumSystemVersion": "13.3"
+    }
   }
 }
