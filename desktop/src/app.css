@@ -1,12 +1,67 @@
 @import "tailwindcss";
 
-@theme {
-  --color-wbeige: #f7f7f2;
-  --color-wcontainer: #EFEFE6;
-  --color-wbeige-dark: #999166;
+/* The mobile apps' fonts, bundled: Nunito Sans (variable) for text, DM
+   Serif Text for headings. */
+@font-face {
+  font-family: "Nunito Sans";
+  src: url("/fonts/nunito_sans.ttf") format("truetype");
+  font-weight: 200 1000;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "DM Serif Text";
+  src: url("/fonts/dm_serif_text_regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+@font-face {
+  font-family: "DM Serif Text";
+  src: url("/fonts/dm_serif_text_italic.ttf") format("truetype");
+  font-weight: 400;
+  font-style: italic;
+  font-display: block;
 }
 
+/* The palette is the same as the mobile apps' (android ui/theme/Color.kt, ios
+   UI/Theme.swift), using the same names as there. The sidebar and the offline
+   dot are specific to the desktop design. */
+@theme {
+  --font-sans: "Nunito Sans", system-ui, sans-serif;
+  --font-serif: "DM Serif Text", Georgia, serif;
+  --font-mono: ui-monospace, "JetBrains Mono", Menlo, monospace;
+
+  --color-background: #f7f7f2;
+  --color-surface: #ffffff;
+  --color-primary: #a1d283;
+  --color-primary-dark: #4a6b36;
+  --color-on-surface: #1a1a1a;
+  --color-on-surface-variant: #6b6b68;
+  --color-outline: #d9d9d2;
+  --color-online: #34a853;
+  --color-offline: #b9b9b1;
+  --color-info-card: #ece7f1;
+  --color-destructive: #b3261e;
+  --color-sidebar: #edede6;
+  --color-sidebar-edge: #e0e0d8;
+
+  --shadow-card: 0 1px 2px rgba(20, 20, 19, 0.06), 0 0 0 1px rgba(20, 20, 19, 0.04);
+}
+
+html,
 body {
-  color: var(--color-wblack);
-  background-color: var(--color-wbeige);
+  height: 100%;
+  overflow: hidden;
+  background: var(--color-background);
+  color: var(--color-on-surface);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  user-select: none;
+  cursor: default;
+}
+
+/* The native modal's backdrop, which Tailwind cannot style. */
+dialog::backdrop {
+  background: rgba(27, 27, 24, 0.35);
 }

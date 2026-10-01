@@ -932,11 +932,11 @@ mod tests {
         );
         let cookie = set_cookie.split(';').next().unwrap().to_owned();
 
-        // The token is spent, the cookie is what counts from now on.
-        assert_eq!(
-            send(port, pair(None)).await.status(),
-            hyper::StatusCode::FORBIDDEN
-        );
+        // The token is spent, the cookie is what counts from now on. A
+        // browser that has neither gets an error page.
+        let spent = send(port, pair(None)).await;
+        assert_eq!(spent.status(), hyper::StatusCode::FORBIDDEN);
+        assert_eq!(spent.headers()["content-type"], "text/html; charset=utf-8");
         let again = send(port, pair(Some(&cookie))).await;
         assert_eq!(again.status(), hyper::StatusCode::FOUND);
         assert!(!again.headers().contains_key("set-cookie"));

@@ -279,7 +279,10 @@ async fn forward(
     // sees the cookie.
     if let Some(authenticator) = &authenticator {
         if !authenticator.admits(&req) {
-            return Ok(error_response(StatusCode::FORBIDDEN, "forbidden"));
+            return Ok(match authenticator.issuer() {
+                Some(_) => not_paired_page(),
+                None => error_response(StatusCode::FORBIDDEN, "forbidden"),
+            });
         }
         authenticator.scrub(&mut req);
     }
@@ -455,7 +458,7 @@ pub fn pair_url(port: u16, token: &str, share: &str, app: &str) -> String {
 /// Answers `GET /pair?token=…&share=…&app=…[&path=…]`, `host` being the
 /// request's `Host` header, port included. A paired browser is redirected to
 /// the app unconditionally, an unpaired one with a live token gets
-/// the cookie and a redirect. Any gets told it is not paired.
+/// the cookie and a redirect. Any other gets the page that says so.
 fn answer_pair(
     req: &hyper::Request<Incoming>,
     host: &str,
@@ -481,11 +484,24 @@ fn answer_pair(
     if params.get("token").is_some_and(|t| issuer.consume_token(t)) {
         return redirect(&location, Some(issuer.set_cookie_header()));
     }
-    error_response(
-        StatusCode::FORBIDDEN,
-        "This browser is not paired with Wispers Access. Open the app from Wispers Access again to pair it.",
-    )
+    not_paired_page()
 }
+
+/// The 403 for a browser the proxy does not know, telling the user to come back
+/// through the app, to get a pairing link.
+fn not_paired_page() -> hyper::Response<BoxedBody> {
+    let body: BoxedBody = Full::new(Bytes::from_static(NOT_PAIRED_HTML.as_bytes()))
+        .map_err(|never: Infallible| match never {})
+        .boxed();
+    hyper::Response::builder()
+        .status(StatusCode::FORBIDDEN)
+        .header("content-type", "text/html; charset=utf-8")
+        .header("cache-control", "no-store")
+        .body(body)
+        .expect("static error response is always valid")
+}
+
+const NOT_PAIRED_HTML: &str = include_str!("not_paired.html");
 
 /// Parse the query's `name=value` pairs, without decoding them. Our values are
 /// tokens and DNS labels, and `path` is passed on encoded as it came.
@@ -501,10 +517,12 @@ fn is_dns_label(s: &str) -> bool {
     !s.is_empty() && s.len() <= 63 && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
 }
 
+/// A 302 to `location`.
 fn redirect(location: &str, set_cookie: Option<String>) -> hyper::Response<BoxedBody> {
     let mut builder = hyper::Response::builder()
         .status(StatusCode::FOUND)
-        .header(hyper::header::LOCATION, location);
+        .header(hyper::header::LOCATION, location)
+        .header(hyper::header::REFERRER_POLICY, "no-referrer");
     if let Some(cookie) = set_cookie {
         builder = builder.header(hyper::header::SET_COOKIE, cookie);
     }
