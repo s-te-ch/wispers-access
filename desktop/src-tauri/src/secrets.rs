@@ -1,5 +1,6 @@
 //! Secret storage, using the platform's credential store: the macOS Keychain
-//! today, with the other platforms' stores to be added in [`credential_store`].
+//! and the Windows Credential Manager, with the other platforms' stores to be
+//! added in [`credential_store`].
 //! Every secret is one credential under the app's identifier as the service,
 //! named `<share id>/<key>` or `client/<key>` as the iOS app names its Keychain
 //! items.
@@ -76,7 +77,19 @@ fn credential_store() -> Option<Arc<CredentialStore>> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// The Windows Credential Manager, as generic credentials of the user.
+#[cfg(target_os = "windows")]
+fn credential_store() -> Option<Arc<CredentialStore>> {
+    match windows_native_keyring_store::Store::new() {
+        Ok(store) => Some(store),
+        Err(e) => {
+            tracing::warn!(error = %e, "could not open the Credential Manager");
+            None
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn credential_store() -> Option<Arc<CredentialStore>> {
     None
 }

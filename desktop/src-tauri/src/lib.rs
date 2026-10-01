@@ -3,6 +3,8 @@
 mod activity;
 mod secrets;
 mod shares;
+#[cfg(not(target_os = "macos"))]
+mod tray;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -13,6 +15,10 @@ use wispers_access_sdk as sdk;
 pub fn run() {
     init_logging();
     let app = tauri::Builder::default()
+        // First, so a second launch exits before it starts anything.
+        .plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            show_window(app)
+        }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -22,6 +28,13 @@ pub fn run() {
             match Desktop::start(handle.clone()) {
                 Ok(desktop) => {
                     app.manage(desktop);
+                    // Without the icon a closed window would leave the app
+                    // running with no way back to it, or to quit.
+                    #[cfg(not(target_os = "macos"))]
+                    if let Err(e) = tray::add(app) {
+                        report_failed_start(&e.into());
+                        std::process::exit(1)
+                    }
                     Ok(())
                 }
                 Err(e) => {
@@ -58,14 +71,11 @@ fn report_failed_start(error: &anyhow::Error) {
         .show();
 }
 
-/// On macOS the app outlives its window. The proxy keeps serving the browser
-/// while the window is away, and the dock icon brings it back. Quit is in the
-/// app menu. Elsewhere there is no dock to come back from yet, so the window
-/// closes.
+/// The app outlives its window, so the proxy keeps serving the browser while
+/// the window is away. On macOS the dock icon brings it back and Quit is in
+/// the app menu; elsewhere the tray icon does both.
 fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
-    if cfg!(target_os = "macos")
-        && let tauri::WindowEvent::CloseRequested { api, .. } = event
-    {
+    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
         api.prevent_close();
         if let Err(e) = window.hide() {
             tracing::warn!(error = %e, "could not hide the window");
@@ -77,14 +87,20 @@ fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
 /// exists on macOS.
 fn show_on_reopen(app: &tauri::AppHandle, event: tauri::RunEvent) {
     #[cfg(target_os = "macos")]
-    if let tauri::RunEvent::Reopen { .. } = event
-        && let Some(window) = app.get_webview_window("main")
-    {
-        let _ = window.show();
-        let _ = window.set_focus();
+    if let tauri::RunEvent::Reopen { .. } = event {
+        show_window(app);
     }
     #[cfg(not(target_os = "macos"))]
     let _ = (app, event);
+}
+
+/// Brings the window back from hidden or minimized, in front.
+fn show_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
 }
 
 /// The main state struct.

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { dragRegion } from "$lib/platform";
   import type { ShareManager } from "$lib/shares.svelte";
   import type { UpdateChecker } from "$lib/updates.svelte";
   import ShareRow from "./ShareRow.svelte";
@@ -11,12 +12,12 @@
   }: { manager: ShareManager; updates: UpdateChecker; onadd: () => void } = $props();
 </script>
 
-<!-- The window has no title bar on macOS, so the whole sidebar drags it,
+<!-- The window has no title bar on macOS, so there the whole sidebar drags it,
      buttons excepted (Tauri's "deep" drag region skips them). -->
 <nav
   aria-label="Shares"
-  class="flex h-full w-[300px] shrink-0 flex-col gap-7 border-r border-sidebar-edge bg-sidebar px-3.5 pt-8 pb-4"
-  data-tauri-drag-region="deep"
+  class="flex h-full w-[300px] shrink-0 flex-col gap-7 border-r border-sidebar-edge bg-sidebar px-3.5 pt-5 pb-4 under-title-bar:pt-8"
+  data-tauri-drag-region={dragRegion}
 >
   <img src="/wispers-access-text.svg" alt="Wispers Access" class="mx-2.5 w-[150px]" draggable="false" />
 
