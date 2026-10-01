@@ -1,5 +1,7 @@
 # Validation for every PR and push to main. This currently covers Rust (fmt,
-# clippy, tests on Linux; cargo check on Windows), the SDK's Android package
+# clippy, tests on Linux; cargo check on Windows, which is also where the
+# desktop app's crate gets its clippy, since on Linux it would link WebKitGTK
+# and its hundreds of megabytes of dev packages), the SDK's Android package
 # (bindings generated from a host build, one ABI cross-compiled, host unit
 # tests over JNA) and the Android app (unit tests, debug build).
 #
@@ -32,9 +34,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # boring-sys needs libclang (bindgen); tonic/prost need protoc. cmake and
-      # the C/C++ toolchain are preinstalled on the runner image. The desktop
-      # app's Tauri crate links WebKitGTK 4.1 (and with it GTK 3, libsoup 3
-      # and JavaScriptCore) through pkg-config.
+      # the C/C++ toolchain are preinstalled on the runner image.
       #
       # The runners' Azure-hosted apt mirrors stall out semi-regularly; the
       # Acquire options turn a silent hang into retries, and the step timeout
@@ -44,8 +44,7 @@ jobs:
         run: |
           APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
           $APT update
-          $APT install -y --no-install-recommends protobuf-compiler libclang-dev \
-            libwebkit2gtk-4.1-dev
+          $APT install -y --no-install-recommends protobuf-compiler libclang-dev
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (stable)
         with:
@@ -56,8 +55,9 @@ jobs:
 
       - run: cargo fmt --check
       # --locked: a stale Cargo.lock must fail, not get silently rewritten.
-      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test --workspace --locked
+      # The desktop crate is the Windows job's: see the header.
+      - run: cargo clippy --workspace --exclude wispers-access-desktop --all-targets --locked -- -D warnings
+      - run: cargo test --workspace --exclude wispers-access-desktop --locked
 
   # Windows is compile-checked only: nothing is released for it yet, but both
   # crates carry cfg(windows) branches and this keeps them from rotting.
@@ -81,10 +81,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (stable)
         with:
           toolchain: stable
+          components: clippy
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - run: cargo check --workspace --all-targets --locked
+      # The desktop crate's lint lives here rather than on Linux, where it
+      # would need WebKitGTK; it has no tests to run.
+      - run: cargo clippy -p wispers-access-desktop --all-targets --locked -- -D warnings
 
   android:
     runs-on: ubuntu-24.04
