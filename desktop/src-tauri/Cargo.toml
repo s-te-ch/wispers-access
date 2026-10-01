@@ -17,6 +17,8 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 anyhow = "1"
 keyring-core = "1"
+# Native alerts before the window exists.
+rfd = "0.16"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2", features = [] }

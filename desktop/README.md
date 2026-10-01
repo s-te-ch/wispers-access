@@ -23,6 +23,9 @@ lifetime. Secrets go to the platform credential store, the macOS Keychain
 today (`src-tauri/src/secrets.rs`); state under the app's data directory,
 `~/Library/Application Support/dev.wispers.access.desktop` on macOS.
 
+The bundle's minimum macOS is 13.3, the first with the WebKit that Tailwind v4's
+CSS needs (Safari 16.4). Nothing older has been tried.
+
 On macOS, `tauri dev` builds through `src-tauri/cargo-with-codesign.sh`, which
 signs the binary with your Apple Development certificate before running it. The
 Keychain recognises the app by its signature, so without this every rebuild

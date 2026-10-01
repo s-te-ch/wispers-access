@@ -16,9 +16,17 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let desktop = tauri::async_runtime::block_on(Desktop::start(app.handle().clone()))?;
-            app.manage(desktop);
-            Ok(())
+            let handle = app.handle().clone();
+            match Desktop::start(handle.clone()) {
+                Ok(desktop) => {
+                    app.manage(desktop);
+                    Ok(())
+                }
+                Err(e) => {
+                    report_failed_start(&e);
+                    std::process::exit(1)
+                }
+            }
         })
         .on_window_event(hide_instead_of_closing)
         .invoke_handler(tauri::generate_handler![
@@ -32,6 +40,20 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
     app.run(show_on_reopen);
+}
+
+/// Without a client there is nothing the app can do, and a window that never
+/// opens tells the user nothing. The alert does, before the app exits.
+/// `rfd` directly rather than Tauri's dialog plugin: this runs on the main
+/// thread before the event loop, and the plugin's blocking dialog would
+/// wait for that very thread to show it.
+fn report_failed_start(error: &anyhow::Error) {
+    tracing::error!(error = format!("{error:#}"), "could not start");
+    rfd::MessageDialog::new()
+        .set_level(rfd::MessageLevel::Error)
+        .set_title("Wispers Access could not start")
+        .set_description(format!("{error:#}"))
+        .show();
 }
 
 /// On macOS the app outlives its window. The proxy keeps serving the browser
@@ -81,7 +103,11 @@ impl Desktop {
     /// Opens the client on the app's data directory with the platform's
     /// credential store, and starts the proxy. Everything the app does needs
     /// both, so failing here fails the start.
-    async fn start(app: tauri::AppHandle) -> anyhow::Result<Self> {
+    ///
+    /// Synchronous on purpose: the client owns a tokio runtime, and dropping
+    /// one inside another runtime's `block_on` is a panic, which a failed
+    /// open would do.
+    fn start(app: tauri::AppHandle) -> anyhow::Result<Self> {
         let data_dir = app.path().app_data_dir()?;
         let secrets = secrets::PlatformSecretStore::open(&app.config().identifier);
         let client = sdk::Client::new(sdk::ClientConfig {
@@ -92,16 +118,18 @@ impl Desktop {
         let auth_mode = sdk::ProxyAuthMode::Pairing {
             token_lifetime: TOKEN_LIFETIME,
         };
-        let proxy = match client
-            .start_host_routed_proxy(PROXY_PORT, auth_mode.clone())
-            .await
-        {
-            Ok(proxy) => proxy,
-            Err(e) => {
-                tracing::warn!(error = %e, "port {PROXY_PORT} is taken, using any free one");
-                client.start_host_routed_proxy(0, auth_mode).await?
+        let proxy = tauri::async_runtime::block_on(async {
+            match client
+                .start_host_routed_proxy(PROXY_PORT, auth_mode.clone())
+                .await
+            {
+                Ok(proxy) => Ok(proxy),
+                Err(e) => {
+                    tracing::warn!(error = %e, "port {PROXY_PORT} is taken, using any free one");
+                    client.start_host_routed_proxy(0, auth_mode).await
+                }
             }
-        };
+        })?;
         tracing::info!("serving shares on wa.localhost:{}", proxy.port());
         Ok(Self {
             client,
