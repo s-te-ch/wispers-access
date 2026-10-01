@@ -61,7 +61,7 @@ const files = [...extra, host.bundle, `${host.bundle}.sig`].map((f) => `"${f}"`)
 console.log(`
 Wrote desktop/latest.json for ${version} (${Object.keys(manifest.platforms).join(", ")}). To publish:
 
-  gh release create ${release} --title "Wispers Access ${version}" --generate-notes ${files}
+  gh release create ${release} --title "Wispers Access desktop ${version}" --generate-notes ${files}
 
 (or \`gh release upload ${release} …\` if the release exists), then commit desktop/latest.json to main.
 `);
