@@ -5,15 +5,14 @@
 # 1. Find the desired shares: one `/config/<name>.toml` per share, using the
 #    same format as the `share.toml` files that waserver itself writes (name,
 #    transport, apps).
-# 2. `waserver init` any shares that don't exist yet. Identity (connectivity
-#    group + keys) is created once and then lives on the /data volume.
+# 2. `waserver init` any shares that don't exist yet. Identity (keys, and on
+#    Wispers Connect the connectivity group) is created once and then lives on
+#    the /data volume.
 # 3. Copy each of the TOML files over its share's `share.toml`, so the mounted
 #    config is the source of truth on every start.
 # 4. Generate one supervisord program per share, each running `waserver serve`.
 # 5. exec supervisord as PID 1; it owns signal fan-out, restart, and reaping.
 set -euo pipefail
-
-: "${WC_API_KEY:?WC_API_KEY must be set (the Wispers Connect API key)}"
 
 # One share config per share, named after it.
 CONFIG_DIR="${CONFIG_DIR:-/config}"
@@ -25,11 +24,10 @@ SHARES_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/waserver/shares"
 log() { printf '[entrypoint] %s\n' "$*"; }
 
 # --- Desired shares -------------------------------------------------------
-# The display name `init` registers is the file's top-level `name`; the file
-# itself becomes the share's config below, so a plain `name = "…"` line above
-# the first section is all that is read here.
+# Read the TOML files in the config directory.
 toml_name() { sed -n -E '/^\[/q; s/^name[[:space:]]*=[[:space:]]*["'"'"'](.*)["'"'"'][[:space:]]*$/\1/p' "$1" | head -1; }
-NAMES=(); DISPLAYS=()
+toml_transport() { sed -n -E '/^\[transport\]/,/^\[/{s/^kind[[:space:]]*=[[:space:]]*["'"'"'](.*)["'"'"'][[:space:]]*$/\1/p;}' "$1" | head -1; }
+NAMES=(); DISPLAYS=(); TRANSPORTS=()
 for file in "$CONFIG_DIR"/*.toml; do
   [[ -f "$file" ]] || continue
   name="$(basename "$file" .toml)"
@@ -38,7 +36,12 @@ for file in "$CONFIG_DIR"/*.toml; do
     log "ERROR: $file has no 'name = \"…\"' line"
     exit 1
   fi
-  NAMES+=("$name"); DISPLAYS+=("$display")
+  transport="$(toml_transport "$file")"
+  if [[ -z "$transport" ]]; then
+    log "ERROR: $file has no [transport] section with a 'kind = \"…\"' line (iroh or wispers-connect)"
+    exit 1
+  fi
+  NAMES+=("$name"); DISPLAYS+=("$display"); TRANSPORTS+=("$transport")
 done
 
 if [[ ${#NAMES[@]} -eq 0 ]]; then
@@ -56,11 +59,16 @@ is_desired()  { local n; for n in "${NAMES[@]}"; do [[ "$n" == "$1" ]] && return
 # --- Init shares that don't exist yet -------------------------------------
 for i in "${!NAMES[@]}"; do
   name="${NAMES[$i]}"
+  transport="${TRANSPORTS[$i]}"
   if is_existing "$name"; then
     log "share '$name' already initialised"
   else
-    log "initialising share '$name' (${DISPLAYS[$i]})"
-    waserver init "$name" "${DISPLAYS[$i]}"
+    if [[ "$transport" == wispers-connect && -z "${WC_API_KEY:-}" ]]; then
+      log "ERROR: share '$name' uses Wispers Connect, which needs WC_API_KEY (the Wispers Connect API key) to be created"
+      exit 1
+    fi
+    log "initialising share '$name' (${DISPLAYS[$i]}) on $transport"
+    waserver init --transport "$transport" "$name" "${DISPLAYS[$i]}"
   fi
 done
 

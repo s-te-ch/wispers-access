@@ -190,6 +190,8 @@ mod tests {
 
     const CONFIG: &str = r#"
 name = "Family"
+[transport]
+kind = "iroh"
 [[app]]
 id = "jf"
 name = "Jellyfin"
@@ -199,6 +201,8 @@ upstream = "UPSTREAM"
 id = "photos"
 upstream = ":1"
 "#;
+
+    const EMPTY_SHARE: &str = "name = \"x\"\n[transport]\nkind = \"iroh\"\n";
 
     fn context(config: &str) -> StreamContext {
         StreamContext {
@@ -334,7 +338,7 @@ upstream = ":1"
 
     #[tokio::test]
     async fn legacy_request_on_an_empty_share_gets_a_plain_503() {
-        let response = exchange(context("name = \"x\"\n"), Some("bob"), GET.to_vec()).await;
+        let response = exchange(context(EMPTY_SHARE), Some("bob"), GET.to_vec()).await;
         let (head, _) = split_response(&response);
         assert!(head.starts_with("http/1.1 503"), "{head}");
         // A page for the person; legacy clients know no error header.
@@ -345,7 +349,7 @@ upstream = ":1"
     async fn data_request_on_an_empty_share_is_an_unknown_app() {
         // The guest's list is stale (the last app was removed): same answer
         // as for any other app the share does not have, hash included.
-        let ctx = context("name = \"x\"\n");
+        let ctx = context(EMPTY_SHARE);
         let hash = ctx.config.config_hash();
         let response = exchange(ctx, Some("bob"), data_stream("gone", GET)).await;
         let (head, _) = split_response(&response);
@@ -373,7 +377,7 @@ upstream = ":1"
         let info: ShareInfo = serde_json::from_slice(&body).unwrap();
         assert_eq!(info.config_hash, hash);
         assert_eq!(info.name, "Family");
-        assert_eq!(info.transport, "wispers-connect");
+        assert_eq!(info.transport, "iroh");
         assert_eq!(info.apps.len(), 2);
         assert_eq!(info.apps[0].id, "jf");
         assert_eq!(info.apps[0].kind, AppKind::Jellyfin);
