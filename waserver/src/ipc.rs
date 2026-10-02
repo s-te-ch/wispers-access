@@ -446,7 +446,7 @@ fn ipc_path(share: &str) -> PathBuf {
 fn ipc_path(share: &str) -> PathBuf {
     let base = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
     let dir = base.join(".waserver").join("ports");
-    return dir.join(format!("{}.port", share));
+    dir.join(format!("{}.port", share))
 }
 
 #[cfg(windows)]

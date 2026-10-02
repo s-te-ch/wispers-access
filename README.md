@@ -57,7 +57,7 @@ device.
 
 ### 1. Install waserver
 
-Download the tarball for your platform from the
+Download the archive for your platform (Linux, macOS or Windows) from the
 [releases page](https://github.com/s-te-ch/wispers-access/releases) and put
 `waserver` on your `PATH`.
 

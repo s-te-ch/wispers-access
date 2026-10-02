@@ -112,6 +112,31 @@ async fn handle_request(
     }
 }
 
+/// Connect to `host:port`, dialing all its addresses at once and keeping the
+/// first that answers.
+/// 
+/// This works around slowness with `TcpStream::connect` and IPv4-only
+/// upstreams on Windows. There, `localhost` resolves to `::1` first, causing a
+/// 2s timeout before timing out and trying 127.0.0.1.
+pub(crate) async fn connect_upstream(upstream: &str) -> std::io::Result<TcpStream> {
+    let mut attempts = tokio::task::JoinSet::new();
+    for addr in tokio::net::lookup_host(upstream).await? {
+        attempts.spawn(TcpStream::connect(addr));
+    }
+    let mut last_err = None;
+    while let Some(attempt) = attempts.join_next().await {
+        match attempt {
+            // Dropping the set aborts the attempts still in flight.
+            Ok(Ok(tcp)) => return Ok(tcp),
+            Ok(Err(e)) => last_err = Some(e),
+            Err(e) => last_err = Some(std::io::Error::other(e)),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "no addresses resolved")
+    }))
+}
+
 /// Forward the request to the chosen upstream app.
 /// This also handles WebSocket upgrades.
 async fn forward_to_upstream(
@@ -120,7 +145,7 @@ async fn forward_to_upstream(
     user_id: String,
 ) -> Result<hyper::Response<BoxedBody>> {
     // Open a connection to the upstream app. `upstream` is `host:port`.
-    let tcp = TcpStream::connect(upstream.as_ref())
+    let tcp = connect_upstream(&upstream)
         .await
         .with_context(|| format!("connect to upstream {}", upstream))?;
 
