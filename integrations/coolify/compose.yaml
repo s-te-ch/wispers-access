@@ -20,11 +20,13 @@
 #      writes the block to a file and mounts it; the file name is the share's
 #      id. Another share is another such volume entry, mounted at
 #      /config/<name>.toml.
-#   4. Set the environment variables (Environment Variables tab): WC_API_KEY
-#        your Wispers Connect API key WC_BACKEND  (optional) base URL of a
-#        self-hosted Wispers Connect hub, e.g. https://myhub.example.com (https
-#        only). Leave blank to use the managed backend. Pinned per-share at
-#        first deploy and carried in invite codes, so guests join the same hub.
+#   4. Only for a share on Wispers Connect (`kind = "wispers-connect"` instead
+#      of iroh below), set the environment variables (Environment Variables
+#      tab): WC_API_KEY, your Wispers Connect API key; WC_BACKEND (optional),
+#      base URL of a self-hosted Wispers Connect hub, e.g.
+#      https://myhub.example.com (https only). Leave blank to use the managed
+#      backend. Pinned per-share at first deploy and carried in invite codes,
+#      so guests join the same hub.
 #   5. Deploy. On each app you want reachable, enable "Connect To Predefined
 #      Network".
 #   6. Mint invites from this resource's Terminal: waserver invite <share>
@@ -45,11 +47,12 @@ services:
     networks:
       - coolify
     environment:
-      # These come up as empty fields in Coolify's Environment Variables tab —
-      # fill them there. The empty ':?' is deliberate: Coolify pre-fills the field
-      # with whatever text follows ':?', so a hint string there gets deployed as
-      # the literal value (crash-loops the share).
-      WC_API_KEY: ${WC_API_KEY:?}
+      # These come up as empty fields in Coolify's Environment Variables tab;
+      # fill them there for a Wispers Connect share, leave them blank for
+      # iroh. The empty ':-' is deliberate: Coolify pre-fills the field with
+      # whatever text follows it, so a hint string there gets deployed as the
+      # literal value (crash-loops the share).
+      WC_API_KEY: ${WC_API_KEY:-}
       # Optional; blank = managed backend.
       WC_BACKEND: ${WC_BACKEND:-}
     volumes:
@@ -66,7 +69,7 @@ services:
           name = "Awesome Team"
 
           [transport]
-          kind = "wispers-connect"
+          kind = "iroh"
 
           [[app]]
           id = "odoo"

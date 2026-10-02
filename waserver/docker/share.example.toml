@@ -10,8 +10,7 @@
 name = "WS Echo Demo"
 
 [transport]
-kind = "wispers-connect"
-# backend = "https://hub.example"   # self-hosted Wispers Connect backend
+kind = "iroh"
 
 [[app]]
 id = "echo"

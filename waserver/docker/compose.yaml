@@ -5,7 +5,6 @@
 # docker compose; no orchestrator needed. (For Coolify and similar platforms, see
 # integrations/<platform>/.)
 #
-#   export WC_API_KEY=...        # your Wispers Connect API key
 #   docker compose -f waserver/docker/compose.yaml up --build
 #
 # Then, in another terminal:
@@ -34,7 +33,8 @@ services:
       context: ../..              # repo root, so the Rust workspace is in scope
       dockerfile: waserver/docker/Dockerfile
     environment:
-      WC_API_KEY: ${WC_API_KEY:?set WC_API_KEY in your shell or a .env file}
+      # Only a share on Wispers Connect needs this (see share.example.toml).
+      WC_API_KEY: ${WC_API_KEY:-}
     volumes:
       - waserver-state:/data      # persists share identity across restarts
       # One share config per share at /config/<name>.toml; the file name is

@@ -20,7 +20,7 @@ cat > team.toml <<'TOML'
 name = "Awesome Team"
 
 [transport]
-kind = "wispers-connect"
+kind = "iroh"
 
 [[app]]
 id = "myapp"
@@ -29,7 +29,6 @@ upstream = "host.docker.internal:3000"
 TOML
 
 docker run -d --name waserver --restart unless-stopped \
-  -e WC_API_KEY=… \
   -v "$PWD/team.toml:/config/team.toml:ro" \
   --add-host host.docker.internal:host-gateway \
   -v waserver-data:/data \
@@ -46,7 +45,8 @@ For an app in the same compose stack, the upstream is just `service:port` and
 ```
 entrypoint.sh
   ├─ find the desired shares: one /config/<name>.toml per share
-  ├─ `waserver init` any not yet initialised   (identity created once, on /data)
+  ├─ `waserver init` any not yet initialised   (identity created once, on /data,
+  │                                              on the transport the file names)
   ├─ copy each file over its share's share.toml
   ├─ generate one supervisord program per share
   └─ exec supervisord (PID 1)
@@ -85,16 +85,14 @@ and guests (irreversible).
 
 ## Try it locally
 
-Prerequisites: Docker and a Wispers Connect **API key**.
+Prerequisites: Docker.
 
 ```sh
-export WC_API_KEY=...    # or put it in a .env file as WC_API_KEY=...
 docker compose -f waserver/docker/compose.yaml up --build
 ```
 
-The container inits the `demo` share from `share.example.toml`, connects to the
-hub, and serves it. The healthcheck flips to healthy once it reports `serving`.
-In another shell:
+The container inits the `demo` share from `share.example.toml` and serves it.
+The healthcheck flips to healthy once it reports `serving`. In another shell:
 
 ```sh
 C="docker compose -f waserver/docker/compose.yaml exec waserver"
@@ -115,15 +113,17 @@ every boot creates a brand-new connectivity group** — so in any real deploymen
 mount a volume.
 
 
-## Self-hosted backend (optional)
+## Wispers Connect (optional)
 
-By default, the container uses the managed Wispers Connect backend. You can
-point it to your own, self-hosted backend using the flag `--backend` or by
-setting `WC_BACKEND`. It's read once at `waserver init`, stored per-share, and
-baked into the invite codes so a guest's client joins the same hub
-automatically. This is per-share, so different shares can use different
-backends. See the [wispers-hub](https://github.com/s-te-ch/wispers-hub) repo for
-standing up your own hub.
+A share's `[transport]` picks iroh, which needs no account, or Wispers Connect.
+A Wispers Connect share is created with the API key in `WC_API_KEY`, so pass
+that to the container (`-e WC_API_KEY=…`, or the Environment Variables tab of
+your platform). By default it uses the managed Wispers Connect backend; a
+self-hosted one goes in `WC_BACKEND`, read once at `waserver init`, stored
+per-share, and baked into the invite codes so a guest's client joins the same
+hub automatically. Different shares can use different backends. See the
+[wispers-hub](https://github.com/s-te-ch/wispers-hub) repo for standing up your
+own hub.
 
 ## Notes
 

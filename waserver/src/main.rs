@@ -36,7 +36,7 @@ enum Command {
         #[arg(long, env = "WC_BACKEND")]
         backend: Option<String>,
         /// Which peer-to-peer transport library to use for this share.
-        #[arg(long, default_value = "wispers-connect")]
+        #[arg(long, default_value = "iroh")]
         transport: config::TransportKind,
         /// Share identifier (use letters, digits, '-' or '_').
         share: String,
@@ -466,46 +466,43 @@ mod tests {
 
     #[test]
     fn cli_parses_share_init() {
-        let cli =
-            Cli::try_parse_from(["waserver", "init", "--api-key", "k", "team", "Awesome Team"])
-                .unwrap();
+        // The default needs neither a transport nor a key.
+        let cli = Cli::try_parse_from(["waserver", "init", "team", "Awesome Team"]).unwrap();
         match cli.command {
             Command::Init {
                 share,
                 display_name,
+                api_key,
                 transport,
                 ..
             } => {
                 assert_eq!(share, "team");
                 assert_eq!(display_name, "Awesome Team");
-                assert_eq!(transport, config::TransportKind::WispersConnect);
-            }
-            _ => panic!("parsed the wrong command"),
-        }
-        match Cli::try_parse_from(["waserver", "init", "--transport", "iroh", "f", "F"])
-            .unwrap()
-            .command
-        {
-            Command::Init {
-                api_key, transport, ..
-            } => {
                 assert_eq!(api_key, None);
                 assert_eq!(transport, config::TransportKind::Iroh);
             }
             _ => panic!("parsed the wrong command"),
         }
-        assert!(
-            Cli::try_parse_from([
-                "waserver",
-                "init",
-                "--api-key",
-                "k",
-                "--transport",
-                "wispers-connect",
-                "f",
-                "F"
-            ])
-            .is_ok()
-        );
+        match Cli::try_parse_from([
+            "waserver",
+            "init",
+            "--transport",
+            "wispers-connect",
+            "--api-key",
+            "k",
+            "f",
+            "F",
+        ])
+        .unwrap()
+        .command
+        {
+            Command::Init {
+                api_key, transport, ..
+            } => {
+                assert_eq!(api_key.as_deref(), Some("k"));
+                assert_eq!(transport, config::TransportKind::WispersConnect);
+            }
+            _ => panic!("parsed the wrong command"),
+        }
     }
 }
