@@ -1,5 +1,5 @@
 //! Autostart at login.
-//! 
+//!
 //! This is on by default but can be toggled, in the app menu on macOS and in
 //! the tray menu elsewhere. An autostart at login starts without the window,
 //! since the point of is running the proxy, not showing a window.

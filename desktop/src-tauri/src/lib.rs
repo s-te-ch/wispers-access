@@ -97,7 +97,7 @@ fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
 
 /// Reveal the app window. The window is configured invisible and shown once the
 /// event loop runs (which isnot at all for an autostart at login).
-/// 
+///
 /// Reopen is the dock icon clicked while the window is hidden. That event only
 /// exists on macOS.
 fn show_window_on(app: &tauri::AppHandle, event: tauri::RunEvent) {
