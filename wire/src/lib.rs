@@ -81,7 +81,10 @@ impl Transport {
 ///
 /// Version 1 is `wax1_<transport tag>_<field>[_<field>…]`. Version 0 is
 /// `wax_<registration-token>_<activation-code>[_<backend>]`, for Wispers
-/// Connect. Byte strings are lowercase hex, URLs are lowercase unpadded base32.
+/// Connect.Byte strings are lowercase hex, URLs are lowercase unpadded base32.
+///
+/// TODO: Nothing emits wax_ since 2026-10. Clean up the code accepting this
+/// format.
 #[derive(Clone, PartialEq, Eq)]
 pub enum Invite {
     WispersConnect {
@@ -99,7 +102,7 @@ pub enum Invite {
 
 #[derive(thiserror::Error, Debug, PartialEq, Eq)]
 pub enum InviteError {
-    #[error("not an invite code (expected wax1_<transport>_… or wax_<token>_<code>)")]
+    #[error("not an invite code (expected wax1_<transport>_…)")]
     NotAnInvite,
     /// A transport this parser does not know or was built without.
     #[error("unsupported transport {0:?}")]
@@ -133,9 +136,6 @@ impl Invite {
     }
 
     /// The code string for this invite.
-    ///
-    /// Wispers Connect invites are written in version 0 until the store
-    /// apps parse version 1.
     pub fn to_code(&self) -> String {
         match self {
             Invite::WispersConnect {
@@ -143,7 +143,10 @@ impl Invite {
                 activation_code,
                 backend,
             } => {
-                let base = format!("wax_{registration_token}_{activation_code}");
+                let base = format!(
+                    "wax1_{}_{registration_token}_{activation_code}",
+                    Transport::WispersConnect.tag()
+                );
                 match backend {
                     Some(backend) => format!("{base}_{}", encode_url(backend)),
                     None => base,
@@ -697,40 +700,39 @@ mod tests {
     }
 
     #[test]
-    fn version_0_is_wispers_connect() {
+    fn version_0_still_parses() {
         assert_eq!(
             Invite::parse("wax_ab12cd_1-xyz789").unwrap(),
             wc("ab12cd", "1-xyz789", None)
         );
+        let url = "https://myhub.example.com";
+        assert_eq!(
+            Invite::parse(&format!("wax_ab12cd_1-xyz789_{}", encode_url(url))).unwrap(),
+            wc("ab12cd", "1-xyz789", Some(url))
+        );
+    }
+
+    #[test]
+    fn wispers_connect_round_trips_in_version_1() {
+        assert_eq!(
+            wc("ab12cd", "1-xyz789", None).to_code(),
+            "wax1_wc_ab12cd_1-xyz789"
+        );
+        assert_eq!(
+            Invite::parse("wax1_wc_ab12cd_1-xyz789").unwrap(),
+            wc("ab12cd", "1-xyz789", None)
+        );
         // Pasted whitespace is tolerated.
         assert_eq!(
-            Invite::parse("  wax_ab12cd_1-xyz789\n").unwrap(),
+            Invite::parse("  wax1_wc_ab12cd_1-xyz789\n").unwrap(),
             wc("ab12cd", "1-xyz789", None)
         );
         let url = "https://myhub.example.com";
         let with_backend = wc("ab12cd", "1-xyz789", Some(url));
         let code = with_backend.to_code();
-        assert_eq!(code, format!("wax_ab12cd_1-xyz789_{}", encode_url(url)));
+        assert_eq!(code, format!("wax1_wc_ab12cd_1-xyz789_{}", encode_url(url)));
         assert!(!encode_url(url).contains('_'));
         assert_eq!(Invite::parse(&code).unwrap(), with_backend);
-        // Wispers Connect keeps writing version 0 for now.
-        assert_eq!(
-            wc("ab12cd", "1-xyz789", None).to_code(),
-            "wax_ab12cd_1-xyz789"
-        );
-    }
-
-    #[test]
-    fn version_1_wispers_connect_parses_too() {
-        assert_eq!(
-            Invite::parse("wax1_wc_ab12cd_1-xyz789").unwrap(),
-            wc("ab12cd", "1-xyz789", None)
-        );
-        let url = "https://myhub.example.com";
-        assert_eq!(
-            Invite::parse(&format!("wax1_wc_ab12cd_1-xyz789_{}", encode_url(url))).unwrap(),
-            wc("ab12cd", "1-xyz789", Some(url))
-        );
     }
 
     #[test]
@@ -798,7 +800,7 @@ mod tests {
             );
         }
         assert_eq!(
-            Invite::parse("wax__1-xyz789"),
+            Invite::parse("wax1_wc__1-xyz789"),
             Err(InviteError::Malformed("missing registration token"))
         );
     }
@@ -809,11 +811,11 @@ mod tests {
         // code, rather than falling back to the managed hub.
         let http = encode_url("http://evil.example.com");
         assert_eq!(
-            Invite::parse(&format!("wax_ab12cd_1-xyz789_{http}")),
+            Invite::parse(&format!("wax1_wc_ab12cd_1-xyz789_{http}")),
             Err(InviteError::Malformed("backend URL must be https://"))
         );
         assert_eq!(
-            Invite::parse("wax_ab12cd_1-xyz789_!!notbase32"),
+            Invite::parse("wax1_wc_ab12cd_1-xyz789_!!notbase32"),
             Err(InviteError::Malformed("backend is not a base32 URL"))
         );
     }

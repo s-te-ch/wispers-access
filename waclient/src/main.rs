@@ -14,7 +14,7 @@ struct Cli {
 enum Command {
     /// Join a Wispers Access share.
     Join {
-        /// Invite code for the share (`wax_…`), produced by `waserver invite`.
+        /// Invite code for the share (`wax1_…`), produced by `waserver invite`.
         invite_code: String,
     },
     /// Serve every joined share's apps on localhost, as
