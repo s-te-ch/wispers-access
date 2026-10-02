@@ -10,7 +10,6 @@
     "core:window:allow-start-dragging",
     "opener:default",
     "clipboard-manager:allow-read-text",
-    "updater:default",
-    "process:allow-restart"
+    "updater:default"
   ]
 }

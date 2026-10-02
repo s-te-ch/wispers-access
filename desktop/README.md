@@ -18,10 +18,12 @@ npm run tauri build    # the bundle under src-tauri/target/release/bundle
 ```
 
 The native side keeps one SDK client and one loopback proxy on
-`wa.localhost:4242` (any free port if that one is taken) for the app's
-lifetime, which outlasts a closed window: the dock icon on macOS and the tray
-icon on Windows bring it back. Secrets go to the platform credential store,
-the macOS Keychain or the Windows Credential Manager
+`wa.localhost:4242` (any free port if that one is taken) for the app's lifetime,
+which outlasts a closed window: the dock icon on macOS and the tray icon on
+Windows bring it back. The app also launches at login in the background, by
+default. The "Launch at Login" item in the application menu on macOS and in the
+tray menu on Windows lets you turn that off. Secrets go to the platform
+credential store, the macOS Keychain or the Windows Credential Manager
 (`src-tauri/src/secrets.rs`); state under the app's data directory,
 `~/Library/Application Support/dev.wispers.access.desktop` on macOS and
 `%APPDATA%\dev.wispers.access.desktop` on Windows.
