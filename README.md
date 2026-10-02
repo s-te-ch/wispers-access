@@ -111,7 +111,7 @@ terminal (or use `waserver start`):
 waserver invite team "Alice's phone" alice@example.com --png invite.png
 ```
 
-This produces the invite in three different formats: a `wax_…` invite code to
+This produces the invite in three different formats: a `wax1_…` invite code to
 copy-paste, an ASCII art QR code to scan with the phone, and the same QR code as
 a PNG. The user ID (`alice@example.com`) is a label you choose; the shared app
 sees it on every request in the `x-wispers-access-user` header, so it knows who
@@ -132,7 +132,7 @@ profile, no open port on the internet.
 `waclient` (same releases page) serves every share you've joined on localhost:
 
 ```sh
-waclient join wax_…            # the invite code from step 3
+waclient join wax1_…           # the invite code from step 3
 waclient serve 8000
 ```
 
