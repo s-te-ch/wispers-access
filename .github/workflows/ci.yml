@@ -1,9 +1,9 @@
 # Validation for every PR and push to main. This currently covers Rust (fmt,
-# clippy, tests on Linux; cargo check on Windows, which is also where the
-# desktop app's crate gets its clippy, since on Linux it would link WebKitGTK
-# and its hundreds of megabytes of dev packages), the SDK's Android package
-# (bindings generated from a host build, one ABI cross-compiled, host unit
-# tests over JNA) and the Android app (unit tests, debug build).
+# clippy, tests on Linux; clippy and waserver's tests on Windows, which is also
+# where the desktop app's crate gets its clippy, since on Linux it would link
+# WebKitGTK and its hundreds of megabytes of dev packages), the SDK's Android
+# package (bindings generated from a host build, one ABI cross-compiled, host
+# unit tests over JNA) and the Android app (unit tests, debug build).
 #
 # iOS is covered by ios.yml: a macOS build on a six-hour schedule rather than
 # per push, because macOS runners are slow and expensive.
@@ -59,8 +59,9 @@ jobs:
       - run: cargo clippy --workspace --exclude wispers-access-desktop --all-targets --locked -- -D warnings
       - run: cargo test --workspace --exclude wispers-access-desktop --locked
 
-  # Windows is compile-checked only: nothing is released for it yet, but both
-  # crates carry cfg(windows) branches and this keeps them from rotting.
+  # waserver and the desktop app ship for Windows, and several crates carry
+  # cfg(windows) branches that Linux never compiles, so all of them get their
+  # lint here. Tests run for waserver only: the SDK's don't pass on Windows yet.
   windows:
     runs-on: windows-2025
     timeout-minutes: 30
@@ -85,10 +86,10 @@ jobs:
 
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
-      - run: cargo check --workspace --all-targets --locked
-      # The desktop crate's lint lives here rather than on Linux, where it
-      # would need WebKitGTK; it has no tests to run.
-      - run: cargo clippy -p wispers-access-desktop --all-targets --locked -- -D warnings
+      # This includes the desktop crate, whose lint lives here rather than on
+      # Linux, where it would need WebKitGTK; it has no tests to run.
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo test -p waserver --locked
 
   android:
     runs-on: ubuntu-24.04

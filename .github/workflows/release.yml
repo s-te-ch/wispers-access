@@ -1,10 +1,9 @@
 # Per-component releases, triggered by version tags:
 #
-#   waserver-vX.Y.Z  -> linux amd64+arm64 + macOS arm64 binaries on a GitHub
-#                       Release, plus the multi-arch container image on ghcr
-#                       (:X.Y.Z, :latest)
-#   waclient-vX.Y.Z  -> linux amd64+arm64 + macOS arm64 binaries on a GitHub
-#                       Release
+#   waserver-vX.Y.Z  -> linux amd64+arm64 + macOS arm64 binaries (.tar.gz) and
+#                       a windows amd64 one (.zip) on a GitHub Release, plus the
+#                       multi-arch container image on ghcr (:X.Y.Z, :latest)
+#   waclient-vX.Y.Z  -> the same binaries on a GitHub Release
 #
 # The tag must match the crate version in Cargo.toml, so a release is:
 #  1. bump the version, commit & push
@@ -14,7 +13,9 @@
 # architecture.
 #
 # macOS binaries are Developer ID-signed and notarized so Gatekeeper accepts
-# browser-downloaded tarballs. This needs five repo secrets:
+# browser-downloaded tarballs. (The Windows binary is not signed: the
+# Authenticode certificate lives on the desktop release machine, not in CI.)
+# This needs five repo secrets:
 #   MACOS_SIGN_P12           base64 of the Developer ID Application .p12
 #   MACOS_SIGN_P12_PASSWORD  its passphrase
 #   APPLE_API_KEY_ID         App Store Connect API key for notarytool
@@ -61,12 +62,14 @@ jobs:
             waserver)
               matrix='[{"os": "ubuntu-24.04", "target": "linux-amd64"},
                        {"os": "ubuntu-24.04-arm", "target": "linux-arm64"},
-                       {"os": "macos-26", "target": "macos-arm64"}]'
+                       {"os": "macos-26", "target": "macos-arm64"},
+                       {"os": "windows-2025", "target": "windows-amd64"}]'
               ;;
             waclient)
               matrix='[{"os": "ubuntu-24.04", "target": "linux-amd64"},
                        {"os": "ubuntu-24.04-arm", "target": "linux-arm64"},
-                       {"os": "macos-26", "target": "macos-arm64"}]'
+                       {"os": "macos-26", "target": "macos-arm64"},
+                       {"os": "windows-2025", "target": "windows-amd64"}]'
               ;;
             *)
               echo "unexpected tag '$tag'" >&2
@@ -93,7 +96,11 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.meta.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    # Windows builds BoringSSL and AWS-LC from source, which takes a while.
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -110,12 +117,23 @@ jobs:
         if: runner.os == 'macOS'
         timeout-minutes: 5
         run: brew install protobuf
+      # As in CI: MSVC, cmake and LLVM are preinstalled; NASM and protoc are not.
+      - name: Install native build deps (Windows)
+        if: runner.os == 'Windows'
+        timeout-minutes: 5
+        run: |
+          choco install --no-progress -y nasm protoc
+          echo 'C:\Program Files\NASM' >> "$GITHUB_PATH"
 
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1 (stable)
         with:
           toolchain: stable
 
+      # On Windows, link the C runtime statically: VCRUNTIME140.dll is not
+      # part of Windows, so a downloaded exe could otherwise fail to start.
       - name: Build
+        env:
+          RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
         run: cargo build --release -p ${{ needs.meta.outputs.component }}
 
       - name: Sign and notarize (macOS)
@@ -184,13 +202,21 @@ jobs:
           target="${{ matrix.target }}"
           staging="$component-$version-$target"
           mkdir "$staging"
-          cp "target/release/$component" LICENSE "$staging/"
-          tar czf "$staging.tar.gz" "$staging"
+          if [ "$RUNNER_OS" = Windows ]; then
+            # Windows users expect a zip, which Explorer opens natively.
+            cp "target/release/$component.exe" LICENSE "$staging/"
+            7z a -tzip "$staging.zip" "$staging"
+          else
+            cp "target/release/$component" LICENSE "$staging/"
+            tar czf "$staging.tar.gz" "$staging"
+          fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: binary-${{ matrix.target }}
-          path: "*.tar.gz"
+          path: |
+            *.tar.gz
+            *.zip
           if-no-files-found: error
 
   # waserver only: build each image slice natively and push by digest ...
@@ -299,15 +325,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cd dist
-          sha256sum -- *.tar.gz > SHA256SUMS
+          # Not every component has zips.
+          shopt -s nullglob
+          archives=(*.tar.gz *.zip)
+          sha256sum -- "${archives[@]}" > SHA256SUMS
           if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" \
               --repo "$GITHUB_REPOSITORY" --clobber \
-              ./*.tar.gz SHA256SUMS
+              "${archives[@]}" SHA256SUMS
           else
             gh release create "$GITHUB_REF_NAME" \
               --repo "$GITHUB_REPOSITORY" \
               --title "${{ needs.meta.outputs.component }} ${{ needs.meta.outputs.version }}" \
               --generate-notes \
-              ./*.tar.gz SHA256SUMS
+              "${archives[@]}" SHA256SUMS
           fi

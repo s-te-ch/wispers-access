@@ -212,8 +212,8 @@ pub fn is_valid_id(s: &str) -> bool {
 /// Parse an upstream dial target in `host:port` form into a normalized
 /// `host:port` string. An empty host (`:3000`) means `localhost`. It's
 /// `localhost` rather than `127.0.0.1` so the dial tries both IPv4 and IPv6
-/// addresses families if available. IPv6 literals would need bracket form
-/// (`[::1]:3000`) and aren't handled.
+/// addresses families if available (see `http::connect_upstream`). IPv6
+/// literals would need bracket form (`[::1]:3000`) and aren't handled.
 pub fn parse_upstream(s: &str) -> Result<String, String> {
     let s = s.trim();
     if s.is_empty() {

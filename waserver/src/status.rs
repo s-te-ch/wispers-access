@@ -499,7 +499,7 @@ async fn probe_apps(apps: Vec<ipc::AppData>) -> Vec<AppStatus> {
 async fn probe_upstream(upstream: &str) -> bool {
     tokio::time::timeout(
         UPSTREAM_PROBE_TIMEOUT,
-        tokio::net::TcpStream::connect(upstream),
+        crate::http::connect_upstream(upstream),
     )
     .await
     .map(|r| r.is_ok())
