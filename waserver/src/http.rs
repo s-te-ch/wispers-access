@@ -114,7 +114,7 @@ async fn handle_request(
 
 /// Connect to `host:port`, dialing all its addresses at once and keeping the
 /// first that answers.
-/// 
+///
 /// This works around slowness with `TcpStream::connect` and IPv4-only
 /// upstreams on Windows. There, `localhost` resolves to `::1` first, causing a
 /// 2s timeout before timing out and trying 127.0.0.1.
