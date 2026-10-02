@@ -1,6 +1,9 @@
 //! The native side of the desktop app.
 
 mod activity;
+mod autostart;
+#[cfg(target_os = "macos")]
+mod menu;
 mod secrets;
 mod shares;
 #[cfg(not(target_os = "macos"))]
@@ -22,16 +25,24 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
-        .plugin(tauri_plugin_process::init())
+        .plugin(autostart::plugin())
         .setup(|app| {
             let handle = app.handle().clone();
             match Desktop::start(handle.clone()) {
                 Ok(desktop) => {
                     app.manage(desktop);
-                    // Without the icon a closed window would leave the app
-                    // running with no way back to it, or to quit.
+                    if let Err(e) = autostart::enable_on_first_run(&handle) {
+                        tracing::warn!(
+                            error = format!("{e:#}"),
+                            "could not turn launch at login on"
+                        );
+                    }
+                    // On macOS, install the menu bar; Elsewhere, the tray icon.
+                    #[cfg(target_os = "macos")]
+                    let menus = menu::add(app);
                     #[cfg(not(target_os = "macos"))]
-                    if let Err(e) = tray::add(app) {
+                    let menus = tray::add(app);
+                    if let Err(e) = menus {
                         report_failed_start(&e.into());
                         std::process::exit(1)
                     }
@@ -51,10 +62,11 @@ pub fn run() {
             shares::clipboard_invite,
             shares::join,
             shares::leave,
+            autostart::restart,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
-    app.run(show_on_reopen);
+    app.run(show_window_on);
 }
 
 /// Without a client there is nothing the app can do, and a window that never
@@ -83,15 +95,18 @@ fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
     }
 }
 
-/// The dock icon was clicked while the window was hidden. The event only
+/// Reveal the app window. The window is configured invisible and shown once the
+/// event loop runs (which isnot at all for an autostart at login).
+///
+/// Reopen is the dock icon clicked while the window is hidden. That event only
 /// exists on macOS.
-fn show_on_reopen(app: &tauri::AppHandle, event: tauri::RunEvent) {
-    #[cfg(target_os = "macos")]
-    if let tauri::RunEvent::Reopen { .. } = event {
-        show_window(app);
+fn show_window_on(app: &tauri::AppHandle, event: tauri::RunEvent) {
+    match event {
+        tauri::RunEvent::Ready if !autostart::launched_hidden() => show_window(app),
+        #[cfg(target_os = "macos")]
+        tauri::RunEvent::Reopen { .. } => show_window(app),
+        _ => {}
     }
-    #[cfg(not(target_os = "macos"))]
-    let _ = (app, event);
 }
 
 /// Brings the window back from hidden or minimized, in front.

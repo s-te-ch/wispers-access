@@ -54,6 +54,9 @@ export const join = (inviteCode: string) => invoke<Share>("join", { inviteCode }
 
 export const leave = (shareId: string) => invoke<void>("leave", { shareId });
 
+/** Restarts the app, window showing. Used after a software update. */
+export const restart = () => invoke<void>("restart");
+
 /** Called whenever a stored share changed, so the list is worth reloading. */
 export const onSharesChanged = (handler: () => void): Promise<UnlistenFn> =>
   listen("shares-changed", handler);
