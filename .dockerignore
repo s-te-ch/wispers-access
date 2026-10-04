@@ -9,6 +9,9 @@ demo
 integrations
 *.md
 **/compose.yaml
+desktop/node_modules
+desktop/build
+desktop/src-tauri/gen
 sdk/swift/*.xcframework
 sdk/swift/build
 sdk/swift/.build
