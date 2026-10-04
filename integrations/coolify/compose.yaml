@@ -16,10 +16,10 @@
 #        - compose resource / one-click service: its service name already works
 #   3. Edit the share config below (the `content:` block): the share's name as
 #      guests see it, and one [[app]] per app with `upstream =
-#      "<alias>:<port>"`, <alias> being the stable name from step 2. Coolify
-#      writes the block to a file and mounts it; the file name is the share's
-#      id. Another share is another such volume entry, mounted at
-#      /config/<name>.toml.
+#      "<alias>:<port>"`, <alias> being the stable name from step 2. On the
+#      first deploy Coolify copies the block into a file under the resource's
+#      Storage tab and mounts it; the file name is the share's id. Another
+#      share is another such volume entry, mounted at /config/<name>.toml.
 #   4. Only for a share on Wispers Connect (`kind = "wispers-connect"` instead
 #      of iroh below), set the environment variables (Environment Variables
 #      tab): WC_API_KEY, your Wispers Connect API key; WC_BACKEND (optional),
@@ -29,12 +29,16 @@
 #      so guests join the same hub.
 #   5. Deploy. On each app you want reachable, enable "Connect To Predefined
 #      Network".
-#   6. Mint invites from this resource's Terminal: waserver invite <share>
-#        <device-name> <user@email> waserver status <share>         # share
-#        detail incl. guests waserver revoke <share> <node>  # cut one off
+#   6. Hand out access from this resource's Terminal:
+#        waserver invite <share> <device-name> <user@email>   # invite code + QR
+#        waserver status <share>                               # detail incl. guests
+#        waserver revoke <share> <node>                        # cut one off
 #
-# Changing a share later: edit its block here and redeploy; the container
-# rewrites the share's config from it on every start.
+# Changing a share later: edit the file under the resource's Storage tab, not
+# the block below. Coolify reads the `content:` block only on the first
+# deploy; after that the file is the source and edits here are ignored. Then
+# restart the resource; the container rewrites the share's config from the
+# file on every start, keeping the share's identity and guests.
 #
 # The only Coolify-specific tokens here are the network name 'coolify' and the
 # `content:` key on the file mount (Coolify creates the file). On plain compose,

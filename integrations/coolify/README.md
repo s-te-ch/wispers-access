@@ -18,8 +18,9 @@ private apps — with Coolify's specific gestures named.
 3. **Edit the share config** in the compose file's `content:` block: the share's
    name as guests see it, and one `[[app]]` per app with
    `upstream = "<alias>:<port>"`, `<alias>` being the stable name from step 2.
-   Coolify writes the block to a file and mounts it at `/config/team.toml`; the
-   file name is the share's id. Another share is another such volume entry.
+   On the first deploy Coolify copies the block into a file under the
+   resource's **Storage** tab and mounts it at `/config/team.toml`; the file
+   name is the share's id. Another share is another such volume entry.
 4. **Wispers Connect only:** a share with `kind = "wispers-connect"` instead
    of iroh needs the env var `WC_API_KEY` (Environment Variables tab), your
    Wispers Connect API key. `WC_BACKEND` is optional, for a self-hosted hub.
@@ -46,13 +47,16 @@ the container.
 
 ## Notes
 
-- **Image:** `ghcr.io/s-te-ch/wispers/access/waserver` (multi-arch: amd64 + arm64).
-  The ghcr package is currently **Internal**, so Coolify needs registry credentials
-  to pull it (Server → Registries, or `docker login ghcr.io` on the host) until the
-  package goes public.
-- **Adding an app:** add an `[[app]]` block to the share's `content:`, tick the
-  app's "Connect To Predefined Network", redeploy. No new container. A second
-  share is a second file mount at `/config/<name>.toml`.
+- **Image:** `ghcr.io/s-te-ch/wispers/access/waserver` (multi-arch: amd64 + arm64),
+  public, no registry credentials needed.
+- **Changing a share:** edit its file under the resource's **Storage** tab, then
+  restart the resource. Coolify reads the compose file's `content:` block only
+  on the first deploy; after that the file is the source and edits to the block
+  are ignored. The container rewrites the share's config from the file on every
+  start, and the share's identity and guests survive the restart.
+- **Adding an app:** add an `[[app]]` block to that file, tick the app's
+  "Connect To Predefined Network", restart. No new container. A second share
+  is a second file mount at `/config/<name>.toml`.
 - **Redeploys are safe:** the alias (or service name) survives app redeploys, so
   the share keeps working without touching this resource. Verified against
-  Coolify 4.1.2.
+  Coolify 4.3.23.
