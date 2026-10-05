@@ -6,7 +6,7 @@
 
 use crate::config::ShareConfig;
 use crate::protocol::{Peer, StreamContext};
-use crate::storage::{self, Redemption};
+use crate::storage::{self, Redemption, TransportKind};
 use anyhow::Result;
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, Limited, StreamBody, combinators::BoxBody};
@@ -63,11 +63,9 @@ async fn route(
     }
 
     let response = match (req.method(), req.uri().path()) {
-        (&Method::GET, wire::SHARE_PATH) => get_share(&req, &ctx.config),
+        (&Method::GET, wire::SHARE_PATH) => get_share(&req, &ctx),
         (&Method::GET, wire::EVENTS_PATH) => get_events(&ctx.events),
-        (&Method::POST, wire::ACTIVATION_PATH) => {
-            post_activation(req, &ctx.db, &peer.peer_id, &ctx.config).await
-        }
+        (&Method::POST, wire::ACTIVATION_PATH) => post_activation(req, &ctx, &peer.peer_id).await,
         (&Method::DELETE, wire::GUEST_PATH) => delete_guest(&ctx.db, &peer.peer_id),
         (_, wire::SHARE_PATH | wire::EVENTS_PATH | wire::ACTIVATION_PATH | wire::GUEST_PATH) => {
             error(StatusCode::METHOD_NOT_ALLOWED, "method not allowed")
@@ -80,8 +78,8 @@ async fn route(
 /// The share config, stripped down to what a guest node cares about, with the
 /// config hash as a strong entity tag so a guest that is up to date gets a 304
 /// and no body.
-fn get_share(req: &Request<Incoming>, config: &ShareConfig) -> Response<BoxedBody> {
-    let hash = ConfigHash(config.config_hash());
+fn get_share(req: &Request<Incoming>, ctx: &StreamContext) -> Response<BoxedBody> {
+    let hash = ConfigHash(ctx.config.config_hash());
     let up_to_date = req
         .headers()
         .get(hyper::header::IF_NONE_MATCH)
@@ -96,15 +94,16 @@ fn get_share(req: &Request<Incoming>, config: &ShareConfig) -> Response<BoxedBod
             .body(empty())
             .expect("static response is valid");
     }
-    share_response(builder, config)
+    share_response(builder, &ctx.config, ctx.transport)
 }
 
 /// A 200 with the share as JSON.
 fn share_response(
     builder: hyper::http::response::Builder,
     config: &ShareConfig,
+    transport: TransportKind,
 ) -> Response<BoxedBody> {
-    let share_info = share_info(config);
+    let share_info = share_info(config, transport);
     let body = serde_json::to_vec(&share_info).expect("ShareInfo serialises");
     builder
         .status(StatusCode::OK)
@@ -115,11 +114,11 @@ fn share_response(
 
 /// Strip down a ShareInfo to the part a guest node needs to know,
 /// i.e. leave out upstreams.
-fn share_info(config: &ShareConfig) -> ShareInfo {
+fn share_info(config: &ShareConfig, transport: TransportKind) -> ShareInfo {
     ShareInfo {
         config_hash: ConfigHash(config.config_hash()),
         name: config.name.clone(),
-        transport: config.transport.kind().as_str().to_owned(),
+        transport: transport.as_str().to_owned(),
         apps: config
             .apps
             .iter()
@@ -139,10 +138,10 @@ const MAX_ACTIVATION_BODY: usize = 1024;
 /// share config.
 async fn post_activation(
     req: Request<Incoming>,
-    db: &storage::StateDb,
+    ctx: &StreamContext,
     peer_id: &str,
-    config: &ShareConfig,
 ) -> Response<BoxedBody> {
+    let (db, config) = (&ctx.db, &ctx.config);
     let body = match Limited::new(req.into_body(), MAX_ACTIVATION_BODY)
         .collect()
         .await
@@ -168,6 +167,7 @@ async fn post_activation(
                     .header(hyper::header::ETAG, hash.etag())
                     .header(hyper::header::CACHE_CONTROL, "no-cache"),
                 config,
+                ctx.transport,
             )
         }
         Ok(Redemption::Refused(why)) => refuse_activation(peer_id, why),

@@ -21,10 +21,11 @@ private apps — with Coolify's specific gestures named.
    On the first deploy Coolify copies the block into a file under the
    resource's **Storage** tab and mounts it at `/config/team.toml`; the file
    name is the share's id. Another share is another such volume entry.
-4. **Wispers Connect only:** a share with `kind = "wispers-connect"` instead
-   of iroh needs the env var `WC_API_KEY` (Environment Variables tab), your
-   Wispers Connect API key. `WC_BACKEND` is optional, for a self-hosted hub.
-   An iroh share needs neither.
+4. **Wispers Connect only:** a share is on iroh unless its block has a
+   `[transport]` section with `kind = "wispers-connect"`. That one needs the
+   env var `WC_API_KEY` (Environment Variables tab), your Wispers Connect API
+   key. `WC_BACKEND` is optional, for a self-hosted hub. An iroh share needs
+   neither.
 5. **Expose the apps privately.** On each app you want reachable, enable
    **"Connect To Predefined Network"** so it joins the `coolify` network. Give it **no
    domain and no published ports** — it stays off the public Internet, reachable only

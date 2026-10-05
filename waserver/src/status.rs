@@ -4,10 +4,10 @@
 //! `waserver status <share>`. Both forms gather into the same serializable
 //! report, so `--json` and the human rendering never disagree.
 
-use crate::config::{AppKind, ShareConfig, TransportConfig};
+use crate::config::{AppKind, ShareConfig};
 use crate::ipc;
 use crate::iroh_transport;
-use crate::storage;
+use crate::storage::{self, TransportKind};
 use crate::wcbe;
 use crate::wispers_connect_transport;
 use anyhow::{Context, Result};
@@ -23,8 +23,8 @@ pub async fn report_on_share(share: &str, json: bool) -> Result<()> {
     if !storage::ShareDir::new(share)?.exists() {
         anyhow::bail!("Share {} is not initialised", share);
     }
-    let loaded = load_share(share).map_err(|e| format!("{:#}", e));
-    let share_status = gather_share(share, loaded).await;
+    let stored = load_stored_share(share).map_err(|e| format!("{:#}", e));
+    let share_status = gather_share(share, stored).await;
     if json {
         println!("{}", serde_json::to_string_pretty(&share_status)?);
     } else {
@@ -102,7 +102,7 @@ struct ShareStatus {
     invites_error: Option<String>,
 }
 
-/// What only one transport has, tagged by `kind` as in `share.toml`.
+/// What only one transport has, tagged by `kind`.
 #[derive(Serialize)]
 #[serde(
     tag = "kind",
@@ -197,29 +197,31 @@ async fn gather_fleet() -> Result<StatusReport> {
     let mut names = storage::list_shares()?;
     names.sort();
     // Load every share once, up front; the two gathers below share the result.
-    let loaded: Vec<(String, Result<Loaded, String>)> = names
+    let stored: Vec<(String, Result<StoredShare, String>)> = names
         .into_iter()
         .map(|name| {
-            let l = load_share(&name).map_err(|e| format!("{:#}", e));
+            let l = load_stored_share(&name).map_err(|e| format!("{:#}", e));
             (name, l)
         })
         .collect();
-    let (shares, groups_quota) = tokio::join!(gather_shares(&loaded), gather_groups_quota(&loaded));
+    let (shares, groups_quota) = tokio::join!(gather_shares(&stored), gather_groups_quota(&stored));
     Ok(StatusReport {
         shares: shares?,
         groups_quota,
     })
 }
 
-async fn gather_shares(loaded: &[(String, Result<Loaded, String>)]) -> Result<Vec<ShareStatus>> {
+async fn gather_shares(
+    stored: &[(String, Result<StoredShare, String>)],
+) -> Result<Vec<ShareStatus>> {
     // Query all shares concurrently.
     let mut tasks = tokio::task::JoinSet::new();
-    for (i, (name, l)) in loaded.iter().enumerate() {
+    for (i, (name, s)) in stored.iter().enumerate() {
         let name = name.clone();
-        let l = l.clone();
-        tasks.spawn(async move { (i, gather_share(&name, l).await) });
+        let s = s.clone();
+        tasks.spawn(async move { (i, gather_share(&name, s).await) });
     }
-    let mut shares: Vec<Option<ShareStatus>> = loaded.iter().map(|_| None).collect();
+    let mut shares: Vec<Option<ShareStatus>> = stored.iter().map(|_| None).collect();
     while let Some(joined) = tasks.join_next().await {
         let (i, share) = joined.context("status task failed")?;
         shares[i] = Some(share);
@@ -233,7 +235,7 @@ async fn gather_shares(loaded: &[(String, Result<Loaded, String>)]) -> Result<Ve
 /// domain). `None` when no query succeeded (connectivity trouble already
 /// surfaces per share as `guestsError`).
 async fn gather_groups_quota(
-    loaded: &[(String, Result<Loaded, String>)],
+    stored: &[(String, Result<StoredShare, String>)],
 ) -> Option<Vec<GroupsQuota>> {
     struct Target {
         api_base: String,
@@ -242,18 +244,11 @@ async fn gather_groups_quota(
         shares: Vec<String>,
     }
     let mut targets: Vec<Target> = Vec::new();
-    for (name, l) in loaded {
-        let Ok(Loaded {
-            config,
-            wcs: Some(wcs),
-            ..
-        }) = l
-        else {
+    for (name, s) in stored {
+        let Ok(StoredShare { wcs: Some(wcs), .. }) = s else {
             continue;
         };
-        let TransportConfig::WispersConnect { backend } = &config.transport else {
-            continue;
-        };
+        let backend = &wcs.backend;
         let api_base = wcbe::api_base(backend.as_deref());
         match targets
             .iter_mut()
@@ -284,17 +279,14 @@ async fn gather_groups_quota(
     (!quotas.is_empty()).then_some(quotas)
 }
 
-async fn gather_share(name: &str, loaded: Result<Loaded, String>) -> ShareStatus {
-    let (loaded, config_error) = match loaded {
-        Ok(l) => (Some(l), None),
+async fn gather_share(name: &str, stored: Result<StoredShare, String>) -> ShareStatus {
+    let (stored, config_error) = match stored {
+        Ok(s) => (Some(s), None),
         Err(e) => (None, Some(e)),
     };
-    let config = loaded.as_ref().map(|l| &l.config);
-    let wcs = loaded.as_ref().and_then(|l| l.wcs.as_ref());
-    let (server, report) = tokio::join!(
-        query_server(name, config),
-        query_transport(config, wcs, loaded.as_ref().and_then(|l| l.state.as_ref()))
-    );
+    let config = stored.as_ref().map(|s| &s.config);
+    let (server, report) =
+        tokio::join!(query_server(name, config), query_transport(stored.as_ref()));
     let (server, live_guests, served_apps) = server;
     let (mut guests, guests_error) = match report.guests {
         Ok(g) => (Some(g), None),
@@ -351,37 +343,44 @@ pub(crate) struct TransportReport {
     pub(crate) transport: Option<TransportStatus>,
 }
 
-async fn query_transport(
-    config: Option<&ShareConfig>,
-    wcs: Option<&storage::WispersConnectState>,
-    state: Option<&storage::StateDb>,
-) -> TransportReport {
-    match config.map(|c| &c.transport) {
-        Some(TransportConfig::WispersConnect { backend }) => {
-            wispers_connect_transport::report(backend.as_deref(), wcs).await
-        }
-        Some(TransportConfig::Iroh {}) => iroh_transport::report(state),
-        None => {
-            let err = "share config failed to load";
-            TransportReport {
-                guests: Err(err.to_owned()),
-                invites: Err(err.to_owned()),
-                transport: None,
-            }
-        }
+async fn query_transport(stored: Option<&StoredShare>) -> TransportReport {
+    let err = match stored {
+        Some(StoredShare {
+            transport: Some(TransportKind::WispersConnect),
+            wcs,
+            ..
+        }) => return wispers_connect_transport::report(wcs.as_ref()).await,
+        Some(StoredShare {
+            transport: Some(TransportKind::Iroh),
+            state,
+            ..
+        }) => return iroh_transport::report(state.as_ref()),
+        Some(StoredShare {
+            transport: None, ..
+        }) => "share has no state database (init incomplete?)",
+        None => "share config failed to load",
+    };
+    TransportReport {
+        guests: Err(err.to_owned()),
+        invites: Err(err.to_owned()),
+        transport: None,
     }
 }
 
+/// A share as its directory holds it: the config file and, once `init` got
+/// that far, the state database and what the status needs from it.
 #[derive(Clone)]
-struct Loaded {
+struct StoredShare {
     config: ShareConfig,
+    /// `None` without a state database, like `state`.
+    transport: Option<TransportKind>,
     wcs: Option<storage::WispersConnectState>,
     state: Option<storage::StateDb>,
 }
 
 /// A config that fails to load is an error; a missing `state.db` (an `init`
 /// that did not complete) only leaves `wcs` empty, so the apps still show.
-fn load_share(name: &str) -> Result<Loaded> {
+fn load_stored_share(name: &str) -> Result<StoredShare> {
     let dir = storage::ShareDir::new(name)?;
     let config = dir.load_config()?;
     let state = match dir.open_state() {
@@ -389,11 +388,16 @@ fn load_share(name: &str) -> Result<Loaded> {
         Err(storage::Error::NotInitialised(_)) => None,
         Err(e) => return Err(e.into()),
     };
-    let wcs = match &state {
-        Some(state) => state.wispers_connect_state()?,
-        None => None,
+    let (transport, wcs) = match &state {
+        Some(state) => (Some(state.transport()?), state.wispers_connect_state()?),
+        None => (None, None),
     };
-    Ok(Loaded { config, wcs, state })
+    Ok(StoredShare {
+        config,
+        transport,
+        wcs,
+        state,
+    })
 }
 
 /// Overlay the server's live view onto the guest list: while the daemon

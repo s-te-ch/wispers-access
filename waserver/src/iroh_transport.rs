@@ -18,7 +18,7 @@ use wispers_access_wire as wire;
 
 /// `init` sets up a new share with iroh as the transport.
 pub fn init(rollback: &mut Rollback, dir: &storage::ShareDir, config_text: &str) -> Result<()> {
-    let state = dir.create(config_text)?;
+    let state = dir.create(config_text, storage::TransportKind::Iroh)?;
     rollback.push("share directory", {
         let dir = dir.clone();
         async move { dir.delete().map_err(Into::into) }

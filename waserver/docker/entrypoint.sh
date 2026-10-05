@@ -4,10 +4,11 @@
 #
 # 1. Find the desired shares: one `/config/<name>.toml` per share, using the
 #    same format as the `share.toml` files that waserver itself writes (name,
-#    transport, apps).
+#    apps). A `[transport]` section picks the transport for `init`; without
+#    one the share is on iroh.
 # 2. `waserver init` any shares that don't exist yet. Identity (keys, and on
 #    Wispers Connect the connectivity group) is created once and then lives on
-#    the /data volume.
+#    the /data volume, together with the transport it is for.
 # 3. Copy each of the TOML files over its share's `share.toml`, so the mounted
 #    config is the source of truth on every start.
 # 4. Generate one supervisord program per share, each running `waserver serve`.
@@ -37,16 +38,12 @@ for file in "$CONFIG_DIR"/*.toml; do
     exit 1
   fi
   transport="$(toml_transport "$file")"
-  if [[ -z "$transport" ]]; then
-    log "ERROR: $file has no [transport] section with a 'kind = \"…\"' line (iroh or wispers-connect)"
-    exit 1
-  fi
-  NAMES+=("$name"); DISPLAYS+=("$display"); TRANSPORTS+=("$transport")
+  NAMES+=("$name"); DISPLAYS+=("$display"); TRANSPORTS+=("${transport:-iroh}")
 done
 
 if [[ ${#NAMES[@]} -eq 0 ]]; then
   log "ERROR: no shares configured — mount one share config per share at $CONFIG_DIR/<name>.toml"
-  log "       (the format 'waserver init' writes: name, [transport], one [[app]] per app)"
+  log "       (the format 'waserver init' writes: name, one [[app]] per app)"
   exit 1
 fi
 

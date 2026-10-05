@@ -6,11 +6,11 @@
 # `name` is the share as guests see it. Keep each app's `id` stable, guest
 # nodes refer to it. `upstream` is host:port on the Docker network (a compose
 # service is just its name), or :port for the container itself.
+#
+# The share is on iroh unless a `[transport]` section with
+# `kind = "wispers-connect"` asks for Wispers Connect when it is created.
 
 name = "WS Echo Demo"
-
-[transport]
-kind = "iroh"
 
 [[app]]
 id = "echo"
