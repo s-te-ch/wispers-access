@@ -69,12 +69,16 @@ fn editor_command() -> std::process::Command {
     std::process::Command::new(program)
 }
 
-/// Prints the prompt and reads one line. Empty or `y` means yes.
+/// Prints the prompt and reads one line. Empty or `y` means yes. A closed
+/// stdin means no, so a script that breaks the file cannot loop forever.
 fn asks_yes(prompt: &str) -> Result<bool> {
     print!("{prompt}");
     io::stdout().flush()?;
     let mut line = String::new();
-    io::stdin().lock().read_line(&mut line)?;
+    if io::stdin().lock().read_line(&mut line)? == 0 {
+        println!();
+        return Ok(false);
+    }
     let answer = line.trim().to_ascii_lowercase();
     Ok(answer.is_empty() || answer == "y" || answer == "yes")
 }

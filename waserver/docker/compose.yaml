@@ -1,47 +1,39 @@
-# Generic local test rig for the waserver container — a same-stack docker compose:
-# a private app (no published ports) plus the waserver container, both on one
-# network, the container reaching the app by service name (see the share's
-# config, share.example.toml). Works on any box with
-# docker compose; no orchestrator needed. (For Coolify and similar platforms, see
-# integrations/<platform>/.)
+# The waserver container next to an app in the same stack: Excalidraw, with no
+# published ports, reachable only through the share. Uses the released image;
+# `docker compose up --build` builds waserver from this checkout instead.
 #
-#   docker compose -f waserver/docker/compose.yaml up --build
+#   docker compose up -d
+#   docker compose exec waserver waserver invite demo "My phone" me@example.com
 #
-# Then, in another terminal:
-#   docker compose -f waserver/docker/compose.yaml exec waserver waserver status
-#   docker compose -f waserver/docker/compose.yaml exec waserver waserver invite demo alice alice@example.com
-#
-# Redeem that invite from a Wispers client to reach the ws-echo page/socket through
-# the container — proxied out of the stack, never exposed directly.
+# Redeem the invite from a Wispers Access client: the whiteboard opens with
+# the Wispers logo drawn on it. The share's apps are in demo.toml.
 
-name: waserver-docker-dev
+name: wispers-demo
 
 services:
-  app:
-    # The "private" upstream app. No `ports:` — it stays on the internal network,
-    # exactly like a service you host but don't expose.
-    image: python:3-slim
-    working_dir: /app
+  excalidraw:
+    image: excalidraw/excalidraw:latest
     volumes:
-      - ./ws-echo.py:/app/ws-echo.py:ro
-    environment:
-      WS_ECHO_HOST: "0.0.0.0"     # reachable from the waserver container
-    command: ["python3", "ws-echo.py", "8080"]
+      # First visit opens the logo; see the file.
+      - ./excalidraw.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./wispers.excalidraw:/usr/share/nginx/html/wispers.excalidraw:ro
 
   waserver:
+    image: ghcr.io/s-te-ch/wispers/access/waserver:latest
     build:
       context: ../..              # repo root, so the Rust workspace is in scope
       dockerfile: waserver/docker/Dockerfile
     environment:
-      # Only a share on Wispers Connect needs this (see share.example.toml).
+      # The share the container creates on its first start; its name comes
+      # from demo.toml. iroh unless SHARE_TRANSPORT=wispers-connect, which
+      # also needs WC_API_KEY.
+      SHARE_ID: demo
       WC_API_KEY: ${WC_API_KEY:-}
     volumes:
-      - waserver-state:/data      # persists share identity across restarts
-      # One share config per share at /config/<name>.toml; the file name is
-      # the share's id.
-      - ./share.example.toml:/config/demo.toml:ro
+      - waserver-state:/data      # share identity and state, across restarts
+      - ./demo.toml:/config/demo.toml   # the share's config, see the file
     depends_on:
-      - app
+      - excalidraw
 
 volumes:
   waserver-state:
