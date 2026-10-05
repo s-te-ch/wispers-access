@@ -50,13 +50,22 @@ enum Command {
     },
     /// Run the server for the given share in the foreground.
     Serve { share: String },
-    /// Runs the server for the given share in the background.
-    Start { share: String },
-    /// Stop the server for the given share.
-    Stop { share: String },
+    /// Run the server for a share in the background.
+    Start {
+        /// Share ID. All shares if omitted.
+        share: Option<String>,
+    },
+    /// Stop a share's server.
+    Stop {
+        /// Share ID. All shares if omitted.
+        share: Option<String>,
+    },
     /// Reload a share's configuration (`share.toml`). A broken configuration
     /// leaves the running config in place.
-    Reload { share: String },
+    Reload {
+        /// Share ID. All shares if omitted.
+        share: Option<String>,
+    },
     /// Shows the status of all shares, or a detailed view of one share.
     Status {
         /// ID of a share to show in detail.
@@ -65,12 +74,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Print the logs of the given server to stdout.
+    /// Print a share's server logs to stdout.
     Logs {
         /// Don't stop at EOF, follow log entries as they're written.
         #[arg(short = 'f', long)]
         follow: bool,
-        share: String,
+        /// Share ID. All shares if omitted.
+        share: Option<String>,
     },
     /// Generate a guest node invite code.
     Invite {
@@ -111,8 +121,11 @@ fn main() -> Result<()> {
     // Parse the command line.
     let cli = Cli::parse();
 
-    // Daemonising must happen before starting tokio.
-    if let Command::Start { .. } = &cli.command {
+    // Daemonising must happen before starting tokio, so if the command is
+    // `waserver start <share>`, do it now. Note that the for-all-shares version
+    // (`waserver start`) stays in the foreground and spawns one `waserver start
+    // <share>` for each share.
+    if let Command::Start { share: Some(_) } = &cli.command {
         start_daemon()?;
     }
 
@@ -153,20 +166,23 @@ async fn async_main(command: Command) -> Result<()> {
             let _log = logging::init_foreground(&share)?;
             serving::serve(&share).await
         }
-        Command::Start { share } => {
+        Command::Start { share: Some(share) } => {
             let _log = logging::init_background(&share)?;
             serving::serve(&share)
                 .await
                 // At this point, stderr is gone, so we write the error to the log.
                 .inspect_err(|e| tracing::error!(error = format!("{e:#}"), "server failed"))
         }
-        Command::Stop { share } => stop(&share).await,
-        Command::Reload { share } => reload(&share).await,
+        Command::Start { share: None } => on_every_share(start_share).await,
+        Command::Stop { share: Some(share) } => stop(&share).await,
+        Command::Stop { share: None } => on_every_share(stop_share).await,
+        Command::Reload { share: Some(share) } => reload(&share).await,
+        Command::Reload { share: None } => on_every_share(reload_share).await,
         Command::Status { share, json } => match share {
             Some(share) => status::report_on_share(&share, json).await,
             None => status::report_on_fleet(json).await,
         },
-        Command::Logs { follow, share } => logs(follow, &share),
+        Command::Logs { follow, share } => logs(follow, share.as_deref()),
         Command::Invite {
             share,
             node_name,
@@ -175,6 +191,38 @@ async fn async_main(command: Command) -> Result<()> {
         } => invite(&share, &node_name, &user_id, png.as_deref()).await,
         Command::Revoke { share, number } => revoke(&share, number).await,
     }
+}
+
+/// Outcome of a per-share action as used by `on_every_share`.
+enum ActionOutcome {
+    NotRunning,
+    Done(String),
+}
+
+/// Runs `action` on every share, in name order, one line per share. Tries
+/// them all before failing on any share's error.
+async fn on_every_share(action: impl AsyncFn(&str) -> Result<ActionOutcome>) -> Result<()> {
+    let mut names = storage::list_shares()?;
+    names.sort();
+    if names.is_empty() {
+        println!("No shares.");
+        return Ok(());
+    }
+    let mut failed = 0;
+    for name in &names {
+        match action(name).await {
+            Ok(ActionOutcome::Done(what)) => println!("{name}: {what}"),
+            Ok(ActionOutcome::NotRunning) => println!("{name}: not running"),
+            Err(e) => {
+                eprintln!("{name}: {e:#}");
+                failed += 1;
+            }
+        }
+    }
+    if failed > 0 {
+        anyhow::bail!("{failed} of {} share(s) failed", names.len());
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -235,14 +283,38 @@ fn start_daemon() -> Result<()> {
     std::process::exit(0);
 }
 
+/// `start` action for `on_every_share`. Spawns `waserver start <share>`, which
+/// daemonises itself, unless a server is running already.
+async fn start_share(share: &str) -> Result<ActionOutcome> {
+    if ipc::Client::connect(share).await.is_ok() {
+        return Ok(ActionOutcome::Done("already running".to_owned()));
+    }
+    let exe = std::env::current_exe().context("failed to get current executable path")?;
+    let status = std::process::Command::new(exe)
+        .args(["start", share])
+        .status()
+        .context("failed to run `waserver start`")?;
+    if !status.success() {
+        anyhow::bail!("`waserver start {share}` failed ({status})");
+    }
+    Ok(ActionOutcome::Done("started".to_owned()))
+}
+
 async fn stop(share: &str) -> Result<()> {
+    match stop_share(share).await? {
+        ActionOutcome::Done(_) => println!("Success!"),
+        ActionOutcome::NotRunning => anyhow::bail!("cannot connect to server for share {}", share),
+    }
+    Ok(())
+}
+
+/// `stop` action for `on_every_share`.
+async fn stop_share(share: &str) -> Result<ActionOutcome> {
     let Ok(mut client) = ipc::Client::connect(share).await else {
-        anyhow::bail!("cannot connect to server for share {}", share);
+        return Ok(ActionOutcome::NotRunning);
     };
     match client.request(&ipc::Request::Shutdown).await {
-        Ok(ipc::Response::Success { .. }) => {
-            println!("Success!");
-        }
+        Ok(ipc::Response::Success { .. }) => Ok(ActionOutcome::Done("stopped".to_owned())),
         Ok(ipc::Response::Error { error, .. }) => {
             anyhow::bail!("error stopping server: {}", error);
         }
@@ -250,12 +322,20 @@ async fn stop(share: &str) -> Result<()> {
             anyhow::bail!("error sending command to server: {}", e);
         }
     }
-    Ok(())
 }
 
 async fn reload(share: &str) -> Result<()> {
+    match reload_share(share).await? {
+        ActionOutcome::Done(what) => println!("{what}"),
+        ActionOutcome::NotRunning => anyhow::bail!("cannot connect to server for share {}", share),
+    }
+    Ok(())
+}
+
+/// `reload` action for `on_every_share`.
+async fn reload_share(share: &str) -> Result<ActionOutcome> {
     let Ok(mut client) = ipc::Client::connect(share).await else {
-        anyhow::bail!("cannot connect to server for share {}", share);
+        return Ok(ActionOutcome::NotRunning);
     };
     match client.request(&ipc::Request::Reload).await {
         Ok(ipc::Response::Success {
@@ -263,15 +343,12 @@ async fn reload(share: &str) -> Result<()> {
             ..
         }) => {
             let ids: Vec<&str> = r.apps.iter().map(|s| s.id.as_str()).collect();
-            if r.changed {
-                println!("Reloaded. Serving {} app(s): {}", ids.len(), ids.join(", "));
-            } else {
-                println!(
-                    "No change. Serving {} app(s): {}",
-                    ids.len(),
-                    ids.join(", ")
-                );
-            }
+            let verdict = if r.changed { "Reloaded" } else { "No change" };
+            Ok(ActionOutcome::Done(format!(
+                "{verdict}. Serving {} app(s): {}",
+                ids.len(),
+                ids.join(", ")
+            )))
         }
         Ok(ipc::Response::Success { .. }) => {
             anyhow::bail!("unexpected response from server");
@@ -283,71 +360,147 @@ async fn reload(share: &str) -> Result<()> {
             anyhow::bail!("error sending command to server: {}", e);
         }
     }
-    Ok(())
 }
 
-fn logs(follow: bool, share: &str) -> Result<()> {
-    use std::collections::VecDeque;
-    use std::io::{self, Read, Write};
+/// Prints the logs of one share, or of every share with the share's name in
+/// front of each line. With `follow`, keeps printing as the servers log.
+fn logs(follow: bool, share: Option<&str>) -> Result<()> {
+    use std::io::{self, Write};
 
-    let mut stdout = io::stdout().lock();
-    let paths = logging::list_log_files(share)?;
-    let mut paths = VecDeque::from(paths);
-    let Some(mut path) = paths.pop_front() else {
-        eprintln!("No logs for share {}", share);
-        return Ok(());
+    let names = match share {
+        Some(share) => vec![share.to_owned()],
+        None => {
+            let mut names = storage::list_shares()?;
+            names.sort();
+            names
+        }
     };
-    let mut file =
-        std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
-    let mut buf = [0u8; 8192];
-    loop {
-        // Copy the entire file to stdout.
-        loop {
-            let n = file
-                .read(&mut buf)
-                .with_context(|| format!("read {}", path.display()))?;
-            if n == 0 {
-                break;
-            }
-            if let Err(e) = stdout.write_all(&buf[..n]) {
-                if e.kind() == io::ErrorKind::BrokenPipe {
-                    return Ok(());
-                }
-                return Err(e.into());
-            }
+    let mut tails = Vec::new();
+    for name in &names {
+        match LogTail::open(name)? {
+            Some(tail) => tails.push(tail),
+            None => eprintln!("No logs for share {name}"),
         }
-        stdout.flush().ok();
-
-        // End of file. If there's another file in the list, continue with that.
-        if let Some(next) = paths.pop_front() {
-            path = next;
-            file =
-                std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
-            continue;
-        }
-
-        // If we're not in follow mode we're done here.
-        if !follow {
-            break;
-        }
-
-        // Check for newer log files due to log rotation.
-        for new_path in logging::list_log_files(share)? {
-            if new_path > path {
-                paths.push_back(new_path);
-            }
-        }
-        if let Some(next) = paths.pop_front() {
-            path = next;
-            file =
-                std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
-            continue;
-        }
-
-        // Sleep before retry.
-        std::thread::sleep(std::time::Duration::from_millis(200));
     }
-    Ok(())
+    if tails.is_empty() {
+        return Ok(());
+    }
+    let prefixed = share.is_none();
+    let mut stdout = io::stdout().lock();
+    let result = (|| -> Result<()> {
+        loop {
+            for tail in &mut tails {
+                tail.copy_complete_lines(&mut stdout, prefixed)?;
+            }
+            stdout.flush()?;
+            if !follow {
+                for tail in &mut tails {
+                    tail.copy_rest(&mut stdout, prefixed)?;
+                }
+                return Ok(());
+            }
+            for tail in &mut tails {
+                tail.pick_up_rotated_files()?;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    })();
+    match result {
+        // The reader went away (`waserver logs | head`); not an error.
+        Err(e)
+            if e.downcast_ref::<io::Error>()
+                .is_some_and(|e| e.kind() == io::ErrorKind::BrokenPipe) =>
+        {
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+/// A reader over one share's log files, oldest first, that remembers where
+/// it got to.
+struct LogTail {
+    share: String,
+    /// The file being read and those that come after it.
+    path: std::path::PathBuf,
+    file: std::io::BufReader<std::fs::File>,
+    later: std::collections::VecDeque<std::path::PathBuf>,
+    /// A line the writer has not finished yet.
+    partial: Vec<u8>,
+}
+
+impl LogTail {
+    /// `None` for a share without logs.
+    fn open(share: &str) -> Result<Option<Self>> {
+        let mut later = std::collections::VecDeque::from(logging::list_log_files(share)?);
+        let Some(path) = later.pop_front() else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            share: share.to_owned(),
+            file: Self::open_file(&path)?,
+            path,
+            later,
+            partial: Vec::new(),
+        }))
+    }
+
+    /// Writes every complete line not written yet, moving on through the
+    /// files as each one ends.
+    fn copy_complete_lines(&mut self, out: &mut impl std::io::Write, prefixed: bool) -> Result<()> {
+        use std::io::BufRead;
+        loop {
+            let n = self
+                .file
+                .read_until(b'\n', &mut self.partial)
+                .with_context(|| format!("read {}", self.path.display()))?;
+            if self.partial.ends_with(b"\n") {
+                self.write_partial(out, prefixed)?;
+            } else if n == 0 {
+                // At the end of this file. The next one, if there is one,
+                // starts with a new line.
+                let Some(next) = self.later.pop_front() else {
+                    return Ok(());
+                };
+                self.copy_rest(out, prefixed)?;
+                self.file = Self::open_file(&next)?;
+                self.path = next;
+            }
+        }
+    }
+
+    /// Writes an unfinished last line, when nothing more is coming.
+    fn copy_rest(&mut self, out: &mut impl std::io::Write, prefixed: bool) -> Result<()> {
+        if !self.partial.is_empty() {
+            self.partial.push(b'\n');
+            self.write_partial(out, prefixed)?;
+        }
+        Ok(())
+    }
+
+    fn write_partial(&mut self, out: &mut impl std::io::Write, prefixed: bool) -> Result<()> {
+        if prefixed {
+            write!(out, "{}: ", self.share)?;
+        }
+        out.write_all(&self.partial)?;
+        self.partial.clear();
+        Ok(())
+    }
+
+    /// Queues files the daily rotation created since the current one.
+    fn pick_up_rotated_files(&mut self) -> Result<()> {
+        for path in logging::list_log_files(&self.share)? {
+            if path > self.path && !self.later.contains(&path) {
+                self.later.push_back(path);
+            }
+        }
+        Ok(())
+    }
+
+    fn open_file(path: &std::path::Path) -> Result<std::io::BufReader<std::fs::File>> {
+        let file = std::fs::File::open(path).with_context(|| format!("open {}", path.display()))?;
+        Ok(std::io::BufReader::new(file))
+    }
 }
 
 async fn invite(
