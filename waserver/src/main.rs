@@ -1,5 +1,6 @@
 mod config;
 mod daemon;
+mod editing;
 mod guest_api;
 mod http;
 mod initialization;
@@ -67,6 +68,12 @@ enum Command {
     Reload {
         /// Share ID. All shares if omitted.
         share: Option<String>,
+    },
+    /// Open a share's configuration (`share.toml`) in your editor ($VISUAL or
+    /// $EDITOR) and reload the server with it.
+    Edit {
+        /// Share ID.
+        share: String,
     },
     /// Shows the status of all shares, or a detailed view of one share.
     Status {
@@ -180,6 +187,7 @@ async fn async_main(command: Command) -> Result<()> {
         Command::Stop { share: None } => on_every_share(stop_share).await,
         Command::Reload { share: Some(share) } => reload(&share).await,
         Command::Reload { share: None } => on_every_share(reload_share).await,
+        Command::Edit { share } => editing::edit(&share).await,
         Command::Status { share, json } => match share {
             Some(share) => status::report_on_share(&share, json).await,
             None => status::report_on_fleet(json).await,
@@ -259,8 +267,9 @@ async fn reload(share: &str) -> Result<()> {
     Ok(())
 }
 
-/// `reload` action for `on_every_share`.
-async fn reload_share(share: &str) -> Result<ActionOutcome> {
+/// `reload` action for `on_every_share`. pub(crate) because `edit` uses it to
+/// apply the new config.
+pub(crate) async fn reload_share(share: &str) -> Result<ActionOutcome> {
     let Ok(mut client) = ipc::Client::connect(share).await else {
         return Ok(ActionOutcome::NotRunning);
     };
