@@ -85,7 +85,8 @@ waserver init team "Awesome Team"
 ```
 
 This creates a *share* for your team (the apps you share and the people you
-share them with) and prints the path of its `share.toml`. Add the app there:
+share them with) and prints the path of its `share.toml`. Add the app there
+(`waserver edit team` opens the file in your editor):
 
 ```toml
 [[app]]
@@ -100,7 +101,8 @@ Then serve the share (`waserver start team` runs it in the background instead):
 waserver serve team
 ```
 
-Later edits to `share.toml` apply with `waserver reload team`.
+Later edits to `share.toml` apply with `waserver reload team`. `waserver edit
+team` does both in one go.
 
 ### 3. Invite a device
 
