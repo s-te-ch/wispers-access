@@ -114,6 +114,25 @@ pub async fn down(share: &str) -> Result<()> {
     Ok(())
 }
 
+/// Validate and normalize `--backend`
+pub fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
+    let Some(raw) = backend else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim().trim_end_matches('/');
+    // Allow both unset and empty (useful if set via env var).
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    if !trimmed.starts_with("https://") {
+        anyhow::bail!("backend URL must start with https:// (got '{}')", raw);
+    }
+    if trimmed.len() <= "https://".len() {
+        anyhow::bail!("backend URL has no host");
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
 /// Undo stack that allows rolling back `init` steps if a later one failed.
 pub(crate) struct Rollback {
     steps: Vec<(&'static str, Undo)>,
@@ -140,5 +159,25 @@ impl Rollback {
                 eprintln!("Init failed; could not undo the {what} either ({e:#}).");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_backend_requires_https_and_trims() {
+        assert_eq!(normalize_backend(None).unwrap(), None);
+        assert_eq!(
+            normalize_backend(Some("https://h.example.com/")).unwrap(),
+            Some("https://h.example.com".to_owned())
+        );
+        assert!(normalize_backend(Some("http://h.example.com")).is_err());
+        assert!(normalize_backend(Some("h.example.com")).is_err());
+        assert!(normalize_backend(Some("https://")).is_err());
+        // Blank/empty (e.g. an unset dashboard env) is managed, not an error.
+        assert_eq!(normalize_backend(Some("")).unwrap(), None);
+        assert_eq!(normalize_backend(Some("   ")).unwrap(), None);
     }
 }
