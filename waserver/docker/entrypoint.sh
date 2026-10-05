@@ -11,19 +11,37 @@
 #    from the next start on.
 # 3. exec supervisord as PID 1; it owns signal fan-out, restart, and reaping.
 #
-# The share's apps are not configured here: `waserver edit <share>` in the
-# container's shell (see the greeting there) edits the share's `share.toml`
-# and reloads the server.
+# The share's apps are configured in one of two ways: `waserver edit <share>`
+# in the container's shell (see the greeting there) edits the share's config
+# and reloads; or a config file mounted at `/config/<share>.toml`, kept
+# outside the container (e.g. in version control), which becomes the share's
+# `share.toml` (a symlink) right after step 1.
 set -euo pipefail
 
 SUPERVISORD_CONF="/etc/supervisor/supervisord.conf"
 CONF_DIR="/etc/supervisor/conf.d"
+CONFIG_DIR="${CONFIG_DIR:-/config}"
+# Where waserver keeps each share's `share.toml` (its config dir, under $HOME).
+SHARES_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/waserver/shares"
 
 # The share this container creates on its first start.
 SHARE_ID="${SHARE_ID:-default}"
 SHARE_TRANSPORT="${SHARE_TRANSPORT:-iroh}"
 
 log() { printf '[entrypoint] %s\n' "$*"; }
+
+# The `name = "…"` of a share config, for SHARE_NAME when a config is mounted.
+toml_name() { sed -n -E '/^\[/q; s/^name[[:space:]]*=[[:space:]]*["'"'"'](.*)["'"'"'][[:space:]]*$/\1/p' "$1" | head -1; }
+
+# A share whose config was mounted earlier but is not now: its `share.toml` is
+# a dangling symlink, so waserver does not see the share and `init` would fail
+# on the directory. Say what happened instead.
+for link in "$SHARES_DIR"/*/share.toml; do
+  if [[ -L "$link" && ! -e "$link" ]]; then
+    log "ERROR: $link points to $(readlink "$link"), which is not mounted any more; mount it again, or replace the link with a file"
+    exit 1
+  fi
+done
 
 # --- Initialised shares (names only; `status` reads them off disk) ---------
 # The JSON output is waserver's stable interface.
@@ -34,6 +52,9 @@ is_existing() { grep -qxF "$1" <<<"$existing"; }
 if is_existing "$SHARE_ID"; then
   log "share '$SHARE_ID' already initialised"
 else
+  if [[ -z "${SHARE_NAME:-}" && -f "$CONFIG_DIR/$SHARE_ID.toml" ]]; then
+    SHARE_NAME="$(toml_name "$CONFIG_DIR/$SHARE_ID.toml")"
+  fi
   if [[ -z "${SHARE_NAME:-}" ]]; then
     log "ERROR: SHARE_NAME is not set; it is the share's name as guests see it, e.g. SHARE_NAME=\"Awesome Team\""
     exit 1
@@ -50,6 +71,13 @@ else
   waserver init "${args[@]}" "$SHARE_ID" "$SHARE_NAME"
   existing="$(waserver status --json 2>/dev/null | jq -r '.shares[].name' || true)"
 fi
+
+# --- Mounted configs become the shares' share.toml -------------------------
+while read -r name; do
+  [[ -n "$name" && -f "$CONFIG_DIR/$name.toml" ]] || continue
+  ln -sfn "$CONFIG_DIR/$name.toml" "$SHARES_DIR/$name/share.toml"
+  log "share '$name': config is $CONFIG_DIR/$name.toml"
+done <<<"$existing"
 
 # --- Generate one supervised 'serve' per share ----------------------------
 mkdir -p "$CONF_DIR"
