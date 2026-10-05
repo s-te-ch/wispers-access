@@ -61,20 +61,9 @@ Download the archive for your platform (Linux, macOS or Windows) from the
 [releases page](https://github.com/s-te-ch/wispers-access/releases) and put
 `waserver` on your `PATH`.
 
-Prefer containers? Write the share config from step 2 to a file, say
-`team.toml`, with `upstream = "host.docker.internal:3000"`, and this one command
-replaces steps 1 and 2 (see [waserver/docker](waserver/docker/README.md) for
-details):
-
-```sh
-docker run -d --name waserver --restart unless-stopped \
-  -v "$PWD/team.toml:/config/team.toml:ro" \
-  --add-host host.docker.internal:host-gateway \
-  -v waserver-data:/data \
-  ghcr.io/s-te-ch/wispers/access/waserver:latest
-```
-
-Then prefix the commands in step 3 with `docker exec waserver`.
+Prefer containers? Follow quick start in the [container
+README](waserver/docker/README.md) instead. For Coolify, see
+[integrations/coolify](integrations/coolify/README.md).
 
 ### 2. Share your app
 

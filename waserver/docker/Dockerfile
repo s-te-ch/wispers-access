@@ -1,9 +1,10 @@
 # syntax=docker/dockerfile:1
 #
 # Wispers Access — the waserver container image: the `waserver` binary plus a
-# process supervisor. One container hosts many shares — the entrypoint reconciles
-# the desired shares from config and runs one `waserver serve` per share under
-# supervisord, which owns signal forwarding, restart, and zombie reaping.
+# process supervisor. The entrypoint creates the share the environment names on
+# the first start and runs one `waserver serve` per share under supervisord,
+# which owns signal forwarding, restart, and zombie reaping. Apps are added
+# with `waserver edit` in the container's shell.
 #
 # Build context is the repo root (so the Rust workspace is available):
 #     docker build -f waserver/docker/Dockerfile -t ghcr.io/s-te-ch/wispers/access/waserver .
@@ -30,17 +31,26 @@ RUN cargo build --release -p waserver
 # --- runtime --------------------------------------------------------------
 FROM debian:bookworm-slim
 # jq: the entrypoint and healthcheck consume `waserver status --json`.
+# nano, vim-tiny, mg: for `waserver edit` in the container's shell; nano is
+# the default (`sensible-editor`, which waserver uses, follows the `editor`
+# alternative unless EDITOR or `select-editor` say otherwise).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-         supervisor ca-certificates bash jq \
-    && rm -rf /var/lib/apt/lists/*
+         supervisor ca-certificates bash jq nano vim-tiny mg sensible-utils \
+    && rm -rf /var/lib/apt/lists/* \
+    && update-alternatives --set editor /bin/nano
 
 COPY --from=builder /src/target/release/waserver /usr/local/bin/waserver
 COPY waserver/docker/entrypoint.sh    /usr/local/bin/entrypoint.sh
 COPY waserver/docker/healthcheck.sh   /usr/local/bin/healthcheck.sh
 COPY waserver/docker/supervisord.conf /etc/supervisor/supervisord.conf
+COPY waserver/docker/greeting.sh      /etc/waserver-greeting.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/healthcheck.sh \
-    && mkdir -p /etc/supervisor/conf.d
+    && mkdir -p /etc/supervisor/conf.d \
+    && echo '. /etc/waserver-greeting.sh' >> /etc/bash.bashrc
+# Interactive `sh` reads $ENV; bash reads /etc/bash.bashrc. Either way the
+# shell greets with the shares' state and the commands to run.
+ENV ENV=/etc/waserver-greeting.sh
 
 # All persistent state (per-share identity: keys + registration), plus IPC
 # sockets and logs, live under $HOME. Mount a volume at /data to persist the

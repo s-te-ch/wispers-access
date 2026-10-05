@@ -1,14 +1,14 @@
 # Generic local test rig for the waserver container — a same-stack docker compose:
 # a private app (no published ports) plus the waserver container, both on one
-# network, the container reaching the app by service name (see the share's
-# config, share.example.toml). Works on any box with
+# network, the container reaching the app by service name. Works on any box with
 # docker compose; no orchestrator needed. (For Coolify and similar platforms, see
 # integrations/<platform>/.)
 #
 #   docker compose -f waserver/docker/compose.yaml up --build
 #
-# Then, in another terminal:
-#   docker compose -f waserver/docker/compose.yaml exec waserver waserver status
+# Then, in another terminal, add the app to the share and invite yourself:
+#   docker compose -f waserver/docker/compose.yaml exec waserver waserver edit demo
+#     ... add:  [[app]]  id = "echo"  upstream = "app:8080"
 #   docker compose -f waserver/docker/compose.yaml exec waserver waserver invite demo alice alice@example.com
 #
 # Redeem that invite from a Wispers client to reach the ws-echo page/socket through
@@ -33,13 +33,14 @@ services:
       context: ../..              # repo root, so the Rust workspace is in scope
       dockerfile: waserver/docker/Dockerfile
     environment:
-      # Only a share on Wispers Connect needs this (see share.example.toml).
+      # The share the container creates on its first start: its id (the name
+      # in commands) and its name as guests see it. iroh unless
+      # SHARE_TRANSPORT=wispers-connect, which also needs WC_API_KEY.
+      SHARE_ID: demo
+      SHARE_NAME: WS Echo Demo
       WC_API_KEY: ${WC_API_KEY:-}
     volumes:
-      - waserver-state:/data      # persists share identity across restarts
-      # One share config per share at /config/<name>.toml; the file name is
-      # the share's id.
-      - ./share.example.toml:/config/demo.toml:ro
+      - waserver-state:/data      # persists share identity and config across restarts
     depends_on:
       - app
 
