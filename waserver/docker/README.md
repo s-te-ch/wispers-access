@@ -1,18 +1,36 @@
 # waserver container
 
 This is the containerised version of waserver - the binary plus a process
-supervisor. Unlike a normal waserver, it can reach each shared app by
-service-DNS. You don't have to expose their ports to share them.
+supervisor.
 
-It's provider-agnostic — it runs in any docker-compose stack, plain `docker
-run`, or an orchestrator. Platform-specific recipes (Coolify, …) live under
-`integrations/`.
+Unlike a normal waserver, it can reach each shared app by docker's service-DNS.
+You don't even have to expose ports to the host system docker runs on. It's also
+provider-agnostic — it runs in any docker-compose stack, plain `docker run`, or
+an orchestrator.
+
+Platform-specific recipes (Coolify, …) live under `integrations/`.
 
 ## Quick start
 
-To start, we'll share an app listening on the host's port 3000, using the
-prebuilt image. The container creates a share on its first start, named by
-two variables; everything else happens in its shell:
+The typical setup: waserver next to the app it shares, in one compose stack,
+the app with no published ports. `compose.yaml` here does that with
+Excalidraw as the app. Clone the repo (or fetch the four files in this
+folder) and run:
+
+```sh
+cd waserver/docker
+docker compose up -d
+docker compose exec waserver waserver invite demo "My phone" me@example.com
+```
+
+Scan the QR code with a Wispers Access client. The whiteboard opens with the
+Wispers logo drawn on it, served through the share; the app itself is
+reachable no other way. `demo.toml` is the share's config: one `[[app]]`
+block per app, with `upstream = "<service>:<port>"`. Edit it and run
+`docker compose exec waserver waserver reload demo`.
+
+Without a compose stack, the same container takes its share from variables
+and gets its apps from an editor in its shell:
 
 ```sh
 docker run -d --name waserver --restart unless-stopped \
@@ -26,7 +44,8 @@ docker exec -it waserver waserver invite team "Alice's phone" alice@example.com
 ```
 
 `edit` opens the share's config in nano. Add one block per app and save; the
-server reloads with it:
+server reloads with it. For an app on the host, `upstream =
+"host.docker.internal:3000"`:
 
 ```toml
 [[app]]
@@ -35,10 +54,9 @@ name = "My App"
 upstream = "host.docker.internal:3000"
 ```
 
-For an app in the same compose stack, the upstream is just `service:port` and
-`--add-host` isn't needed. `docker exec -it waserver bash` gets you a shell
-that greets you with the shares' state and these commands. The rest of this
-README explains the moving parts.
+`docker exec -it waserver bash` gets you a shell that greets you with the
+shares' state and these commands. The rest of this README explains the
+moving parts.
 
 ## How it works
 
@@ -50,9 +68,9 @@ entrypoint.sh
   ├─ link a config mounted at /config/<share>.toml as the share's share.toml
   ├─ generate one supervisord program per initialised share
   └─ exec supervisord (PID 1)
-         ├─ waserver serve <share-a>
-         ├─ waserver serve <share-b>
-         └─ …   (supervisord owns SIGTERM fan-out, restart, reaping)
+		 ├─ waserver serve <share-a>
+		 ├─ waserver serve <share-b>
+		 └─ …   (supervisord owns SIGTERM fan-out, restart, reaping)
 ```
 
 ## Files
@@ -64,7 +82,9 @@ entrypoint.sh
 | `greeting.sh`      | what every interactive shell in the container prints first        |
 | `supervisord.conf` | base supervisor config; per-share programs generated into `conf.d/` |
 | `healthcheck.sh`   | healthy once every share reports `serving`                        |
-| `compose.yaml`     | generic same-stack test rig: a private `ws-echo` app + the container |
+| `compose.yaml`     | the quick start: a private Excalidraw + the container             |
+| `demo.toml`        | the quick start's share config, mounted at `/config/demo.toml`   |
+| `excalidraw.conf`, `wispers.excalidraw` | Excalidraw's nginx config and the logo scene it opens on first visit |
 
 ## Configuring the container
 
@@ -120,27 +140,11 @@ apply with `waserver reload team` (or a restart). Mounted read-only, as above,
 mount for the share's life; a start without it stops with an error naming the
 missing file.
 
-## Try it locally
+## Developing the image
 
-Prerequisites: Docker.
-
-```sh
-docker compose -f waserver/docker/compose.yaml up --build
-```
-
-The container creates the `demo` share and serves it, with no apps yet. The
-healthcheck flips to healthy once it reports `serving`. In another shell:
-
-```sh
-C="docker compose -f waserver/docker/compose.yaml exec waserver"
-$C waserver edit demo        # add: [[app]] id = "echo" upstream = "app:8080"
-$C waserver status           # fleet table: demo | serving | echo | ...
-$C waserver invite demo alice alice@example.com      # prints an invite code
-```
-
-Redeem that invite from a Wispers Access client to reach the ws-echo page/socket
-**through** the container. The app publishes no ports, so it's reachable *only*
-via the share.
+`docker compose up --build` in this folder builds waserver from the checkout
+instead of pulling the release, and otherwise runs the quick start. The
+healthcheck flips to healthy once every share reports `serving`.
 
 ## State & persistence
 

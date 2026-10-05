@@ -1,0 +1,10 @@
+# The demo share's config, mounted at /config/demo.toml by compose.yaml. Edit
+# here and apply with `docker compose exec waserver waserver reload demo`, or
+# with `waserver edit demo` in the container, which writes this file too.
+
+name = "Wispers Demo"
+
+[[app]]
+id = "excalidraw"
+name = "Excalidraw"
+upstream = "excalidraw:80"
