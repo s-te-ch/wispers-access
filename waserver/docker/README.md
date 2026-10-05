@@ -12,25 +12,35 @@ Platform-specific recipes (Coolify, …) live under `integrations/`.
 
 ## Quick start
 
-The typical setup: waserver next to the app it shares, in one compose stack,
-the app with no published ports. `compose.yaml` here does that with
-Excalidraw as the app. Clone the repo (or fetch the four files in this
-folder) and run:
+We'll start with a typical setup, waserver in a docker compose stack next to an
+app it shares, without any published ports. The example in `compose.yaml` uses
+Excalidraw as a demo app. Change to the directory (`cd waserver/docker`), then
+run
 
 ```sh
-cd waserver/docker
 docker compose up -d
 docker compose exec waserver waserver invite demo "My phone" me@example.com
 ```
 
-Scan the QR code with a Wispers Access client. The whiteboard opens with the
-Wispers logo drawn on it, served through the share; the app itself is
-reachable no other way. `demo.toml` is the share's config: one `[[app]]`
-block per app, with `upstream = "<service>:<port>"`. Edit it and run
-`docker compose exec waserver waserver reload demo`.
+to start the stack and create an invite. Scan the QR code with a Wispers Access
+client (or, if you're using a desktop client, copy-paste the code). This adds
+the share to your client and lets you open Excalidraw. Done! You've just shared
+your internal app without publishing it to the internet (this works even if your
+client is on a different part of the internet).
 
-Without a compose stack, the same container takes its share from variables
-and gets its apps from an editor in its shell:
+You can edit the `demo` share's configuration with
+
+```sh
+docker compose exec waserver waserver edit demo
+```
+
+This allows you to change display names, add new apps, or change an app's
+upstream address (i.e. the host:port waserver proxies). You're not restricted to
+upstreams within the docker compose stack - setting the upstream to
+`"host.docker.internal:3000"` for example points it at port 3000 on the host
+computer.
+
+If you don't want to use compose, you can also invoke docker directly:
 
 ```sh
 docker run -d --name waserver --restart unless-stopped \
@@ -39,91 +49,57 @@ docker run -d --name waserver --restart unless-stopped \
   -v waserver-data:/data \
   ghcr.io/s-te-ch/wispers/access/waserver:latest
 
-docker exec -it waserver waserver edit team      # add the app, see below
+# The waserver commands still work, with a slightly different incantation
+docker exec -it waserver waserver edit team
 docker exec -it waserver waserver invite team "Alice's phone" alice@example.com
 ```
 
-`edit` opens the share's config in nano. Add one block per app and save; the
-server reloads with it. For an app on the host, `upstream =
-"host.docker.internal:3000"`:
-
-```toml
-[[app]]
-id = "myapp"
-name = "My App"
-upstream = "host.docker.internal:3000"
-```
-
-`docker exec -it waserver bash` gets you a shell that greets you with the
-shares' state and these commands. The rest of this README explains the
-moving parts.
-
-## How it works
-
-```
-entrypoint.sh
-  ├─ `waserver init` the share from SHARE_ID / SHARE_NAME / SHARE_TRANSPORT
-  │                                   (first start only: identity created once,
-  │                                    on /data, for that transport)
-  ├─ link a config mounted at /config/<share>.toml as the share's share.toml
-  ├─ generate one supervisord program per initialised share
-  └─ exec supervisord (PID 1)
-		 ├─ waserver serve <share-a>
-		 ├─ waserver serve <share-b>
-		 └─ …   (supervisord owns SIGTERM fan-out, restart, reaping)
-```
-
-## Files
-
-| file               | role                                                              |
-|--------------------|-------------------------------------------------------------------|
-| `Dockerfile`       | multi-stage: build `waserver`, then a slim runtime + supervisord + editors |
-| `entrypoint.sh`    | create the configured share once → link mounted configs → generate supervisord config → exec |
-| `greeting.sh`      | what every interactive shell in the container prints first        |
-| `supervisord.conf` | base supervisor config; per-share programs generated into `conf.d/` |
-| `healthcheck.sh`   | healthy once every share reports `serving`                        |
-| `compose.yaml`     | the quick start: a private Excalidraw + the container             |
-| `demo.toml`        | the quick start's share config, mounted at `/config/demo.toml`   |
-| `excalidraw.conf`, `wispers.excalidraw` | Excalidraw's nginx config and the logo scene it opens on first visit |
+Finally, if you don't want to type the `docker exec` prefixes every time:
+`docker exec -it waserver bash` gets you a shell where you can use `waserver`
+commands directly.
 
 ## Configuring the container
 
-Environment variables, read on the first start to create the share. Later
-starts find the share on `/data` and need none of them.
+The container can be configured through environment variables, which it reads on
+the first start to create the default share. Later starts find one or more
+initialised shares on `/data` and skip this step.
 
-| variable          | default   | meaning                                                  |
-|-------------------|-----------|----------------------------------------------------------|
-| `SHARE_ID`        | `default` | the share's id, as used in `waserver` commands (letters, digits, `-`, `_`) |
-| `SHARE_NAME`      | required  | the share's name as guests see it; a mounted config's `name` when unset |
-| `SHARE_TRANSPORT` | `iroh`    | `iroh` needs no account; `wispers-connect` needs `WC_API_KEY` |
-| `WC_API_KEY`      |           | Wispers Connect API key, for a `wispers-connect` share   |
-| `WC_BACKEND`      |           | base URL of a self-hosted Wispers Connect hub; blank = managed |
-| `EDITOR`          |           | the editor `waserver edit` opens; nano otherwise         |
+| variable          | default   | meaning                                                       |
+|-------------------|-----------|---------------------------------------------------------------|
+| `SHARE_ID`        | `default` | the default share's ID                                        |
+| `SHARE_NAME`      |           | the display name of the default share                         |
+| `SHARE_TRANSPORT` | `iroh`    | the peer-to-peer transport library to use                     |
+| `WC_API_KEY`      |           | API key for transport `wispers-connect`                       |
+| `WC_BACKEND`      |           | Optional backend URL override for transport `wispers-connect` |
+| `EDITOR`          |           | the editor `waserver edit` opens                              |
 
-## Configuring the share
+Note that while the container creates a single default share on startup, you can
+always invoke `waserver init` inside the container to create more. You do,
+however, have to restart the container for them to get picked up by supervisord.
 
-In the container's shell: `waserver edit <share>` opens the share's
-`share.toml`, checks it when the editor closes, and reloads the server. The
-file is the share's `name` as guests see it and one `[[app]]` block per app
-(`id`, `name`, `upstream`); `waserver init` leaves a commented example in it.
+## Configuring a share
 
-`upstream` is `host:port` on the Docker network, or `:port` for the container
-itself. A compose service is just its name, e.g. `app:8080`. Keep each app's
-`id` stable, guest nodes refer to it.
+The easiest way to configure a share is to run `waserver edit <share>` in the
+container's shell. This opens the correct TOML file and automatically reloads
+the configuration in `waserver`.
 
-Editors in the image: nano (the default), vim (`vim-tiny`) and mg. Pick
-another with `select-editor` (remembered on `/data`) or the `EDITOR`
-variable.
+The file has one `[[app]]` block per shared app. Each block has the fields `id`
+(keep this stable, guest nodes refer to it), `name` (the display name), and
+`upstream` (the address of the web app waserver proxies). The initial
+configuration comes with comments explaining the fields.
 
-A second share is `waserver init <id> "<name>"` in the shell, then a restart
-of the container, which serves every share it finds. `waserver deinit <id>`
-destroys a share's identity and guests (irreversible); nothing does that
-automatically.
+`upstream` is `host:port` on the Docker network, or `host.docker.internal:port`
+if you want to address a port on the host computer. A compose service is just
+its name, e.g. `app:8080`.
+
+There are several editors in the image: nano (the default), vim (`vim-tiny`) and
+mg (micro emacs). Pick another with `select-editor` (remembered on `/data`) or
+the `EDITOR` variable.
 
 ### Keeping the config outside the container
 
-To keep a share's config in version control, or to write it before the
-container exists, mount it at `/config/<share>.toml`:
+To keep a share's config in version control, or to write it before the container
+exists, mount it at `/config/<share>.toml`:
 
 ```sh
 docker run -d --name waserver --restart unless-stopped \
@@ -133,46 +109,43 @@ docker run -d --name waserver --restart unless-stopped \
   ghcr.io/s-te-ch/wispers/access/waserver:latest
 ```
 
-The mounted file *is* the share's config: the entrypoint links the share's
-`share.toml` to it, `SHARE_NAME` defaults to its `name`, and edits on the host
-apply with `waserver reload team` (or a restart). Mounted read-only, as above,
-`waserver edit` in the container cannot save, which is the point. Keep the
-mount for the share's life; a start without it stops with an error naming the
-missing file.
+The entrypoint detects the mounted file and uses it. `SHARE_NAME` now defaults
+to the `name` field in the file. If you edit the file on the host, you have to
+apply the edits with `waserver reload team` (or just restart the container).
+Since the file is mounted read-only, `waserver edit` within the container won't
+work.
+
+## How it works
+
+At startup, the entrypoint checks the existence of the desired share (based on
+the environment variables `SHARE_ID`, `SHARE_NAME`, and `SHARE_TRANSPORT`) and
+initialises it if necessary. The state gets written to `/data`.
+
+Once share initialisation is done, the entrypoint brings up one supervisord
+program per initialised share, creating a process tree like this:
+
+```
+supervisord (PID 1)
+    ├─ waserver serve <share-a>
+    ├─ waserver serve <share-b>
+    └─ …   (supervisord owns SIGTERM fan-out, restart, reaping)
+```
 
 ## Developing the image
 
+We provide prebuilt images, so you don't have to build your own. Every release
+publishes a multi-arch (amd64 + arm64) image at
+`ghcr.io/s-te-ch/wispers/access/waserver`, tagged `:X.Y.Z` and `:latest`.
+
+If you want to work on the docker image and build your own:
 `docker compose up --build` in this folder builds waserver from the checkout
 instead of pulling the release, and otherwise runs the quick start. The
 healthcheck flips to healthy once every share reports `serving`.
 
-## State & persistence
-
-Everything under `$HOME` (= `/data`): per-share identity (keys + registration),
-`share.toml`, IPC sockets, logs. Mount a volume at `/data`. **Without a
-persistent `/data`, every boot creates a brand-new share** — so in any real
-deployment, mount a volume. The share's config lives there too, at
-`/data/.config/waserver/shares/<share>/share.toml`, unless it is mounted from
-outside (see above).
-
-## Wispers Connect (optional)
-
-`SHARE_TRANSPORT=wispers-connect` creates the share on Wispers Connect instead
-of iroh, with the API key in `WC_API_KEY` (`-e WC_API_KEY=…`, or the
-Environment Variables tab of your platform). The transport is fixed from then
-on. By default it uses the managed Wispers Connect backend; a self-hosted one
-goes in `WC_BACKEND`, read once at `waserver init`, stored with the share, and
-baked into the invite codes so a guest's client joins the same hub
-automatically. See the [wispers-hub](https://github.com/s-te-ch/wispers-hub)
-repo for standing up your own hub.
-
 ## Notes
 
-- **Prebuilt image:** every release publishes a multi-arch (amd64 + arm64) image
-  at `ghcr.io/s-te-ch/wispers/access/waserver`, tagged `:X.Y.Z` and `:latest`.
-  No need to build unless you're changing it.
 - **Build caching:** no `cargo-chef` layer yet, so when building locally a
   source change recompiles the crates.
 - **Logs:** `serve` writes stdout/stderr (captured) plus a redundant daily file
-  under `/data`; `waserver logs -f` in the shell follows them. No per-share
+  under `/data`. `waserver logs -f` in the shell follows them. No per-share
   log prefixing in the container's own output yet.
