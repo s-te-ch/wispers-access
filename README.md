@@ -94,7 +94,7 @@ name = "My App"
 upstream = ":3000"  # host:port, or :port for localhost
 ```
 
-Then serve the share (`waserver start` runs it in the background instead):
+Then serve the share (`waserver start team` runs it in the background instead):
 
 ```sh
 waserver serve team
@@ -105,7 +105,7 @@ Later edits to `share.toml` apply with `waserver reload team`.
 ### 3. Invite a device
 
 Invites are minted by the running server from step 2, so run this in a second
-terminal (or use `waserver start`):
+terminal (or use `waserver start team`):
 
 ```sh
 waserver invite team "Alice's phone" alice@example.com --png invite.png

@@ -1,7 +1,9 @@
 mod config;
+mod daemon;
 mod guest_api;
 mod http;
 mod initialization;
+mod invites;
 mod ipc;
 mod iroh_transport;
 mod logging;
@@ -50,13 +52,22 @@ enum Command {
     },
     /// Run the server for the given share in the foreground.
     Serve { share: String },
-    /// Runs the server for the given share in the background.
-    Start { share: String },
-    /// Stop the server for the given share.
-    Stop { share: String },
+    /// Run the server for a share in the background.
+    Start {
+        /// Share ID. All shares if omitted.
+        share: Option<String>,
+    },
+    /// Stop a share's server.
+    Stop {
+        /// Share ID. All shares if omitted.
+        share: Option<String>,
+    },
     /// Reload a share's configuration (`share.toml`). A broken configuration
     /// leaves the running config in place.
-    Reload { share: String },
+    Reload {
+        /// Share ID. All shares if omitted.
+        share: Option<String>,
+    },
     /// Shows the status of all shares, or a detailed view of one share.
     Status {
         /// ID of a share to show in detail.
@@ -65,12 +76,13 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Print the logs of the given server to stdout.
+    /// Print a share's server logs to stdout.
     Logs {
         /// Don't stop at EOF, follow log entries as they're written.
         #[arg(short = 'f', long)]
         follow: bool,
-        share: String,
+        /// Share ID. All shares if omitted.
+        share: Option<String>,
     },
     /// Generate a guest node invite code.
     Invite {
@@ -111,9 +123,12 @@ fn main() -> Result<()> {
     // Parse the command line.
     let cli = Cli::parse();
 
-    // Daemonising must happen before starting tokio.
-    if let Command::Start { .. } = &cli.command {
-        start_daemon()?;
+    // Daemonising must happen before starting tokio, so if the command is
+    // `waserver start <share>`, do it now. Note that the for-all-shares version
+    // (`waserver start`) stays in the foreground and spawns one `waserver start
+    // <share>` for each share.
+    if let Command::Start { share: Some(_) } = &cli.command {
+        daemon::start_daemon()?;
     }
 
     // Start async mode.
@@ -135,7 +150,7 @@ async fn async_main(command: Command) -> Result<()> {
             share,
             display_name,
         } => {
-            let backend = normalize_backend(backend.as_deref())?;
+            let backend = initialization::normalize_backend(backend.as_deref())?;
             if transport == TransportKind::Iroh && backend.is_some() {
                 anyhow::bail!("--transport iroh doesn't take --backend");
             }
@@ -153,96 +168,80 @@ async fn async_main(command: Command) -> Result<()> {
             let _log = logging::init_foreground(&share)?;
             serving::serve(&share).await
         }
-        Command::Start { share } => {
+        Command::Start { share: Some(share) } => {
             let _log = logging::init_background(&share)?;
             serving::serve(&share)
                 .await
                 // At this point, stderr is gone, so we write the error to the log.
                 .inspect_err(|e| tracing::error!(error = format!("{e:#}"), "server failed"))
         }
-        Command::Stop { share } => stop(&share).await,
-        Command::Reload { share } => reload(&share).await,
+        Command::Start { share: None } => on_every_share(daemon::start_share).await,
+        Command::Stop { share: Some(share) } => stop(&share).await,
+        Command::Stop { share: None } => on_every_share(stop_share).await,
+        Command::Reload { share: Some(share) } => reload(&share).await,
+        Command::Reload { share: None } => on_every_share(reload_share).await,
         Command::Status { share, json } => match share {
             Some(share) => status::report_on_share(&share, json).await,
             None => status::report_on_fleet(json).await,
         },
-        Command::Logs { follow, share } => logs(follow, &share),
+        Command::Logs { follow, share } => logging::print(follow, share.as_deref()),
         Command::Invite {
             share,
             node_name,
             user_id,
             png,
-        } => invite(&share, &node_name, &user_id, png.as_deref()).await,
+        } => invites::invite(&share, &node_name, &user_id, png.as_deref()).await,
         Command::Revoke { share, number } => revoke(&share, number).await,
     }
 }
 
-#[cfg(unix)]
-fn start_daemon() -> Result<()> {
-    let daemonizer = daemonize::Daemonize::new()
-        // daemonize defaults to 0o027 post-fork. Set the same mask as in main().
-        .umask(0o077);
-    daemonizer.start().context("failed to daemonize")?;
-    Ok(())
+/// Outcome of a per-share action as used by `on_every_share`.
+enum ActionOutcome {
+    NotRunning,
+    Done(String),
 }
 
-/// Windows has no fork, so `start` re-launches itself without a console and
-/// marks the copy with this variable. The copy then runs as the daemon.
-#[cfg(windows)]
-const DAEMON_ENV: &str = "WASERVER_DAEMON";
-
-#[cfg(windows)]
-fn start_daemon() -> Result<()> {
-    use std::os::windows::process::CommandExt;
-    use std::process::Stdio;
-
-    const CREATE_NO_WINDOW: u32 = 0x08000000;
-
-    if std::env::var_os(DAEMON_ENV).is_some() {
-        return Ok(()); // We are the background copy.
+/// Runs `action` on every share, in name order, one line per share. Tries
+/// them all before failing on any share's error.
+async fn on_every_share(action: impl AsyncFn(&str) -> Result<ActionOutcome>) -> Result<()> {
+    let mut names = storage::list_shares()?;
+    names.sort();
+    if names.is_empty() {
+        println!("No shares.");
+        return Ok(());
     }
-
-    // Make our std handles non-inheritable, so the daemon can't hold on to the
-    // caller's pipes and make whoever reads our output wait for it to exit.
-    // Nulling the child's stdio is not enough - CreateProcess hands the child
-    // every inheritable handle. (std duplicates the child's own stdio
-    // explicitly, so that still works.)
-    {
-        use windows_sys::Win32::Foundation::{HANDLE_FLAG_INHERIT, SetHandleInformation};
-        use windows_sys::Win32::System::Console::{
-            GetStdHandle, STD_ERROR_HANDLE, STD_INPUT_HANDLE, STD_OUTPUT_HANDLE,
-        };
-        for which in [STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-            // Best effort: absent or invalid handles just fail the call.
-            unsafe {
-                SetHandleInformation(GetStdHandle(which), HANDLE_FLAG_INHERIT, 0);
+    let mut failed = 0;
+    for name in &names {
+        match action(name).await {
+            Ok(ActionOutcome::Done(what)) => println!("{name}: {what}"),
+            Ok(ActionOutcome::NotRunning) => println!("{name}: not running"),
+            Err(e) => {
+                eprintln!("{name}: {e:#}");
+                failed += 1;
             }
         }
     }
-
-    let exe = std::env::current_exe().context("failed to get current executable path")?;
-    std::process::Command::new(exe)
-        .args(std::env::args_os().skip(1))
-        .env(DAEMON_ENV, "1")
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .context("failed to spawn background process")?;
-
-    // The background process has been spawned. Exit the starting process.
-    std::process::exit(0);
+    if failed > 0 {
+        anyhow::bail!("{failed} of {} share(s) failed", names.len());
+    }
+    Ok(())
 }
 
 async fn stop(share: &str) -> Result<()> {
+    match stop_share(share).await? {
+        ActionOutcome::Done(_) => println!("Success!"),
+        ActionOutcome::NotRunning => anyhow::bail!("cannot connect to server for share {}", share),
+    }
+    Ok(())
+}
+
+/// `stop` action for `on_every_share`.
+async fn stop_share(share: &str) -> Result<ActionOutcome> {
     let Ok(mut client) = ipc::Client::connect(share).await else {
-        anyhow::bail!("cannot connect to server for share {}", share);
+        return Ok(ActionOutcome::NotRunning);
     };
     match client.request(&ipc::Request::Shutdown).await {
-        Ok(ipc::Response::Success { .. }) => {
-            println!("Success!");
-        }
+        Ok(ipc::Response::Success { .. }) => Ok(ActionOutcome::Done("stopped".to_owned())),
         Ok(ipc::Response::Error { error, .. }) => {
             anyhow::bail!("error stopping server: {}", error);
         }
@@ -250,12 +249,20 @@ async fn stop(share: &str) -> Result<()> {
             anyhow::bail!("error sending command to server: {}", e);
         }
     }
-    Ok(())
 }
 
 async fn reload(share: &str) -> Result<()> {
+    match reload_share(share).await? {
+        ActionOutcome::Done(what) => println!("{what}"),
+        ActionOutcome::NotRunning => anyhow::bail!("cannot connect to server for share {}", share),
+    }
+    Ok(())
+}
+
+/// `reload` action for `on_every_share`.
+async fn reload_share(share: &str) -> Result<ActionOutcome> {
     let Ok(mut client) = ipc::Client::connect(share).await else {
-        anyhow::bail!("cannot connect to server for share {}", share);
+        return Ok(ActionOutcome::NotRunning);
     };
     match client.request(&ipc::Request::Reload).await {
         Ok(ipc::Response::Success {
@@ -263,15 +270,12 @@ async fn reload(share: &str) -> Result<()> {
             ..
         }) => {
             let ids: Vec<&str> = r.apps.iter().map(|s| s.id.as_str()).collect();
-            if r.changed {
-                println!("Reloaded. Serving {} app(s): {}", ids.len(), ids.join(", "));
-            } else {
-                println!(
-                    "No change. Serving {} app(s): {}",
-                    ids.len(),
-                    ids.join(", ")
-                );
-            }
+            let verdict = if r.changed { "Reloaded" } else { "No change" };
+            Ok(ActionOutcome::Done(format!(
+                "{verdict}. Serving {} app(s): {}",
+                ids.len(),
+                ids.join(", ")
+            )))
         }
         Ok(ipc::Response::Success { .. }) => {
             anyhow::bail!("unexpected response from server");
@@ -283,181 +287,6 @@ async fn reload(share: &str) -> Result<()> {
             anyhow::bail!("error sending command to server: {}", e);
         }
     }
-    Ok(())
-}
-
-fn logs(follow: bool, share: &str) -> Result<()> {
-    use std::collections::VecDeque;
-    use std::io::{self, Read, Write};
-
-    let mut stdout = io::stdout().lock();
-    let paths = logging::list_log_files(share)?;
-    let mut paths = VecDeque::from(paths);
-    let Some(mut path) = paths.pop_front() else {
-        eprintln!("No logs for share {}", share);
-        return Ok(());
-    };
-    let mut file =
-        std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
-    let mut buf = [0u8; 8192];
-    loop {
-        // Copy the entire file to stdout.
-        loop {
-            let n = file
-                .read(&mut buf)
-                .with_context(|| format!("read {}", path.display()))?;
-            if n == 0 {
-                break;
-            }
-            if let Err(e) = stdout.write_all(&buf[..n]) {
-                if e.kind() == io::ErrorKind::BrokenPipe {
-                    return Ok(());
-                }
-                return Err(e.into());
-            }
-        }
-        stdout.flush().ok();
-
-        // End of file. If there's another file in the list, continue with that.
-        if let Some(next) = paths.pop_front() {
-            path = next;
-            file =
-                std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
-            continue;
-        }
-
-        // If we're not in follow mode we're done here.
-        if !follow {
-            break;
-        }
-
-        // Check for newer log files due to log rotation.
-        for new_path in logging::list_log_files(share)? {
-            if new_path > path {
-                paths.push_back(new_path);
-            }
-        }
-        if let Some(next) = paths.pop_front() {
-            path = next;
-            file =
-                std::fs::File::open(&path).with_context(|| format!("open {}", path.display()))?;
-            continue;
-        }
-
-        // Sleep before retry.
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-    Ok(())
-}
-
-async fn invite(
-    share: &str,
-    node_name: &str,
-    user_id: &str,
-    png: Option<&std::path::Path>,
-) -> Result<()> {
-    let Ok(mut client) = ipc::Client::connect(share).await else {
-        anyhow::bail!("cannot connect to server for share {}", share);
-    };
-    let req = ipc::Request::GetInvite {
-        node_name: node_name.to_owned(),
-        user_id: user_id.to_owned(),
-    };
-    let code = match client.request(&req).await {
-        Ok(ipc::Response::Success {
-            data: ipc::ResponseData::Invite(invite),
-            ..
-        }) => invite.code,
-        Ok(ipc::Response::Success { .. }) => {
-            anyhow::bail!("unexpected response from server");
-        }
-        Ok(ipc::Response::Error { error, .. }) => {
-            anyhow::bail!("error generating invite: {}", error);
-        }
-        Err(e) => {
-            anyhow::bail!("error sending command to server: {}", e);
-        }
-    };
-    let qr = qrcode::QrCode::new(code.as_bytes()).context("cannot build QR code")?;
-    println!("Invite code (valid for 24 hours):\n\n  {}\n", code);
-    println!("{}", render_qr_ansi(&qr));
-    if let Some(path) = png {
-        let img = qr
-            .render::<image::Luma<u8>>()
-            .min_dimensions(360, 360)
-            .build();
-        img.save(path)
-            .with_context(|| format!("cannot write {}", path.display()))?;
-        println!("QR code written to {}", path.display());
-    }
-    Ok(())
-}
-
-/// Render a QR code to a terminal string that scans regardless of terminal
-/// theme.
-///
-/// `qrcode`'s `unicode::Dense1x2` renderer draws modules in the terminal's
-/// *foreground* colour on its *background*, so on a dark terminal the QR comes
-/// out inverted (light modules on dark) and scanners — which expect
-/// dark-on-light — reject it. Here every module gets an explicit black/white,
-/// so it is always dark-on-light. The colours come from the 256-colour palette,
-/// not truecolour because a terminal without 24-bit support drops the
-/// truecolour codes and renders every line as one solid bar in its default
-/// colours, while the palette works everywhere. `▀` (upper half block) packs
-/// two module rows per line: the glyph's foreground is the top module, its
-/// background the bottom one. (`--png` stays the colour-independent fallback
-/// for terminals that strip ANSI.)
-fn render_qr_ansi(qr: &qrcode::QrCode) -> String {
-    const QUIET: usize = 4; // standard quiet zone, in modules
-    const BLACK: &str = "16"; // palette index of #000000
-    const WHITE: &str = "231"; // palette index of #ffffff
-
-    let w = qr.width();
-    let modules = qr.to_colors();
-    let size = w + 2 * QUIET;
-    // Dark module at (col x, row y)? The quiet-zone border is light.
-    let dark = |x: usize, y: usize| -> bool {
-        if x < QUIET || y < QUIET || x >= QUIET + w || y >= QUIET + w {
-            return false;
-        }
-        matches!(modules[(y - QUIET) * w + (x - QUIET)], qrcode::Color::Dark)
-    };
-
-    let mut out = String::new();
-    let mut y = 0;
-    while y < size {
-        for x in 0..size {
-            let fg = if dark(x, y) { BLACK } else { WHITE };
-            let bg = if y + 1 < size && dark(x, y + 1) {
-                BLACK
-            } else {
-                WHITE
-            };
-            out.push_str(&format!("\x1b[38;5;{fg}m\x1b[48;5;{bg}m\u{2580}"));
-        }
-        out.push_str("\x1b[0m\n"); // reset colours at end of each line
-        y += 2;
-    }
-    out
-}
-
-/// Validate and normalize `--backend`
-fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
-    let Some(raw) = backend else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim().trim_end_matches('/');
-    // Allow both unset and empty (useful if set via env var).
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-    if !trimmed.starts_with("https://") {
-        anyhow::bail!("backend URL must start with https:// (got '{}')", raw);
-    }
-    if trimmed.len() <= "https://".len() {
-        anyhow::bail!("backend URL has no host");
-    }
-    Ok(Some(trimmed.to_owned()))
 }
 
 /// Revokes a guest node's access.
@@ -475,21 +304,6 @@ async fn revoke(share: &str, number: i64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn normalize_backend_requires_https_and_trims() {
-        assert_eq!(normalize_backend(None).unwrap(), None);
-        assert_eq!(
-            normalize_backend(Some("https://h.example.com/")).unwrap(),
-            Some("https://h.example.com".to_owned())
-        );
-        assert!(normalize_backend(Some("http://h.example.com")).is_err());
-        assert!(normalize_backend(Some("h.example.com")).is_err());
-        assert!(normalize_backend(Some("https://")).is_err());
-        // Blank/empty (e.g. an unset dashboard env) is managed, not an error.
-        assert_eq!(normalize_backend(Some("")).unwrap(), None);
-        assert_eq!(normalize_backend(Some("   ")).unwrap(), None);
-    }
 
     #[test]
     fn cli_parses_share_init() {
