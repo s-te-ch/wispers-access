@@ -37,7 +37,7 @@ enum Command {
         backend: Option<String>,
         /// Which peer-to-peer transport library to use for this share.
         #[arg(long, default_value = "iroh")]
-        transport: config::TransportKind,
+        transport: storage::TransportKind,
         /// Share identifier (use letters, digits, '-' or '_').
         share: String,
         /// Human readable name of the share, shown to users.
@@ -125,7 +125,7 @@ fn main() -> Result<()> {
 }
 
 async fn async_main(command: Command) -> Result<()> {
-    use crate::config::{TransportConfig, TransportKind};
+    use crate::storage::TransportKind;
 
     match command {
         Command::Init {
@@ -135,18 +135,18 @@ async fn async_main(command: Command) -> Result<()> {
             share,
             display_name,
         } => {
-            let transport = match transport {
-                TransportKind::WispersConnect => TransportConfig::WispersConnect {
-                    backend: normalize_backend(backend.as_deref())?,
-                },
-                TransportKind::Iroh => {
-                    if normalize_backend(backend.as_deref())?.is_some() {
-                        anyhow::bail!("--transport iroh doesn't take --backend");
-                    }
-                    TransportConfig::Iroh {}
-                }
-            };
-            initialization::up(api_key.as_deref(), &share, &display_name, &transport).await
+            let backend = normalize_backend(backend.as_deref())?;
+            if transport == TransportKind::Iroh && backend.is_some() {
+                anyhow::bail!("--transport iroh doesn't take --backend");
+            }
+            initialization::up(
+                &share,
+                &display_name,
+                transport,
+                api_key.as_deref(),
+                backend.as_deref(),
+            )
+            .await
         }
         Command::Deinit { share } => initialization::down(&share).await,
         Command::Serve { share } => {
@@ -463,12 +463,12 @@ fn normalize_backend(backend: Option<&str>) -> Result<Option<String>> {
 /// Revokes a guest node's access.
 async fn revoke(share: &str, number: i64) -> Result<()> {
     let dir = storage::ShareDir::new(share)?;
-    match dir.load_config()?.transport {
-        config::TransportConfig::WispersConnect { backend } => {
+    match dir.open_state()?.transport()? {
+        storage::TransportKind::WispersConnect => {
             let node_number = i32::try_from(number).context("not a node number")?;
-            wispers_connect_transport::revoke(share, dir, backend, node_number).await
+            wispers_connect_transport::revoke(share, dir, node_number).await
         }
-        config::TransportConfig::Iroh {} => iroh_transport::revoke(share, dir, number).await,
+        storage::TransportKind::Iroh => iroh_transport::revoke(share, dir, number).await,
     }
 }
 
@@ -506,7 +506,7 @@ mod tests {
                 assert_eq!(share, "team");
                 assert_eq!(display_name, "Awesome Team");
                 assert_eq!(api_key, None);
-                assert_eq!(transport, config::TransportKind::Iroh);
+                assert_eq!(transport, storage::TransportKind::Iroh);
             }
             _ => panic!("parsed the wrong command"),
         }
@@ -527,7 +527,7 @@ mod tests {
                 api_key, transport, ..
             } => {
                 assert_eq!(api_key.as_deref(), Some("k"));
-                assert_eq!(transport, config::TransportKind::WispersConnect);
+                assert_eq!(transport, storage::TransportKind::WispersConnect);
             }
             _ => panic!("parsed the wrong command"),
         }

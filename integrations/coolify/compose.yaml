@@ -20,8 +20,9 @@
 #      first deploy Coolify copies the block into a file under the resource's
 #      Storage tab and mounts it; the file name is the share's id. Another
 #      share is another such volume entry, mounted at /config/<name>.toml.
-#   4. Only for a share on Wispers Connect (`kind = "wispers-connect"` instead
-#      of iroh below), set the environment variables (Environment Variables
+#   4. Only for a share on Wispers Connect (a `[transport]` section with
+#      `kind = "wispers-connect"` in the block below; without one the share is
+#      on iroh), set the environment variables (Environment Variables
 #      tab): WC_API_KEY, your Wispers Connect API key; WC_BACKEND (optional),
 #      base URL of a self-hosted Wispers Connect hub, e.g.
 #      https://myhub.example.com (https only). Leave blank to use the managed
@@ -71,9 +72,6 @@ services:
         target: /config/team.toml
         content: |
           name = "Awesome Team"
-
-          [transport]
-          kind = "iroh"
 
           [[app]]
           id = "odoo"

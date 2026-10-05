@@ -23,6 +23,8 @@ pub struct StreamContext {
     /// Config of the share being served, frozen at the time the stream got
     /// opened to make reloads safe.
     pub config: Arc<ShareConfig>,
+    /// The share's transport.
+    pub transport: storage::TransportKind,
     /// Event source, used to serve `/v1/events`.
     pub events: broadcast::Sender<u64>,
     /// The served share's state DB.
@@ -190,8 +192,6 @@ mod tests {
 
     const CONFIG: &str = r#"
 name = "Family"
-[transport]
-kind = "iroh"
 [[app]]
 id = "jf"
 name = "Jellyfin"
@@ -202,11 +202,12 @@ id = "photos"
 upstream = ":1"
 "#;
 
-    const EMPTY_SHARE: &str = "name = \"x\"\n[transport]\nkind = \"iroh\"\n";
+    const EMPTY_SHARE: &str = "name = \"x\"\n";
 
     fn context(config: &str) -> StreamContext {
         StreamContext {
             config: Arc::new(ShareConfig::parse(config).unwrap()),
+            transport: storage::TransportKind::Iroh,
             events: broadcast::channel(4).0,
             db: storage::StateDb::open_in_memory().unwrap(),
         }

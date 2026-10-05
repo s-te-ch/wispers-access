@@ -36,6 +36,10 @@ pub enum Error {
     NoSuchGuest(i64),
     #[error("stored iroh key has the wrong length")]
     CorruptKey,
+    #[error("state records no transport (init incomplete?)")]
+    NoTransport,
+    #[error("state records an unknown transport '{0}'")]
+    UnknownTransport(String),
     #[error("could not determine the OS config directory")]
     NoConfigDir,
 }
@@ -88,14 +92,16 @@ impl ShareDir {
         Ok(ShareConfig::load(&self.config_path())?)
     }
 
-    /// Creates the directory, writes `share.toml` and creates an empty `state.db`.
-    pub fn create(&self, config_text: &str) -> Result<StateDb, Error> {
+    /// Creates the directory, writes `share.toml` and creates a `state.db`.
+    pub fn create(&self, config_text: &str, transport: TransportKind) -> Result<StateDb, Error> {
         if self.dir.exists() {
             return Err(Error::AlreadyExists(self.name.clone()));
         }
         ensure_dir_exists(&self.dir)?;
         write_atomically(&self.dir, config::FILENAME, config_text.as_bytes())?;
-        StateDb::open(self.dir.join(STATE_DB_FILENAME))
+        let state = StateDb::open(self.dir.join(STATE_DB_FILENAME))?;
+        state.set_transport(transport)?;
+        Ok(state)
     }
 
     /// Opens the existing `state.db`.
@@ -104,7 +110,12 @@ impl ShareDir {
         if !self.exists() || !path.is_file() {
             return Err(Error::NotInitialised(self.name.clone()));
         }
-        StateDb::open(path)
+        let state = StateDb::open(path)?;
+        if state.get_string(KEY_TRANSPORT)?.is_none() {
+            // Migrate legacy transport config on first load.
+            state.record_legacy_transport(&self.load_config()?)?;
+        }
+        Ok(state)
     }
 
     pub fn delete(&self) -> Result<(), Error> {
@@ -124,15 +135,43 @@ pub struct StateDb {
     conn: Arc<Mutex<rusqlite::Connection>>,
 }
 
+/// The kinds of peer-to-peer transport supported by Wispers Access.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum TransportKind {
+    WispersConnect,
+    Iroh,
+}
+
+impl TransportKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TransportKind::WispersConnect => "wispers-connect",
+            TransportKind::Iroh => "iroh",
+        }
+    }
+
+    fn parse(s: &str) -> Result<Self, Error> {
+        match s {
+            "wispers-connect" => Ok(TransportKind::WispersConnect),
+            "iroh" => Ok(TransportKind::Iroh),
+            other => Err(Error::UnknownTransport(other.to_owned())),
+        }
+    }
+}
+
 /// State specific to the Wispers Connect transport.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WispersConnectState {
     pub api_key: String,
     pub connectivity_group_id: String,
+    /// Base URL of a self-hosted backend, `None` if the managed one.
+    pub backend: Option<String>,
 }
 
+const KEY_TRANSPORT: &str = "transport";
 const KEY_API_KEY: &str = "api_key";
 const KEY_CONNECTIVITY_GROUP_ID: &str = "connectivity_group_id";
+const KEY_WC_BACKEND: &str = "wc_backend";
 const KEY_ROOT_KEY: &str = "root_key";
 const KEY_REGISTRATION: &str = "registration";
 const KEY_IROH_SECRET: &str = "iroh_secret";
@@ -172,6 +211,32 @@ impl StateDb {
         })
     }
 
+    pub fn transport(&self) -> Result<TransportKind, Error> {
+        match self.get_string(KEY_TRANSPORT)? {
+            Some(s) => TransportKind::parse(&s),
+            None => Err(Error::NoTransport),
+        }
+    }
+
+    fn set_transport(&self, transport: TransportKind) -> Result<(), Error> {
+        self.set(KEY_TRANSPORT, transport.as_str().as_bytes())
+    }
+
+    /// Records the transport of an older share (<= 0.4), migrating it to the
+    /// post-0.4 format.
+    fn record_legacy_transport(&self, cfg: &ShareConfig) -> Result<(), Error> {
+        match &cfg.legacy_transport {
+            Some(config::LegacyTransport::Iroh {}) => self.set_transport(TransportKind::Iroh),
+            Some(config::LegacyTransport::WispersConnect { backend }) => {
+                if let Some(backend) = backend {
+                    self.set(KEY_WC_BACKEND, backend.as_bytes())?;
+                }
+                self.set_transport(TransportKind::WispersConnect)
+            }
+            None => self.set_transport(TransportKind::WispersConnect),
+        }
+    }
+
     pub fn wispers_connect_state(&self) -> Result<Option<WispersConnectState>, Error> {
         let (Some(api_key), Some(cg_id)) = (
             self.get_string(KEY_API_KEY)?,
@@ -182,6 +247,7 @@ impl StateDb {
         Ok(Some(WispersConnectState {
             api_key,
             connectivity_group_id: cg_id,
+            backend: self.get_string(KEY_WC_BACKEND)?,
         }))
     }
 
@@ -190,7 +256,11 @@ impl StateDb {
         self.set(
             KEY_CONNECTIVITY_GROUP_ID,
             state.connectivity_group_id.as_bytes(),
-        )
+        )?;
+        match &state.backend {
+            Some(backend) => self.set(KEY_WC_BACKEND, backend.as_bytes()),
+            None => self.remove(KEY_WC_BACKEND),
+        }
     }
 
     pub fn iroh_secret(&self) -> Result<Option<[u8; 32]>, Error> {
@@ -654,17 +724,23 @@ mod tests {
     fn state_db_round_trips() {
         let tmp = tempfile::tempdir().unwrap();
         let db = StateDb::open(tmp.path().join("state.db")).unwrap();
+        assert!(matches!(db.transport(), Err(Error::NoTransport)));
         assert!(db.wispers_connect_state().unwrap().is_none());
         assert!(db.load().unwrap().is_none());
 
-        db.set_wispers_connect_state(&WispersConnectState {
+        db.set_transport(TransportKind::WispersConnect).unwrap();
+        assert_eq!(db.transport().unwrap(), TransportKind::WispersConnect);
+        let mut wcs = WispersConnectState {
             api_key: "wc_test_k.secret".to_owned(),
             connectivity_group_id: "cg-1".to_owned(),
-        })
-        .unwrap();
-        let wcs = db.wispers_connect_state().unwrap().unwrap();
-        assert_eq!(wcs.api_key, "wc_test_k.secret");
-        assert_eq!(wcs.connectivity_group_id, "cg-1");
+            backend: Some("https://h.example".to_owned()),
+        };
+        db.set_wispers_connect_state(&wcs).unwrap();
+        assert_eq!(db.wispers_connect_state().unwrap().unwrap(), wcs);
+        // Back to the managed backend.
+        wcs.backend = None;
+        db.set_wispers_connect_state(&wcs).unwrap();
+        assert_eq!(db.wispers_connect_state().unwrap().unwrap(), wcs);
 
         let state = wc::PersistedNodeState::from_stored([7u8; wc::ROOT_KEY_LEN], None);
         db.save(&state).unwrap();
@@ -681,6 +757,34 @@ mod tests {
         drop(db);
         let db = StateDb::open(tmp.path().join("state.db")).unwrap();
         assert!(db.wispers_connect_state().unwrap().is_some());
+    }
+
+    #[test]
+    fn legacy_transport_is_recorded_from_the_file() {
+        // Named in the file, with the backend.
+        let db = StateDb::open_in_memory().unwrap();
+        let cfg = ShareConfig::parse(
+            "name = \"x\"\n[transport]\nkind = \"wispers-connect\"\nbackend = \"https://h\"\n",
+        )
+        .unwrap();
+        db.record_legacy_transport(&cfg).unwrap();
+        assert_eq!(db.transport().unwrap(), TransportKind::WispersConnect);
+        assert_eq!(
+            db.get_string(KEY_WC_BACKEND).unwrap().as_deref(),
+            Some("https://h")
+        );
+
+        let db = StateDb::open_in_memory().unwrap();
+        let cfg = ShareConfig::parse("name = \"x\"\n[transport]\nkind = \"iroh\"\n").unwrap();
+        db.record_legacy_transport(&cfg).unwrap();
+        assert_eq!(db.transport().unwrap(), TransportKind::Iroh);
+
+        // Not named: a share from before 0.4, on Wispers Connect.
+        let db = StateDb::open_in_memory().unwrap();
+        db.record_legacy_transport(&ShareConfig::parse("name = \"x\"\n").unwrap())
+            .unwrap();
+        assert_eq!(db.transport().unwrap(), TransportKind::WispersConnect);
+        assert!(db.get_string(KEY_WC_BACKEND).unwrap().is_none());
     }
 
     /// A test instant, `secs` after the epoch.

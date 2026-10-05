@@ -1,10 +1,10 @@
 //! waserver's serving setup and loop.
 
-use crate::config::{ShareConfig, TransportConfig};
+use crate::config::ShareConfig;
 use crate::ipc;
 use crate::iroh_transport;
 use crate::protocol;
-use crate::storage;
+use crate::storage::{self, TransportKind};
 use crate::wispers_connect_transport;
 use anyhow::Result;
 use std::collections::HashMap;
@@ -22,22 +22,19 @@ pub async fn serve(share: &str) -> Result<()> {
     let dir = storage::ShareDir::new(share)?;
     let cfg = dir.load_config()?;
     let state = dir.open_state()?;
+    warn_about_config(&cfg);
 
-    // Warn if there are no apps configured.
-    if cfg.apps.is_empty() {
-        warn!("no apps configured, guests will get 503 until `waserver reload`");
-    }
-
-    // Instantiate the host node for the appropriate transport.
-    let host_node: Arc<dyn HostNode> = match cfg.transport.clone() {
-        TransportConfig::WispersConnect { backend } => {
-            Arc::new(wispers_connect_transport::bind(share, state.clone(), backend).await?)
+    // Instantiate the host node for the share's transport.
+    let transport = state.transport()?;
+    let host_node: Arc<dyn HostNode> = match transport {
+        TransportKind::WispersConnect => {
+            Arc::new(wispers_connect_transport::bind(share, state.clone()).await?)
         }
-        TransportConfig::Iroh {} => Arc::new(iroh_transport::bind(share, state.clone()).await?),
+        TransportKind::Iroh => Arc::new(iroh_transport::bind(share, state.clone()).await?),
     };
 
     // Start the local IPC interface.
-    let handle = ServingHandle::new(dir, cfg, state, host_node.clone());
+    let handle = ServingHandle::new(dir, cfg, state, transport, host_node.clone());
     let ipc_server = match ipc::Server::bind(share).await {
         Ok(ipc_server) => ipc_server,
         Err(e) => {
@@ -105,6 +102,7 @@ pub struct ServingHandle {
 struct Inner {
     host_node: Arc<dyn HostNode>,
     db: storage::StateDb,
+    transport: TransportKind,
     started_at: chrono::DateTime<chrono::Utc>,
     reachable_since: RwLock<Option<chrono::DateTime<chrono::Utc>>>,
 
@@ -151,12 +149,14 @@ impl ServingHandle {
         dir: storage::ShareDir,
         config: ShareConfig,
         db: storage::StateDb,
+        transport: TransportKind,
         host_node: Arc<dyn HostNode>,
     ) -> Self {
         Self {
             inner: Arc::new(Inner {
                 host_node,
                 db,
+                transport,
                 reachable_since: RwLock::new(None),
                 connections: RwLock::new(HashMap::new()),
                 next_connection_id: AtomicU64::new(0),
@@ -177,6 +177,7 @@ impl ServingHandle {
     pub async fn stream_context(&self) -> protocol::StreamContext {
         protocol::StreamContext {
             config: self.config().await,
+            transport: self.inner.transport,
             events: self.inner.events.clone(),
             db: self.inner.db.clone(),
         }
@@ -186,6 +187,7 @@ impl ServingHandle {
     /// file passes validation.
     pub async fn reload(&self) -> Result<ReloadOutcome> {
         let fresh = Arc::new(self.inner.dir.load_config()?);
+        warn_about_config(&fresh);
         // Hold the write lock only for the swap; new streams read this lock.
         let changed = {
             let mut current = self.inner.config.write().await;
@@ -339,6 +341,16 @@ impl ServingHandle {
 }
 
 //-- Shared plumbing -----------------------------------------------------------
+
+/// Logs what is odd about a loaded `share.toml` without being wrong.
+fn warn_about_config(cfg: &ShareConfig) {
+    if cfg.apps.is_empty() {
+        warn!("no apps configured, guests will get 503 until `waserver reload`");
+    }
+    if cfg.legacy_transport.is_some() {
+        warn!("share.toml has a [transport] section. This is obsolete and can be deleted");
+    }
+}
 
 /// Produces a future that resolves if the process receives a shutdown signal
 /// (`SIGTERM` or `SIGINT`). If the handlers can't be installed, produces a

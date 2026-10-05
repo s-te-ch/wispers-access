@@ -40,7 +40,7 @@ pub async fn init(
         async move { client.remove_connectivity_group(&cg_id).await }
     });
 
-    let state = dir.create(config_text)?;
+    let state = dir.create(config_text, storage::TransportKind::WispersConnect)?;
     rollback.push("share directory", {
         let dir = dir.clone();
         async move { dir.delete().map_err(Into::into) }
@@ -48,6 +48,7 @@ pub async fn init(
     state.set_wispers_connect_state(&storage::WispersConnectState {
         api_key: api_key.to_owned(),
         connectivity_group_id: cg_id.clone(),
+        backend: backend.map(str::to_owned),
     })?;
 
     // Create the serving Wispers node and register it with the backend. The
@@ -81,14 +82,11 @@ fn explain_group_quota(e: anyhow::Error) -> anyhow::Error {
 
 /// Removes the connectivity group, which deregisters every node. A share
 /// whose `init` never got that far has nothing to remove.
-pub async fn deinit(
-    wcs: Option<storage::WispersConnectState>,
-    backend: Option<&str>,
-) -> Result<()> {
+pub async fn deinit(wcs: Option<storage::WispersConnectState>) -> Result<()> {
     let Some(wcs) = wcs else {
         return Ok(());
     };
-    wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend))
+    wcbe::Client::new(&wcs.api_key, &wcbe::api_base(wcs.backend.as_deref()))
         .remove_connectivity_group(&wcs.connectivity_group_id)
         .await
 }
@@ -112,16 +110,12 @@ pub struct HostNode {
     hub_session: RwLock<Option<wc::ServingHandle>>,
 }
 
-pub async fn bind(
-    share: &str,
-    state: storage::StateDb,
-    backend: Option<String>,
-) -> Result<HostNode> {
+pub async fn bind(share: &str, state: storage::StateDb) -> Result<HostNode> {
     let Some(wcs) = state.wispers_connect_state()? else {
         anyhow::bail!("Share {} has no Wispers Connect credentials", share);
     };
     let node_storage = wc::NodeStorage::new(state);
-    if let Some(backend) = backend.as_deref() {
+    if let Some(backend) = wcs.backend.as_deref() {
         node_storage.override_hub_addr(backend);
     }
     let node = Arc::new(node_storage.restore_or_init_node().await?);
@@ -133,8 +127,8 @@ pub async fn bind(
     };
     Ok(HostNode {
         connectivity_group_id: cg_id.to_string(),
-        wcbe_client: wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref())),
-        backend,
+        wcbe_client: wcbe::Client::new(&wcs.api_key, &wcbe::api_base(wcs.backend.as_deref())),
+        backend: wcs.backend,
         node,
         hub_session: RwLock::new(None),
     })
@@ -375,12 +369,7 @@ fn handle_session_end(
 /// node signs the revocation (its roster stays current) and the guest's live
 /// connection gets the `revoked` close. Otherwise with a restored copy of the
 /// host node, and the guest learns on its next dial.
-pub async fn revoke(
-    share: &str,
-    dir: storage::ShareDir,
-    backend: Option<String>,
-    node_number: i32,
-) -> Result<()> {
+pub async fn revoke(share: &str, dir: storage::ShareDir, node_number: i32) -> Result<()> {
     if node_number == HOST_NODE_NUMBER {
         anyhow::bail!("Node {node_number} is the host and cannot be revoked");
     }
@@ -393,29 +382,24 @@ pub async fn revoke(
                 Err(e) => anyhow::bail!("error sending command to server: {e}"),
             }
         }
-        Err(_) => revoke_offline(share, dir, backend, node_number).await?,
+        Err(_) => revoke_offline(share, dir, node_number).await?,
     }
     println!("Node {node_number} is now revoked and deregistered");
     Ok(())
 }
 
 /// `revoke` without a daemon: restores the host node and revokes with that.
-async fn revoke_offline(
-    share: &str,
-    dir: storage::ShareDir,
-    backend: Option<String>,
-    node_number: i32,
-) -> Result<()> {
+async fn revoke_offline(share: &str, dir: storage::ShareDir, node_number: i32) -> Result<()> {
     let state = dir.open_state()?;
     let Some(wcs) = state.wispers_connect_state()? else {
         anyhow::bail!("Share {} has no Wispers Connect credentials", share);
     };
     let node_storage = wc::NodeStorage::new(state);
-    if let Some(backend) = backend.as_deref() {
+    if let Some(backend) = wcs.backend.as_deref() {
         node_storage.override_hub_addr(backend);
     }
     let node = node_storage.restore_or_init_node().await?;
-    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend.as_deref()));
+    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(wcs.backend.as_deref()));
     revoke_on_hub(&node, &client, node_number).await
 }
 
@@ -455,13 +439,10 @@ async fn revoke_on_hub(node: &wc::Node, client: &wcbe::Client, node_number: i32)
 //-- Status --------------------------------------------------------------------
 
 /// Fills in the TransportReport, for status reporting.
-pub async fn report(
-    backend: Option<&str>,
-    wcs: Option<&storage::WispersConnectState>,
-) -> TransportReport {
+pub async fn report(wcs: Option<&storage::WispersConnectState>) -> TransportReport {
     let transport = |connectivity_group_id, group: Option<&wcbe::GroupDetail>| {
         TransportStatus::WispersConnect {
-            backend: backend.map(str::to_owned),
+            backend: wcs.and_then(|w| w.backend.clone()),
             connectivity_group_id,
             group_created_at: group.map(|g| g.created_at.clone()),
             node_quota: group.and_then(|g| g.node_quota),
@@ -474,7 +455,7 @@ pub async fn report(
             transport: Some(transport(None, None)),
         };
     };
-    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(backend));
+    let client = wcbe::Client::new(&wcs.api_key, &wcbe::api_base(wcs.backend.as_deref()));
     let (group, tokens) = tokio::join!(
         client.get_connectivity_group(&wcs.connectivity_group_id),
         client.list_registration_tokens(&wcs.connectivity_group_id)

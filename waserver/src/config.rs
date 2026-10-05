@@ -13,56 +13,25 @@ pub const FILENAME: &str = "share.toml";
 pub struct ShareConfig {
     /// Display name, shown to guests.
     pub name: String,
-    pub transport: TransportConfig,
     /// The shared apps, in the order found in the config file.
     #[serde(default, rename = "app")]
     pub apps: Vec<AppConfig>,
+    /// Legacy transport selection, used up to waserver 0.4, since moved to the
+    /// state DB. If present here and in the state DB, newer versions of
+    /// waserver will use the field to auto-migrate.
+    #[serde(default, rename = "transport")]
+    pub legacy_transport: Option<LegacyTransport>,
 }
 
-/// Peer-to-peer transport config.
-///
-/// Each transport type can have its own parameters. In the file, that looks
-/// like this:
-///
-/// ```toml
-/// [transport]
-/// kind = "wispers-connect"
-/// backend = "https://hub.example"
-/// ```
+/// The `[transport]` section of a 0.4 share file.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
-pub enum TransportConfig {
+pub enum LegacyTransport {
     WispersConnect {
-        /// Optional base URL of a self-hosted backend.
         #[serde(default)]
         backend: Option<String>,
     },
     Iroh {},
-}
-
-impl TransportConfig {
-    pub fn kind(&self) -> TransportKind {
-        match self {
-            TransportConfig::WispersConnect { .. } => TransportKind::WispersConnect,
-            TransportConfig::Iroh {} => TransportKind::Iroh,
-        }
-    }
-}
-
-/// The transport names, as on the command line and in status output.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
-pub enum TransportKind {
-    WispersConnect,
-    Iroh,
-}
-
-impl TransportKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            TransportKind::WispersConnect => "wispers-connect",
-            TransportKind::Iroh => "iroh",
-        }
-    }
 }
 
 /// Use the wire protocol's definition of AppKind.
@@ -91,10 +60,6 @@ pub enum Error {
     Read(String, std::io::Error),
     #[error(transparent)]
     Parse(#[from] toml::de::Error),
-    #[error(
-        "no [transport] section; a share created before waserver 0.4 is on Wispers Connect, add `kind = \"wispers-connect\"` under `[transport]`"
-    )]
-    MissingTransport,
     #[error("share name is empty")]
     EmptyName,
     #[error("app {0}: invalid id (use letters, digits, '-' or '_')")]
@@ -114,13 +79,7 @@ impl ShareConfig {
 
     /// Parse, normalise, and validate.
     pub fn parse(text: &str) -> Result<Self, Error> {
-        let mut cfg: ShareConfig = toml::from_str(text).map_err(|e| {
-            if e.message().starts_with("missing field `transport`") {
-                Error::MissingTransport
-            } else {
-                Error::Parse(e)
-            }
-        })?;
+        let mut cfg: ShareConfig = toml::from_str(text)?;
         if cfg.name.trim().is_empty() {
             return Err(Error::EmptyName);
         }
@@ -171,28 +130,16 @@ impl ShareConfig {
 }
 
 /// Renders the `share.toml` written by `init`.
-pub fn render_template(name: &str, transport: &TransportConfig) -> String {
-    let mut out = String::new();
-    out.push_str("# This share's config. Edit freely and apply with `waserver reload`.\n");
-    out.push_str("# Reference: one [[app]] block per shared app.\n\n");
-    out.push_str(&format!("name = {}\n\n", quote(name)));
-    out.push_str("[transport]\n");
-    out.push_str(&format!("kind = {}\n", quote(transport.kind().as_str())));
-    match transport {
-        TransportConfig::WispersConnect { backend: Some(b) } => {
-            out.push_str(&format!("backend = {}\n", quote(b)))
-        }
-        TransportConfig::WispersConnect { backend: None } => out.push_str(
-            "# backend = \"https://hub.example\"   # self-hosted Wispers Connect backend\n",
-        ),
-        TransportConfig::Iroh {} => {}
-    }
-    out.push_str(
-        "\n# One [[app]] block per app. Keep `id` stable, guest nodes refer to it.\n\
+pub fn render_template(name: &str) -> String {
+    format!(
+        "# This share's config. Edit freely and apply with `waserver reload`.\n\
+         # Reference: one [[app]] block per shared app.\n\n\
+         name = {}\n\n\
+         # One [[app]] block per app. Keep `id` stable, guest nodes refer to it.\n\
          # `upstream` is host:port, or :port for localhost.\n\
          #\n# [[app]]\n# id = \"myapp\"\n# name = \"My App\"\n# upstream = \":3000\"\n",
-    );
-    out
+        quote(name)
+    )
 }
 
 fn quote(s: &str) -> String {
@@ -263,9 +210,6 @@ mod tests {
     const FULL: &str = r#"
 name = "Family"
 
-[transport]
-kind = "wispers-connect"
-
 [[app]]
 id = "jellyfin"
 name = "Jellyfin"
@@ -281,10 +225,7 @@ upstream = ":2283"
     fn parses_and_normalises() {
         let cfg = ShareConfig::parse(FULL).unwrap();
         assert_eq!(cfg.name, "Family");
-        assert_eq!(
-            cfg.transport,
-            TransportConfig::WispersConnect { backend: None }
-        );
+        assert!(cfg.legacy_transport.is_none());
         assert_eq!(cfg.apps.len(), 2);
         assert_eq!(cfg.default_app().unwrap().id, "jellyfin");
         assert_eq!(cfg.apps[0].kind, AppKind::Jellyfin);
@@ -295,34 +236,38 @@ upstream = ":2283"
     }
 
     #[test]
-    fn transport_section_is_required_and_apps_may_be_absent() {
-        assert!(matches!(
-            ShareConfig::parse("name = \"x\"\n"),
-            Err(Error::MissingTransport)
-        ));
-        let cfg = ShareConfig::parse("name = \"x\"\n[transport]\nkind = \"iroh\"\n").unwrap();
-        assert_eq!(cfg.transport, TransportConfig::Iroh {});
+    fn apps_may_be_absent() {
+        let cfg = ShareConfig::parse("name = \"x\"\n").unwrap();
         assert!(cfg.apps.is_empty());
         assert!(cfg.default_app().is_none());
     }
 
     #[test]
-    fn transport_settings_live_with_their_transport() {
+    fn legacy_transport_section_still_parses() {
         let text = "name = \"x\"\n[transport]\nkind = \"wispers-connect\"\nbackend = \"https://h.example\"\n";
         let cfg = ShareConfig::parse(text).unwrap();
         assert_eq!(
-            cfg.transport,
-            TransportConfig::WispersConnect {
+            cfg.legacy_transport,
+            Some(LegacyTransport::WispersConnect {
                 backend: Some("https://h.example".to_owned())
-            }
+            })
         );
-        // A setting that belongs to no transport, or the old flat form, is rejected.
+        let cfg = ShareConfig::parse("name = \"x\"\n[transport]\nkind = \"iroh\"\n").unwrap();
+        assert_eq!(cfg.legacy_transport, Some(LegacyTransport::Iroh {}));
+        // Strict as it always was: no unknown settings, kinds or flat forms.
         assert!(
             ShareConfig::parse(
                 "name = \"x\"\n[transport]\nkind = \"wispers-connect\"\nrelay = \"r\"\n"
             )
             .is_err()
         );
+        assert!(
+            ShareConfig::parse(
+                "name = \"x\"\n[transport]\nkind = \"iroh\"\nbackend = \"https://h\"\n"
+            )
+            .is_err()
+        );
+        assert!(ShareConfig::parse("name = \"x\"\n[transport]\nkind = \"tailscale\"\n").is_err());
         assert!(ShareConfig::parse("name = \"x\"\ntransport = \"wispers-connect\"\n").is_err());
         assert!(ShareConfig::parse("name = \"x\"\nbackend = \"https://h.example\"\n").is_err());
     }
@@ -330,48 +275,30 @@ upstream = ":2283"
     #[test]
     fn rejects_bad_files() {
         assert!(matches!(
-            ShareConfig::parse("name = \"\"\n[transport]\nkind = \"iroh\"\n"),
+            ShareConfig::parse("name = \"\"\n"),
             Err(Error::EmptyName)
         ));
-        assert!(matches!(
-            ShareConfig::parse("name = \"x\"\n[transport]\nkind = \"tailscale\"\n"),
-            Err(Error::Parse(_))
-        ));
-        // A setting from another transport is a parse error.
-        assert!(matches!(
-            ShareConfig::parse(
-                "name = \"x\"\n[transport]\nkind = \"iroh\"\nbackend = \"https://h\"\n"
-            ),
-            Err(Error::Parse(_))
-        ));
-        assert_eq!(
-            ShareConfig::parse("name = \"x\"\n[transport]\nkind = \"iroh\"\n")
-                .unwrap()
-                .transport,
-            TransportConfig::Iroh {}
-        );
         assert!(matches!(
             ShareConfig::parse("name = \"x\"\nbogus = 1\n"),
             Err(Error::Parse(_))
         ));
-        let dup = "name = \"x\"\n[transport]\nkind = \"iroh\"\n[[app]]\nid = \"a\"\nupstream = \":1\"\n[[app]]\nid = \"a\"\nupstream = \":2\"\n";
+        let dup = "name = \"x\"\n[[app]]\nid = \"a\"\nupstream = \":1\"\n[[app]]\nid = \"a\"\nupstream = \":2\"\n";
         assert!(matches!(
             ShareConfig::parse(dup),
             Err(Error::DuplicateAppId(id)) if id == "a"
         ));
-        let bad_id = "name = \"x\"\n[transport]\nkind = \"iroh\"\n[[app]]\nid = \"a b\"\nupstream = \":1\"\n";
+        let bad_id = "name = \"x\"\n[[app]]\nid = \"a b\"\nupstream = \":1\"\n";
         assert!(matches!(
             ShareConfig::parse(bad_id),
             Err(Error::InvalidAppId(_))
         ));
-        let bad_port =
-            "name = \"x\"\n[transport]\nkind = \"iroh\"\n[[app]]\nid = \"a\"\nupstream = \"app\"\n";
+        let bad_port = "name = \"x\"\n[[app]]\nid = \"a\"\nupstream = \"app\"\n";
         assert!(matches!(
             ShareConfig::parse(bad_port),
             Err(Error::InvalidUpstream { app, .. }) if app == "a"
         ));
         // An unknown kind is a contract violation, not a free-form label.
-        let bad_kind = "name = \"x\"\n[transport]\nkind = \"iroh\"\n[[app]]\nid = \"a\"\nkind = \"plex\"\nupstream = \":1\"\n";
+        let bad_kind = "name = \"x\"\n[[app]]\nid = \"a\"\nkind = \"plex\"\nupstream = \":1\"\n";
         assert!(matches!(ShareConfig::parse(bad_kind), Err(Error::Parse(_))));
     }
 
@@ -388,22 +315,11 @@ upstream = ":2283"
 
     #[test]
     fn template_round_trips() {
-        let transport = TransportConfig::WispersConnect {
-            backend: Some("https://h.example".to_owned()),
-        };
-        let cfg = ShareConfig::parse(&render_template("It's \"Demo\"", &transport)).unwrap();
+        let cfg = ShareConfig::parse(&render_template("It's \"Demo\"")).unwrap();
         assert_eq!(cfg.name, "It's \"Demo\"");
-        assert_eq!(cfg.transport, transport);
         // The app block is commented out, so nothing is served until edited.
         assert!(cfg.apps.is_empty());
-
-        let managed = TransportConfig::WispersConnect { backend: None };
-        let cfg = ShareConfig::parse(&render_template("x", &managed)).unwrap();
-        assert_eq!(cfg.transport, managed);
-
-        let iroh = TransportConfig::Iroh {};
-        let cfg = ShareConfig::parse(&render_template("x", &iroh)).unwrap();
-        assert_eq!(cfg.transport, iroh);
+        assert!(cfg.legacy_transport.is_none());
     }
 
     #[test]

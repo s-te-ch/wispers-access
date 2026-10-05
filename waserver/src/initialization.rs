@@ -1,19 +1,21 @@
 //! `init` and `deinit`.
 
-use crate::config::{self, TransportConfig};
+use crate::config;
 use crate::ipc;
 use crate::iroh_transport;
-use crate::storage;
+use crate::storage::{self, TransportKind};
 use crate::wispers_connect_transport;
 use anyhow::Result;
 use std::future::Future;
 use std::pin::Pin;
 
 pub async fn up(
-    api_key: Option<&str>,
     share: &str,
     display_name: &str,
-    transport: &TransportConfig,
+    transport: TransportKind,
+    // Optional API key and backend URL for wispers-connect.
+    api_key: Option<&str>,
+    backend: Option<&str>,
 ) -> Result<()> {
     let dir = storage::ShareDir::new(share)?;
     if dir.exists() {
@@ -24,22 +26,22 @@ pub async fn up(
     let mut rollback = Rollback::new();
 
     // Generate the `share.toml` contents.
-    let config_text = config::render_template(display_name, transport);
+    let config_text = config::render_template(display_name);
 
     // Run the transport-specific parts.
     let result = match transport {
-        TransportConfig::WispersConnect { backend } => {
+        TransportKind::WispersConnect => {
             wispers_connect_transport::init(
                 &mut rollback,
                 &dir,
                 &config_text,
                 api_key,
                 display_name,
-                backend.as_deref(),
+                backend,
             )
             .await
         }
-        TransportConfig::Iroh {} => iroh_transport::init(&mut rollback, &dir, &config_text),
+        TransportKind::Iroh => iroh_transport::init(&mut rollback, &dir, &config_text),
     };
 
     // Handle success/error.
@@ -62,8 +64,7 @@ pub async fn up(
 
 pub async fn down(share: &str) -> Result<()> {
     let dir = storage::ShareDir::new(share)?;
-    let cfg = dir.load_config()?;
-    let wcs = dir.open_state()?.wispers_connect_state()?;
+    let state = dir.open_state()?;
 
     // Refuse to tear down a share while its server is still running.
     if let Ok(mut client) = ipc::Client::connect(share).await {
@@ -100,11 +101,11 @@ pub async fn down(share: &str) -> Result<()> {
     }
 
     // Run transport-specific deinit.
-    match &cfg.transport {
-        TransportConfig::WispersConnect { backend } => {
-            wispers_connect_transport::deinit(wcs, backend.as_deref()).await?
+    match state.transport()? {
+        TransportKind::WispersConnect => {
+            wispers_connect_transport::deinit(state.wispers_connect_state()?).await?
         }
-        TransportConfig::Iroh {} => {
+        TransportKind::Iroh => {
             // iroh has nothing beyond what dir.delete() below removes.
         }
     }

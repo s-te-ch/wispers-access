@@ -19,9 +19,6 @@ ID:
 cat > team.toml <<'TOML'
 name = "Awesome Team"
 
-[transport]
-kind = "iroh"
-
 [[app]]
 id = "myapp"
 name = "My App"
@@ -45,8 +42,8 @@ For an app in the same compose stack, the upstream is just `service:port` and
 ```
 entrypoint.sh
   ├─ find the desired shares: one /config/<name>.toml per share
-  ├─ `waserver init` any not yet initialised   (identity created once, on /data,
-  │                                              on the transport the file names)
+  ├─ `waserver init` any not yet initialised   (identity created once, on /data;
+  │                                              iroh unless the file says otherwise)
   ├─ copy each file over its share's share.toml
   ├─ generate one supervisord program per share
   └─ exec supervisord (PID 1)
@@ -70,9 +67,8 @@ entrypoint.sh
 
 One file per share, mounted at `/config/<name>.toml`, where `<name>` is the
 share's id (letters, digits, `-`, `_`). The format is the same one `waserver
-init` writes: the share's `name` as guests see it, a `[transport]` section, and
-one `[[app]]` block per app (`id`, `name`, `upstream`). See
-`share.example.toml`.
+init` writes: the share's `name` as guests see it and one `[[app]]` block per
+app (`id`, `name`, `upstream`). See `share.example.toml`.
 
 `upstream` is `host:port` on the Docker network, or `:port` for the container
 itself. A compose service is just its name, e.g. `app:8080`.
@@ -115,8 +111,10 @@ mount a volume.
 
 ## Wispers Connect (optional)
 
-A share's `[transport]` picks iroh, which needs no account, or Wispers Connect.
-A Wispers Connect share is created with the API key in `WC_API_KEY`, so pass
+A share is on iroh, which needs no account, unless its file has a `[transport]`
+section with `kind = "wispers-connect"` when the container first creates it.
+The transport is fixed from then on; the section only matters for `init`. A
+Wispers Connect share is created with the API key in `WC_API_KEY`, so pass
 that to the container (`-e WC_API_KEY=…`, or the Environment Variables tab of
 your platform). By default it uses the managed Wispers Connect backend; a
 self-hosted one goes in `WC_BACKEND`, read once at `waserver init`, stored
