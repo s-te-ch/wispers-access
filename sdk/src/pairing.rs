@@ -33,8 +33,8 @@ pub struct CookieIssuer {
     tokens: Mutex<HashMap<String, Option<Instant>>>,
 }
 
-/// The cookie the proxy sets.
-const COOKIE_NAME: &str = "__wispers_access_pairing";
+/// Prefix of the cookies the proxy sets.
+const COOKIE_NAME_PREFIX: &str = "__wispers_access_pairing";
 
 /// Where the secret lives in the secret store, under [`SecretScope::Client`].
 const SECRET_KEY: &str = "browser_pairing_secret";
@@ -60,7 +60,7 @@ impl CookieIssuer {
         };
         Ok(Self {
             cookie: RequiredCookie {
-                name: COOKIE_NAME.to_owned(),
+                name: cookie_name(&secret),
                 value: secret,
             },
             token_lifetime,
@@ -106,6 +106,23 @@ impl CookieIssuer {
     }
 }
 
+/// The cookie's name, unique to this client. This allows multiple Wispers
+/// Access clients to coexist on the same system with the same browser.
+fn cookie_name(secret: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::new()
+        .chain_update(b"wispers-access pairing cookie name\0")
+        .chain_update(secret.as_bytes())
+        .finalize();
+    let tag: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{COOKIE_NAME_PREFIX}_{tag}")
+}
+
+/// True is the cookie is Wispers Access pairing cookie.
+pub fn is_pairing_cookie(name: &str) -> bool {
+    name.starts_with(COOKIE_NAME_PREFIX)
+}
+
 /// A year: a pairing is a device-local capability, not a session.
 const COOKIE_MAX_AGE: u64 = 365 * 24 * 60 * 60;
 
@@ -135,6 +152,22 @@ mod tests {
         assert_eq!(first.required_cookie(), second.required_cookie());
         assert_eq!(first.required_cookie().value.len(), 64);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn each_client_names_its_cookie_differently() {
+        let (one_dir, one) = scratch_store();
+        let (other_dir, other) = scratch_store();
+        let one = CookieIssuer::restore_or_mint(&one, Duration::from_secs(60)).unwrap();
+        let other = CookieIssuer::restore_or_mint(&other, Duration::from_secs(60)).unwrap();
+        let name = &one.required_cookie().name;
+        assert_ne!(name, &other.required_cookie().name);
+        assert_eq!(name.len(), "__wispers_access_pairing_".len() + 16);
+        assert!(is_pairing_cookie(name));
+        assert!(is_pairing_cookie("__wispers_access_pairing"));
+        assert!(!is_pairing_cookie("__wispers_proxy_auth"));
+        std::fs::remove_dir_all(one_dir).unwrap();
+        std::fs::remove_dir_all(other_dir).unwrap();
     }
 
     #[test]

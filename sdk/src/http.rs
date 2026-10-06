@@ -5,7 +5,7 @@
 //! `http://wa.localhost:<port>` is used for browser pairing (see
 //! [`crate::pairing`]).
 
-use crate::pairing::CookieIssuer;
+use crate::pairing::{self, CookieIssuer};
 use crate::transports::{TerminalState, TransportError};
 use crate::{Client, Lookup, ShareId};
 use anyhow::{Context, Result};
@@ -101,8 +101,12 @@ impl Authenticator {
     }
 
     /// Removes the cookie from the request, so the proxied app can't read it.
-    fn scrub(&self, req: &mut hyper::Request<Incoming>) {
-        self.cookie.strip_from(req.headers_mut());
+    /// If the browser is paired with other clients, their pairing cookies get
+    /// removed too.
+    fn scrub(&self, headers: &mut hyper::HeaderMap) {
+        strip_cookies(headers, |name| {
+            name == self.cookie.name || pairing::is_pairing_cookie(name)
+        });
     }
 
     /// What issues the cookie to browsers, in pairing mode.
@@ -130,43 +134,42 @@ impl RequiredCookie {
             .filter_map(|pair| pair.trim().split_once('='))
             .any(|(name, value)| name == self.name && constant_time_eq(value, &self.value))
     }
+}
 
-    /// Removes the cookie from the request's `Cookie` headers, so the app
-    /// behind the proxy can't read it.
-    fn strip_from(&self, headers: &mut hyper::HeaderMap) {
-        use hyper::header::{COOKIE, HeaderValue};
+/// Removes every cookie whose name passes `criterion` from the request's
+/// `Cookie` headers, so the app behind the proxy can't read them.
+fn strip_cookies(headers: &mut hyper::HeaderMap, criterion: impl Fn(&str) -> bool) {
+    use hyper::header::{COOKIE, HeaderValue};
 
-        // A `name=value` pair of a `Cookie` header, ours by name.
-        let is_ours = |pair: &str| {
-            pair.split_once('=')
-                .is_some_and(|(name, _)| name == self.name)
-        };
-        // One `Cookie` header without our pair, or nothing if that was all
-        // it carried.
-        let without_ours = |header: &HeaderValue| -> Option<HeaderValue> {
-            let rest = header
-                .to_str()
-                .ok()?
-                .split(';')
-                .map(str::trim)
-                .filter(|pair| !is_ours(pair))
-                .collect::<Vec<_>>()
-                .join("; ");
-            if rest.is_empty() {
-                return None;
-            }
-            HeaderValue::from_str(&rest).ok()
-        };
-
-        let kept: Vec<HeaderValue> = headers
-            .get_all(COOKIE)
-            .iter()
-            .filter_map(without_ours)
-            .collect();
-        headers.remove(COOKIE);
-        for value in kept {
-            headers.append(COOKIE, value);
+    // One `Cookie` header without the stripped `name=value` pairs, or
+    // nothing if that was all it carried.
+    let without_stripped = |header: &HeaderValue| -> Option<HeaderValue> {
+        let rest = header
+            .to_str()
+            .ok()?
+            .split(';')
+            .map(str::trim)
+            .filter(|pair| {
+                !pair
+                    .split_once('=')
+                    .is_some_and(|(name, _)| criterion(name))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if rest.is_empty() {
+            return None;
         }
+        HeaderValue::from_str(&rest).ok()
+    };
+
+    let kept: Vec<HeaderValue> = headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(without_stripped)
+        .collect();
+    headers.remove(COOKIE);
+    for value in kept {
+        headers.append(COOKIE, value);
     }
 }
 
@@ -284,7 +287,7 @@ async fn forward(
                 None => error_response(StatusCode::FORBIDDEN, "forbidden"),
             });
         }
-        authenticator.scrub(&mut req);
+        authenticator.scrub(req.headers_mut());
     }
 
     let share = match client.guest_node(&share).await {
@@ -744,10 +747,6 @@ mod tests {
 
     #[test]
     fn the_required_cookie_is_stripped_and_the_others_kept() {
-        let cookie = RequiredCookie {
-            name: "__wispers_proxy_auth".into(),
-            value: "s3cret".into(),
-        };
         let mut headers = hyper::HeaderMap::new();
         headers.append(
             hyper::header::COOKIE,
@@ -757,9 +756,32 @@ mod tests {
             hyper::header::COOKIE,
             "__wispers_proxy_auth=other".parse().unwrap(),
         );
-        cookie.strip_from(&mut headers);
+        strip_cookies(&mut headers, |name| name == "__wispers_proxy_auth");
         let left: Vec<_> = headers.get_all(hyper::header::COOKIE).iter().collect();
         assert_eq!(left, ["a=1; b=2"]);
+    }
+
+    #[test]
+    fn every_clients_pairing_cookie_is_scrubbed() {
+        let dir =
+            std::env::temp_dir().join(format!("wispers-access-scrub-{}", uuid::Uuid::new_v4()));
+        let store = crate::secrets::FileSecretStore::new(dir.clone());
+        let issuer = CookieIssuer::restore_or_mint(&store, std::time::Duration::MAX).unwrap();
+        let ours = issuer.required_cookie().name.clone();
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::COOKIE,
+            format!(
+                "a=1; {ours}=x; __wispers_access_pairing_0123456789abcdef=y; \
+                 __wispers_access_pairing=z; b=2"
+            )
+            .parse()
+            .unwrap(),
+        );
+        Authenticator::for_pairing(issuer).scrub(&mut headers);
+        let left: Vec<_> = headers.get_all(hyper::header::COOKIE).iter().collect();
+        assert_eq!(left, ["a=1; b=2"]);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
