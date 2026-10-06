@@ -43,7 +43,7 @@
 #
 services:
   waserver:
-    image: ghcr.io/s-te-ch/wispers/access/waserver:latest
+    image: ghcr.io/s-te-ch/wispers/access/waserver:0.5.0
     restart: unless-stopped
     networks:
       - coolify
