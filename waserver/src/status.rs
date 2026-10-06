@@ -562,6 +562,7 @@ fn print_fleet(report: &StatusReport) {
             None => "?".to_owned(),
         };
         let state = match (c.server.state, c.server.reload_pending) {
+            _ if c.config_error.is_some() => "config error".to_owned(),
             (s, Some(true)) => format!("{} (reload pending)", s),
             (s, _) => s.to_owned(),
         };
@@ -573,6 +574,11 @@ fn print_fleet(report: &StatusReport) {
         .unwrap();
     }
     tw.flush().unwrap();
+    for c in &report.shares {
+        if let Some(e) = &c.config_error {
+            println!("{}: {}", c.name, e);
+        }
+    }
 
     if let Some(quotas) = &report.groups_quota {
         println!("\nShare usage per API key");

@@ -9,7 +9,7 @@ use chrono::{DateTime, Utc};
 use rusqlite_migration::{M, Migrations};
 use std::fs;
 use std::io::{self, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use tempfile::NamedTempFile;
 use wispers_access_wire as wire;
@@ -45,15 +45,21 @@ pub enum Error {
     NoConfigDir,
 }
 
-/// Names of the initialised shares, unsorted.
+/// Names of the shares under the shares directory, unsorted.
 pub fn list_shares() -> Result<Vec<String>, Error> {
-    let dir = shares_dir()?;
+    list_shares_under(&shares_dir()?)
+}
+
+/// List the names of the shares under `dir`. That is, every directory with a
+/// `share.toml` entry, whether or not that entry can be read. Catches errors
+/// like dangling symlinks.
+fn list_shares_under(dir: &Path) -> Result<Vec<String>, Error> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
     Ok(fs::read_dir(dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().join(config::FILENAME).is_file())
+        .filter(|e| e.path().join(config::FILENAME).symlink_metadata().is_ok())
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect())
 }
@@ -82,8 +88,11 @@ impl ShareDir {
         self.dir.join(config::FILENAME)
     }
 
+    /// True if the share is initialised, even if actually reading the config
+    /// throws an error. This prevents reporting a bad share as "not
+    /// initialised".
     pub fn exists(&self) -> bool {
-        self.config_path().is_file()
+        self.config_path().symlink_metadata().is_ok()
     }
 
     pub fn load_config(&self) -> Result<ShareConfig, Error> {
@@ -724,6 +733,34 @@ fn write_atomically(dir: &PathBuf, name: &str, data: &[u8]) -> Result<(), io::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn listing_keeps_shares_whose_config_cannot_be_read() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        fs::create_dir(dir.join("fine")).unwrap();
+        fs::write(dir.join("fine").join(config::FILENAME), "name = \"Fine\"").unwrap();
+        fs::create_dir(dir.join("empty")).unwrap(); // no share.toml: not a share
+        fs::write(dir.join("stray-file"), "").unwrap();
+        #[cfg(unix)]
+        {
+            fs::create_dir(dir.join("dangling")).unwrap();
+            std::os::unix::fs::symlink(
+                "/nowhere/dangling.toml",
+                dir.join("dangling").join(config::FILENAME),
+            )
+            .unwrap();
+        }
+        let mut names = list_shares_under(dir).unwrap();
+        names.sort();
+        let expected: &[&str] = if cfg!(unix) {
+            &["dangling", "fine"]
+        } else {
+            &["fine"]
+        };
+        assert_eq!(names, expected);
+        assert!(list_shares_under(&dir.join("missing")).unwrap().is_empty());
+    }
 
     #[test]
     fn waserver_dir_roots_every_path() {
