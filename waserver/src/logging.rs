@@ -274,7 +274,15 @@ pub fn list_log_files(share: &str) -> Result<Vec<PathBuf>> {
 /// - Windows: `%LOCALAPPDATA%\waserver\Logs\<share>\`
 /// - Linux:   `$XDG_STATE_HOME/waserver/<share>/` (defaults to
 ///   `~/.local/state/waserver/<share>/`)
+///
+/// You can also set `WASERVER_DIR` to override the placement, in which case
+/// this is `$WASERVER_DIR/logs/<share>/` no matter the platform (see
+/// `storage::override_dir`)
+
 pub fn log_dir(share: &str) -> Result<PathBuf> {
+    if let Some(dir) = crate::storage::override_dir() {
+        return Ok(dir.join("logs").join(share));
+    }
     let base = if cfg!(target_os = "macos") {
         dirs::home_dir()
             .context("could not determine home directory")?
