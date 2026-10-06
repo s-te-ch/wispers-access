@@ -277,8 +277,7 @@ pub fn list_log_files(share: &str) -> Result<Vec<PathBuf>> {
 ///
 /// You can also set `WASERVER_DIR` to override the placement, in which case
 /// this is `$WASERVER_DIR/logs/<share>/` no matter the platform (see
-/// `storage::override_dir`)
-
+/// `storage::override_dir`).
 pub fn log_dir(share: &str) -> Result<PathBuf> {
     if let Some(dir) = crate::storage::override_dir() {
         return Ok(dir.join("logs").join(share));
