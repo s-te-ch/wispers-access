@@ -437,16 +437,23 @@ impl Client {
 
 #[cfg(unix)]
 fn ipc_path(share: &str) -> PathBuf {
-    let base = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
-    let dir = base.join(".waserver").join("sockets");
-    dir.join(format!("{}.sock", share))
+    ipc_dir("sockets").join(format!("{}.sock", share))
 }
 
 #[cfg(windows)]
 fn ipc_path(share: &str) -> PathBuf {
-    let base = dirs::home_dir().unwrap_or_else(std::env::temp_dir);
-    let dir = base.join(".waserver").join("ports");
-    dir.join(format!("{}.port", share))
+    ipc_dir("ports").join(format!("{}.port", share))
+}
+
+/// `$WASERVER_DIR/<kind>` if set, else `~/.waserver/<kind>`.
+fn ipc_dir(kind: &str) -> PathBuf {
+    match crate::storage::override_dir() {
+        Some(dir) => dir.join(kind),
+        None => dirs::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".waserver")
+            .join(kind),
+    }
 }
 
 #[cfg(windows)]

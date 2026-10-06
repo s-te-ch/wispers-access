@@ -1,6 +1,7 @@
 //! Per-share on-disk storage.
 //!
-//! `~/.config/waserver/shares/<share>/` holds two files with two owners:
+//! The per-share directory (`~/.config/waserver/shares/<share>/` or
+//! `$WASERVER_DIR/shares/<share>/`) holds two files with two owners:
 //! `share.toml` (the user's, see `config`) and `state.db` (the daemon's).
 
 use crate::config::{self, ShareConfig};
@@ -677,10 +678,20 @@ fn shares_dir() -> Result<PathBuf, Error> {
 }
 
 fn base_dir() -> Result<PathBuf, Error> {
+    if let Some(dir) = override_dir() {
+        return Ok(dir);
+    }
     let dir = dirs::config_dir()
         .ok_or(Error::NoConfigDir)?
         .join("waserver");
     Ok(dir)
+}
+
+/// If `WASERVER_DIR` is set, the corresponding PathBuf.
+pub fn override_dir() -> Option<PathBuf> {
+    std::env::var_os("WASERVER_DIR")
+        .filter(|dir| !dir.is_empty())
+        .map(PathBuf::from)
 }
 
 fn ensure_dir_exists(dir: &PathBuf) -> Result<(), io::Error> {
@@ -713,6 +724,23 @@ fn write_atomically(dir: &PathBuf, name: &str, data: &[u8]) -> Result<(), io::Er
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn waserver_dir_roots_every_path() {
+        // Environment variables are process-wide; set and restore around the check.
+        unsafe { std::env::set_var("WASERVER_DIR", "/srv/wa") }
+        assert_eq!(base_dir().unwrap(), PathBuf::from("/srv/wa"));
+        assert_eq!(shares_dir().unwrap(), PathBuf::from("/srv/wa/shares"));
+        assert_eq!(
+            crate::logging::log_dir("team").unwrap(),
+            PathBuf::from("/srv/wa/logs/team")
+        );
+        // Empty counts as unset.
+        unsafe { std::env::set_var("WASERVER_DIR", "") }
+        assert!(override_dir().is_none());
+        unsafe { std::env::remove_var("WASERVER_DIR") }
+        assert!(base_dir().unwrap().ends_with("waserver"));
+    }
     use wc::NodeStateStore;
 
     #[test]

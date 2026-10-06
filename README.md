@@ -57,9 +57,16 @@ device.
 
 ### 1. Install waserver
 
-Download the archive for your platform (Linux, macOS or Windows) from the
-[releases page](https://github.com/s-te-ch/wispers-access/releases) and put
-`waserver` on your `PATH`.
+On Linux or macOS:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/s-te-ch/wispers-access/main/install.sh | sh
+```
+
+This puts the newest `waserver` and `waclient` into `/usr/local/bin`. Or just
+download the binaries from the [releases
+page](https://github.com/s-te-ch/wispers-access/releases). See the [hosting
+guide](docs/hosting.md) for more details on installing and running waserver.
 
 Prefer containers? Follow quick start in the [container
 README](waserver/docker/README.md) instead. For Coolify, see
