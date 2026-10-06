@@ -140,7 +140,10 @@ fn main() -> Result<()> {
     // `waserver start <share>`, do it now. Note that the for-all-shares version
     // (`waserver start`) stays in the foreground and spawns one `waserver start
     // <share>` for each share.
-    if let Command::Start { share: Some(_) } = &cli.command {
+    if let Command::Start { share: Some(share) } = &cli.command {
+        // Check the config before deamonising, so if there's an error we fail
+        // while we can still print the error to the terminal.
+        storage::ShareDir::new(share)?.load_config()?;
         daemon::start_daemon()?;
     }
 
