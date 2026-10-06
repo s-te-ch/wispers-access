@@ -102,6 +102,12 @@ enum Command {
         /// Also write the invite QR code as a PNG to this path, for emailing.
         #[arg(long, value_name = "PATH")]
         png: Option<std::path::PathBuf>,
+        /// Print the invite code only, without the QR code.
+        #[arg(long)]
+        no_qr: bool,
+        /// Print the invite as JSON (`{"code": …}`).
+        #[arg(long)]
+        json: bool,
     },
     /// Revoke access.
     Revoke {
@@ -198,7 +204,12 @@ async fn async_main(command: Command) -> Result<()> {
             node_name,
             user_id,
             png,
-        } => invites::invite(&share, &node_name, &user_id, png.as_deref()).await,
+            no_qr,
+            json,
+        } => {
+            let code = invites::request_code(&share, &node_name, &user_id).await?;
+            invites::render_code(&code, json, !no_qr, png.as_deref())
+        }
         Command::Revoke { share, number } => revoke(&share, number).await,
     }
 }
@@ -351,6 +362,35 @@ mod tests {
             } => {
                 assert_eq!(api_key.as_deref(), Some("k"));
                 assert_eq!(transport, storage::TransportKind::WispersConnect);
+            }
+            _ => panic!("parsed the wrong command"),
+        }
+    }
+
+    #[test]
+    fn cli_parses_invite_flags() {
+        let cli = Cli::try_parse_from(["waserver", "invite", "team", "Phone", "a@b.c"]).unwrap();
+        match cli.command {
+            Command::Invite {
+                png, no_qr, json, ..
+            } => {
+                assert_eq!(png, None);
+                assert!(!no_qr);
+                assert!(!json);
+            }
+            _ => panic!("parsed the wrong command"),
+        }
+        let cli = Cli::try_parse_from([
+            "waserver", "invite", "team", "Phone", "a@b.c", "--json", "--no-qr", "--png", "q.png",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Invite {
+                png, no_qr, json, ..
+            } => {
+                assert_eq!(png.as_deref(), Some(std::path::Path::new("q.png")));
+                assert!(no_qr);
+                assert!(json);
             }
             _ => panic!("parsed the wrong command"),
         }

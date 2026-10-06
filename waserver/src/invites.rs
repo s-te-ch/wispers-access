@@ -1,15 +1,12 @@
 //! `waserver invite`: asks the share's running server for an invite code and
-//! shows it as text and as a QR code.
+//! shows it as text and as a QR code, or as JSON for scripts.
 
 use crate::ipc;
 use anyhow::{Context, Result};
+use std::path::Path;
 
-pub async fn invite(
-    share: &str,
-    node_name: &str,
-    user_id: &str,
-    png: Option<&std::path::Path>,
-) -> Result<()> {
+/// Asks the share's running server to mint an invite.
+pub async fn request_code(share: &str, node_name: &str, user_id: &str) -> Result<String> {
     let Ok(mut client) = ipc::Client::connect(share).await else {
         anyhow::bail!("cannot connect to server for share {}", share);
     };
@@ -17,11 +14,11 @@ pub async fn invite(
         node_name: node_name.to_owned(),
         user_id: user_id.to_owned(),
     };
-    let code = match client.request(&req).await {
+    match client.request(&req).await {
         Ok(ipc::Response::Success {
             data: ipc::ResponseData::Invite(invite),
             ..
-        }) => invite.code,
+        }) => Ok(invite.code),
         Ok(ipc::Response::Success { .. }) => {
             anyhow::bail!("unexpected response from server");
         }
@@ -31,20 +28,41 @@ pub async fn invite(
         Err(e) => {
             anyhow::bail!("error sending command to server: {}", e);
         }
-    };
-    let qr = qrcode::QrCode::new(code.as_bytes()).context("cannot build QR code")?;
-    println!("Invite code (valid for 24 hours):\n\n  {}\n", code);
-    println!("{}", render_qr_ansi(&qr));
+    }
+}
+
+/// Render the code. With `json`, prints `{"code": …}`. Otherwise prints the
+/// code as human readable text, plus a QR code in the terminal if `qr` is true.
+/// Also writes a PNG at `png` if given.
+pub fn render_code(code: &str, json: bool, qr: bool, png: Option<&Path>) -> Result<()> {
+    if json {
+        println!("{}", serde_json::json!({ "code": code }));
+    } else {
+        println!("Invite code (valid for 24 hours):\n\n  {}\n", code);
+        if qr {
+            println!("{}", render_qr_ansi(&qr_code(code)?));
+        }
+    }
     if let Some(path) = png {
-        let img = qr
-            .render::<image::Luma<u8>>()
-            .min_dimensions(360, 360)
-            .build();
-        img.save(path)
-            .with_context(|| format!("cannot write {}", path.display()))?;
-        println!("QR code written to {}", path.display());
+        write_png(code, path)?;
+        if !json {
+            println!("QR code written to {}", path.display());
+        }
     }
     Ok(())
+}
+
+fn write_png(code: &str, path: &Path) -> Result<()> {
+    let img = qr_code(code)?
+        .render::<image::Luma<u8>>()
+        .min_dimensions(360, 360)
+        .build();
+    img.save(path)
+        .with_context(|| format!("cannot write {}", path.display()))
+}
+
+fn qr_code(code: &str) -> Result<qrcode::QrCode> {
+    qrcode::QrCode::new(code.as_bytes()).context("cannot build QR code")
 }
 
 /// Render a QR code to a terminal string that scans regardless of terminal
