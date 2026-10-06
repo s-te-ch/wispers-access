@@ -126,8 +126,9 @@ pub struct Desktop {
 }
 
 /// The port the proxy asks for. Fixed so bookmarks keep working across
-/// restarts.
-const PROXY_PORT: u16 = 4242;
+/// restarts. No known desktop software uses it, but if you know the Fibonacci
+/// sequence it's still quite memorable :)
+const PROXY_PORT: u16 = 11235;
 
 /// A pairing link is followed the moment it is minted, by a click in the UI.
 const TOKEN_LIFETIME: Duration = Duration::from_secs(60);
