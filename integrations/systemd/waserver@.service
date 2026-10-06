@@ -1,0 +1,47 @@
+# Unit file running one waserver instance per share.
+#
+# This is a parameterised service. To enable and start serving a particular
+# share, write `systemctl enable --now waserver@<share>`.
+#
+# This runs as the `waserver` user, with state files in its home
+# /var/lib/waserver. To run waserver commands as that user:
+# `sudo -H -u waserver -H waserver …`.
+
+[Unit]
+Description=Wispers Access server for share %i
+Documentation=https://github.com/s-te-ch/wispers-access
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=waserver
+Group=waserver
+StateDirectory=waserver
+ExecStart=/usr/local/bin/waserver serve %i
+ExecReload=/usr/local/bin/waserver reload %i
+Restart=on-failure
+RestartSec=5s
+
+# Set hardening options. The server needs UDP and TCP, Unix sockets, and netlink
+# (iroh watches for network changes), nothing else.
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

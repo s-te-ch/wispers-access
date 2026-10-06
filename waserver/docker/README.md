@@ -58,62 +58,13 @@ Finally, if you don't want to type the `docker exec` prefixes every time:
 `docker exec -it waserver bash` gets you a shell where you can use `waserver`
 commands directly.
 
-## Configuring the container
+## Configuring it
 
-The container can be configured through environment variables, which it reads on
-the first start to create the default share. Later starts find one or more
-initialised shares on `/data` and skip this step.
-
-| variable          | default   | meaning                                                       |
-|-------------------|-----------|---------------------------------------------------------------|
-| `SHARE_ID`        | `default` | the default share's ID                                        |
-| `SHARE_NAME`      |           | the display name of the default share                         |
-| `SHARE_TRANSPORT` | `iroh`    | the peer-to-peer transport library to use                     |
-| `WC_API_KEY`      |           | API key for transport `wispers-connect`                       |
-| `WC_BACKEND`      |           | Optional backend URL override for transport `wispers-connect` |
-| `EDITOR`          |           | the editor `waserver edit` opens                              |
-
-Note that while the container creates a single default share on startup, you can
-always invoke `waserver init` inside the container to create more. You do,
-however, have to restart the container for them to get picked up by supervisord.
-
-## Configuring a share
-
-The easiest way to configure a share is to run `waserver edit <share>` in the
-container's shell. This opens the correct TOML file and automatically reloads
-the configuration in `waserver`.
-
-The file has one `[[app]]` block per shared app. Each block has the fields `id`
-(keep this stable, guest nodes refer to it), `name` (the display name), and
-`upstream` (the address of the web app waserver proxies). The initial
-configuration comes with comments explaining the fields.
-
-`upstream` is `host:port` on the Docker network, or `host.docker.internal:port`
-if you want to address a port on the host computer. A compose service is just
-its name, e.g. `app:8080`.
-
-There are several editors in the image: nano (the default), vim (`vim-tiny`) and
-mg (micro emacs). Pick another with `select-editor` (remembered on `/data`) or
-the `EDITOR` variable.
-
-### Keeping the config outside the container
-
-To keep a share's config in version control, or to write it before the container
-exists, mount it at `/config/<share>.toml`:
-
-```sh
-docker run -d --name waserver --restart unless-stopped \
-  -e SHARE_ID=team \
-  -v "$PWD/team.toml:/config/team.toml:ro" \
-  -v waserver-data:/data \
-  ghcr.io/s-te-ch/wispers/access/waserver:latest
-```
-
-The entrypoint detects the mounted file and uses it. `SHARE_NAME` now defaults
-to the `name` field in the file. If you edit the file on the host, you have to
-apply the edits with `waserver reload team` (or just restart the container).
-Since the file is mounted read-only, `waserver edit` within the container won't
-work.
+The [hosting guide](../../docs/hosting.md#containers) has the rest: the
+variables the container reads on its first start, running waserver's commands
+through `docker compose exec`, reaching apps outside the stack, keeping a
+share's config outside the container, and upgrading. `share.toml` itself is
+explained in the [quick start](../../README.md#2-share-your-app).
 
 ## How it works
 
