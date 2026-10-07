@@ -130,21 +130,24 @@ Install Wispers Access from the
 (Android) or via
 [TestFlight](https://testflight.apple.com/join/AjsJChhq) (iOS), tap **+**, and
 scan the QR code (or copy-paste the
-invite code). The shared app opens right inside Wispers Access: no VPN
-profile, no open port on the internet.
+invite code). The shared app opens right inside Wispers Access.
 
 ### … or on a desktop
 
-`waclient` (same releases page) serves every share you've joined on localhost:
+There are also clients for desktop OSs (currently macOS and Windows), which you
+can download from
+[GitHub releases](https://github.com/s-te-ch/wispers-access/releases?q=%22Wispers+Access+desktop%22).
+Instead of scanning a QR code you copy-paste the invite code, but otherwise
+things are very similar.
+
+Finally, for Linux and the terminal in general, there's `waclient` (from the same releases page as `waserver`). To use it, do:
 
 ```sh
-waclient join wax1_…           # the invite code from step 3
+waclient join wax1_…      # the invite code from step 3
 waclient serve 8000
 ```
 
-It prints a URL per app — open it in your normal browser. The first one pairs
-the browser with `waclient`. From then on, the apps answer directly at
-`http://<app>.<share>.wa.localhost:8000`.
+It will print a URL per app — open it in your normal browser.
 
 ## When to use something else
 
