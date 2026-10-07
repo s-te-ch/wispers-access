@@ -78,7 +78,8 @@ also just download the binaries from the [releases
 page](https://github.com/s-te-ch/wispers-access/releases). Prefer containers?
 Follow the quick start in the [container README](waserver/docker/README.md)
 instead. See the [hosting guide](docs/hosting.md) for more details on installing
-and running waserver.
+and running waserver, and the [FAQ](docs/faq.md) when something does not work
+as expected.
 
 ### 2. Share your app
 
