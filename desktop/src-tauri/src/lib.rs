@@ -37,16 +37,27 @@ pub fn run() {
                             "could not turn launch at login on"
                         );
                     }
-                    // On macOS, install the menu bar; Elsewhere, the tray icon.
+                    // On macOS, install the menu bar; elsewhere, the tray
+                    // icon if there is a tray.
                     #[cfg(target_os = "macos")]
-                    let menus = menu::add(app);
+                    let holder = menu::add(app).map(|()| Holder::Dock);
                     #[cfg(not(target_os = "macos"))]
-                    let menus = tray::add(app);
-                    if let Err(e) = menus {
-                        report_failed_start(&e.into());
-                        std::process::exit(1)
+                    let holder = if tray::available() {
+                        tray::add(app).map(|()| Holder::Tray)
+                    } else {
+                        tracing::info!("no tray, closing the window quits");
+                        Ok(Holder::Window)
+                    };
+                    match holder {
+                        Ok(holder) => {
+                            app.manage(holder);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            report_failed_start(&e.into());
+                            std::process::exit(1)
+                        }
                     }
-                    Ok(())
                 }
                 Err(e) => {
                     report_failed_start(&e);
@@ -63,6 +74,8 @@ pub fn run() {
             shares::join,
             shares::leave,
             autostart::restart,
+            autostart::launch_at_login,
+            autostart::set_launch_at_login,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -83,11 +96,25 @@ fn report_failed_start(error: &anyhow::Error) {
         .show();
 }
 
+/// What holds the app while its window is closed, so the user can bring the
+/// window back and quit.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Holder {
+    /// The dock icon brings the window back, and Quit is in the app menu.
+    Dock,
+    /// The tray icon's menu does both.
+    Tray,
+    /// Nothing, so closing the window quits.
+    Window,
+}
+
 /// The app outlives its window, so the proxy keeps serving the browser while
-/// the window is away. On macOS the dock icon brings it back and Quit is in
-/// the app menu; elsewhere the tray icon does both.
+/// the window is away, wherever there is a dock or tray to hold it.
 fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        if window.try_state::<Holder>().as_deref() == Some(&Holder::Window) {
+            return;
+        }
         api.prevent_close();
         if let Err(e) = window.hide() {
             tracing::warn!(error = %e, "could not hide the window");
@@ -96,13 +123,18 @@ fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
 }
 
 /// Reveal the app window. The window is configured invisible and shown once the
-/// event loop runs (which isnot at all for an autostart at login).
+/// event loop runs (which is not at all for an autostart at login, unless
+/// there is no dock or tray to hold the app: then it shows minimized, since
+/// closing it is how to quit).
 ///
 /// Reopen is the dock icon clicked while the window is hidden. That event only
 /// exists on macOS.
 fn show_window_on(app: &tauri::AppHandle, event: tauri::RunEvent) {
     match event {
         tauri::RunEvent::Ready if !autostart::launched_hidden() => show_window(app),
+        tauri::RunEvent::Ready if app.try_state::<Holder>().as_deref() == Some(&Holder::Window) => {
+            show_window_minimized(app)
+        }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => show_window(app),
         _ => {}
@@ -115,6 +147,17 @@ fn show_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+/// Shows the window minimized. Minimized before it shows, which X11 honours
+/// so the window never appears; Wayland only minimizes shown windows, so
+/// again after, which may flash it briefly.
+fn show_window_minimized(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.minimize();
+        let _ = window.show();
+        let _ = window.minimize();
     }
 }
 
@@ -143,7 +186,7 @@ impl Desktop {
     /// open would do.
     fn start(app: tauri::AppHandle) -> anyhow::Result<Self> {
         let data_dir = app.path().app_data_dir()?;
-        let secrets = secrets::PlatformSecretStore::open(&app.config().identifier);
+        let secrets = secrets::PlatformSecretStore::open(&app.config().identifier, &data_dir)?;
         let client = sdk::Client::new(sdk::ClientConfig {
             data_dir: data_dir.join("sdk").to_string_lossy().into_owned(),
             secrets: secrets.map(|store| Arc::new(store) as Arc<dyn sdk::SecretStore>),

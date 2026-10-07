@@ -2,6 +2,7 @@
   import { dragRegion } from "$lib/platform";
   import type { ShareManager } from "$lib/shares.svelte";
   import type { UpdateChecker } from "$lib/updates.svelte";
+  import LaunchAtLoginToggle from "./LaunchAtLoginToggle.svelte";
   import ShareRow from "./ShareRow.svelte";
   import UpdateNotice from "./UpdateNotice.svelte";
 
@@ -56,4 +57,6 @@
     <span aria-hidden="true" class="text-lg leading-none">+</span>
     Add a share
   </button>
+
+  <LaunchAtLoginToggle />
 </nav>

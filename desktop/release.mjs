@@ -6,6 +6,7 @@
 // platform's code signing: the Developer ID certificate in the login keychain
 // and APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID for notarization on macOS,
 // the Authenticode certificate that tauri.windows.conf.json names on Windows.
+// Linux has no code signing, except for the Tauri updater's signing.
 // Variables can come from the git-ignored .env.release; without the key's
 // password there or in the environment, the build asks for it.
 

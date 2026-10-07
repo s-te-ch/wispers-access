@@ -19,37 +19,51 @@ const metadata = JSON.parse(
 const version = metadata.packages.find((p) => p.name === "wispers-access-desktop").version;
 const bundleDir = join(metadata.target_directory, "release", "bundle");
 
-/** The update bundle and the platform key the updater looks it up under. */
-function hostBundle() {
+/** The bundle in the bundle directory's `dir` whose name ends in `suffix`. */
+function find(dir, suffix) {
+  const path = join(bundleDir, dir);
+  const file = existsSync(path) && readdirSync(path).find((f) => f.endsWith(suffix));
+  return file ? join(path, file) : undefined;
+}
+
+/** The update bundles and the platform keys the updater looks them up under.
+ * Linux has one per package format, since an installed app updates in its own
+ * format: the updater looks for `linux-<arch>-<format>` first. */
+function hostBundles() {
+  const cpu = arch === "arm64" ? "aarch64" : "x86_64";
   switch (platform) {
-    case "darwin": {
-      const dir = join(bundleDir, "macos");
-      const file = readdirSync(dir).find((f) => f.endsWith(".app.tar.gz"));
-      return file && { key: `darwin-${arch === "arm64" ? "aarch64" : "x86_64"}`, bundle: join(dir, file) };
-    }
-    case "win32": {
-      const dir = join(bundleDir, "nsis");
-      const file = existsSync(dir) && readdirSync(dir).find((f) => f.endsWith("-setup.exe"));
-      return file && { key: `windows-${arch === "arm64" ? "aarch64" : "x86_64"}`, bundle: join(dir, file) };
-    }
+    case "darwin":
+      return [{ key: `darwin-${cpu}`, bundle: find("macos", ".app.tar.gz") }];
+    case "win32":
+      return [{ key: `windows-${cpu}`, bundle: find("nsis", "-setup.exe") }];
+    case "linux":
+      return [
+        { key: `linux-${cpu}-appimage`, bundle: find("appimage", ".AppImage") },
+        { key: `linux-${cpu}-deb`, bundle: find("deb", ".deb") },
+      ];
     default:
-      return undefined;
+      return [];
   }
 }
 
-const host = hostBundle();
-if (!host || !existsSync(`${host.bundle}.sig`)) {
-  console.error(`no signed update bundle under ${bundleDir}; build with the updater key set`);
+const hosts = hostBundles();
+const config = JSON.parse(readFileSync(join(here, "src-tauri", "tauri.conf.json"), "utf8"));
+if (hosts.length === 0) {
+  console.error(`no update bundles for ${platform}`);
   process.exit(1);
 }
-
-// The bundler only warns when the private key isn't the public key's half,
-// and installed apps would reject the update.
-const signature = readFileSync(`${host.bundle}.sig`, "utf8").trim();
-const config = JSON.parse(readFileSync(join(here, "src-tauri", "tauri.conf.json"), "utf8"));
-if (keyId(signature) !== keyId(config.plugins.updater.pubkey)) {
-  console.error(`${host.bundle}.sig is not by the key in tauri.conf.json; build with the updater key`);
-  process.exit(1);
+for (const host of hosts) {
+  if (!host.bundle || !existsSync(`${host.bundle}.sig`)) {
+    console.error(`no signed ${host.key} update bundle under ${bundleDir}; build with the updater key set`);
+    process.exit(1);
+  }
+  // The bundler only warns when the private key isn't the public key's half,
+  // and installed apps would reject the update.
+  host.signature = readFileSync(`${host.bundle}.sig`, "utf8").trim();
+  if (keyId(host.signature) !== keyId(config.plugins.updater.pubkey)) {
+    console.error(`${host.bundle}.sig is not by the key in tauri.conf.json; build with the updater key`);
+    process.exit(1);
+  }
 }
 
 /** The key ID in a base64'd minisign key or signature file. */
@@ -60,7 +74,8 @@ function keyId(file) {
 
 const release = `desktop-v${version}`;
 // GitHub turns the spaces in asset names into dots.
-const asset = basename(host.bundle).replaceAll(" ", ".");
+const asset = (bundle) => basename(bundle).replaceAll(" ", ".");
+const hostKeys = hosts.map((host) => host.key);
 
 let manifest = existsSync(manifestPath) ? JSON.parse(readFileSync(manifestPath, "utf8")) : {};
 if (manifest.version !== version) {
@@ -70,16 +85,18 @@ if (manifest.version !== version) {
   manifest = { version, platforms: {} };
 }
 // The first platform's machine creates the release, the next ones add to it.
-const releaseExists = Object.keys(manifest.platforms).some((key) => key !== host.key);
+const releaseExists = Object.keys(manifest.platforms).some((key) => !hostKeys.includes(key));
 manifest.pub_date = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
-manifest.platforms[host.key] = {
-  url: `https://github.com/s-te-ch/wispers-access/releases/download/${release}/${asset}`,
-  signature,
-};
+for (const host of hosts) {
+  manifest.platforms[host.key] = {
+    url: `https://github.com/s-te-ch/wispers-access/releases/download/${release}/${asset(host.bundle)}`,
+    signature: host.signature,
+  };
+}
 writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 
 const extra = platform === "darwin" ? readdirSync(join(bundleDir, "dmg")).filter((f) => f.endsWith(".dmg")).map((f) => join(bundleDir, "dmg", f)) : [];
-const files = [...extra, host.bundle, `${host.bundle}.sig`].map((f) => `"${f}"`).join(" ");
+const files = [...extra, ...hosts.flatMap((host) => [host.bundle, `${host.bundle}.sig`])].map((f) => `"${f}"`).join(" ");
 const publish = releaseExists
   ? `gh release upload ${release} ${files}`
   : `gh release create ${release} --title "Wispers Access desktop ${version}" --generate-notes ${files}`;

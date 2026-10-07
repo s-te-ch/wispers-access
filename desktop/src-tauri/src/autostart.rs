@@ -1,12 +1,15 @@
 //! Autostart at login.
 //!
-//! This is on by default but can be toggled, in the app menu on macOS and in
-//! the tray menu elsewhere. An autostart at login starts without the window,
-//! since the point of is running the proxy, not showing a window.
+//! This is on by default but can be toggled, in the app menu on macOS, in
+//! the tray menu elsewhere, and in the window where there is no tray. An
+//! autostart at login starts without the window, since the point of is running
+//! the proxy, not showing a window; without a tray it starts minimized.
 
 use tauri::menu::{CheckMenuItem, MenuEvent};
 use tauri::{AppHandle, Manager, Wry};
 use tauri_plugin_autostart::ManagerExt;
+
+use crate::Holder;
 
 /// The flag the login launch passes.
 const HIDDEN_FLAG: &str = "--hidden";
@@ -84,4 +87,26 @@ pub fn restart(app: AppHandle) {
     env.args_os.retain(|arg| arg != HIDDEN_FLAG);
     app.cleanup_before_exit();
     tauri::process::restart(&env)
+}
+
+/// Whether the app launches at login, for the window to show the setting.
+/// `None` where a menu has it already, which is everywhere with a dock or a
+/// tray.
+#[tauri::command]
+pub fn launch_at_login(app: AppHandle) -> Option<bool> {
+    if app.try_state::<Holder>().as_deref() != Some(&Holder::Window) {
+        return None;
+    }
+    Some(app.autolaunch().is_enabled().unwrap_or(false))
+}
+
+#[tauri::command]
+pub fn set_launch_at_login(app: AppHandle, enabled: bool) -> Result<(), String> {
+    let manager = app.autolaunch();
+    let result = if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    };
+    result.map_err(|e| e.to_string())
 }

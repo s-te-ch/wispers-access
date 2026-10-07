@@ -54,6 +54,13 @@ export const join = (inviteCode: string) => invoke<Share>("join", { inviteCode }
 
 export const leave = (shareId: string) => invoke<void>("leave", { shareId });
 
+/** Whether the app launches at login, where the window is the place for that
+ * setting: `null` where a menu (macOS's app menu, the tray's) has it. */
+export const launchAtLogin = () => invoke<boolean | null>("launch_at_login");
+
+export const setLaunchAtLogin = (enabled: boolean) =>
+  invoke<void>("set_launch_at_login", { enabled });
+
 /** Restarts the app, window showing. Used after a software update. */
 export const restart = () => invoke<void>("restart");
 

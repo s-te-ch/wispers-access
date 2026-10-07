@@ -6,8 +6,8 @@ apps in the system browser (Chrome, Safari,...), not an embedded WebView. This
 lets users treat web apps shared through Wispers Access almost exactly like
 normal websites.
 
-Implemented with Tauri 2, using the Wispers Access SDK (`src-tauri/`) for
-proxying and peer-to-peer connectivity, and SvelteKit + Tailwind for the UI
+The app is implemented with Tauri 2, using the Wispers Access SDK (`src-tauri/`)
+for proxying and peer-to-peer connectivity, and SvelteKit + Tailwind for the UI
 (`src/`).
 
 ```sh
@@ -17,15 +17,17 @@ npm run check          # svelte-check
 npm run tauri build    # the bundle under src-tauri/target/release/bundle
 ```
 
-The native side keeps one SDK client and one loopback proxy on
-`wa.localhost:11235` (any free port if that one is taken) for the app's lifetime,
-which outlasts a closed window: the dock icon on macOS and the tray icon on
-Windows bring it back. The app also launches at login in the background, by
-default. The "Launch at Login" item in the application menu on macOS and in the
-tray menu on Windows lets you turn that off. Secrets go to the platform
-credential store, the macOS Keychain or the Windows Credential Manager
-(`src-tauri/src/secrets.rs`); state under the app's data directory,
-`~/Library/Application Support/dev.wispers.access.desktop` on macOS and
-`%APPDATA%\dev.wispers.access.desktop` on Windows.
+The native side of the app keeps one SDK client and one loopback proxy on
+`wa.localhost:11235` (or any free port if that one is taken) during the app's
+lifetime. Closing the window does not stop the app, it keeps running the proxy
+in the background. The dock icon (macOS) or the tray icon (Windows and Linux)
+bring the window back (Exception: Linux desktops without a tray icon. There,
+closing the window stop the app). The app also launches at login, by
+default. The "Launch at Login" item (in the app or tray menus) lets you turn
+this off. Secrets go to the platform credential store, or to files as a
+fallback.
+
+Linux builds need WebKitGTK 4.1 and libayatana-appindicator (on Debian and
+Ubuntu, `libwebkit2gtk-4.1-dev` and `libayatana-appindicator3-dev`).
 
 Release instructions are in the Wispers monorepo, at docs/access/releases.md.

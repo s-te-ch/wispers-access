@@ -37,3 +37,8 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+# async-io, as zbus has it already; no tokio runtime needed for blocking calls.
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-async-io-crypto-rust"] }
