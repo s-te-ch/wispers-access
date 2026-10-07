@@ -46,10 +46,14 @@ malicious nodes.
 
 ## Project status
 
-Wispers Access is currently in open beta. All clients are in open testing:
+Wispers Access is currently in open beta.
+
+All clients are in open testing:
 * Get Android client from the ([Play Store](https://play.google.com/store/apps/details?id=dev.wispers.access.android)).
 * Get the iOS client from ([TestFlight](https://testflight.apple.com/join/AjsJChhq))
 * Get the desktop app from [GitHub releases](https://github.com/s-te-ch/wispers-access/releases?q=%22Wispers+Access+desktop%22)
+
+Instructions for setting up the server are in the quick start section below.
 
 ## Quick start
 
@@ -69,14 +73,12 @@ On Linux or macOS:
 curl -fsSL https://raw.githubusercontent.com/s-te-ch/wispers-access/main/install.sh | sh
 ```
 
-This puts the newest `waserver` and `waclient` into `/usr/local/bin`. Or just
-download the binaries from the [releases
-page](https://github.com/s-te-ch/wispers-access/releases). See the [hosting
-guide](docs/hosting.md) for more details on installing and running waserver.
-
-Prefer containers? Follow quick start in the [container
-README](waserver/docker/README.md) instead. For Coolify, see
-[integrations/coolify](integrations/coolify/README.md).
+This puts the newest `waserver` and `waclient` into `/usr/local/bin`. You can
+also just download the binaries from the [releases
+page](https://github.com/s-te-ch/wispers-access/releases). Prefer containers?
+Follow the quick start in the [container README](waserver/docker/README.md)
+instead. See the [hosting guide](docs/hosting.md) for more details on installing
+and running waserver.
 
 ### 2. Share your app
 
