@@ -102,9 +102,11 @@ enum Command {
         /// Also write the invite QR code as a PNG to this path, for emailing.
         #[arg(long, value_name = "PATH")]
         png: Option<std::path::PathBuf>,
-        /// Print the invite code only, without the QR code.
-        #[arg(long)]
-        no_qr: bool,
+        /// How to draw the QR code: `small` (half-block glyphs), `compat`
+        /// (plain cells, twice as tall, for terminals that draw half blocks
+        /// badly) or `off`.
+        #[arg(long, value_enum, default_value_t = invites::QrStyle::Small)]
+        qr: invites::QrStyle,
         /// Print the invite as JSON (`{"code": …}`).
         #[arg(long)]
         json: bool,
@@ -207,11 +209,11 @@ async fn async_main(command: Command) -> Result<()> {
             node_name,
             user_id,
             png,
-            no_qr,
+            qr,
             json,
         } => {
             let code = invites::request_code(&share, &node_name, &user_id).await?;
-            invites::render_code(&code, json, !no_qr, png.as_deref())
+            invites::render_code(&code, json, qr, png.as_deref())
         }
         Command::Revoke { share, number } => revoke(&share, number).await,
     }
@@ -374,27 +376,31 @@ mod tests {
     fn cli_parses_invite_flags() {
         let cli = Cli::try_parse_from(["waserver", "invite", "team", "Phone", "a@b.c"]).unwrap();
         match cli.command {
-            Command::Invite {
-                png, no_qr, json, ..
-            } => {
+            Command::Invite { png, qr, json, .. } => {
                 assert_eq!(png, None);
-                assert!(!no_qr);
+                assert_eq!(qr, invites::QrStyle::Small);
                 assert!(!json);
             }
             _ => panic!("parsed the wrong command"),
         }
         let cli = Cli::try_parse_from([
-            "waserver", "invite", "team", "Phone", "a@b.c", "--json", "--no-qr", "--png", "q.png",
+            "waserver", "invite", "team", "Phone", "a@b.c", "--json", "--qr=off", "--png", "q.png",
         ])
         .unwrap();
         match cli.command {
-            Command::Invite {
-                png, no_qr, json, ..
-            } => {
+            Command::Invite { png, qr, json, .. } => {
                 assert_eq!(png.as_deref(), Some(std::path::Path::new("q.png")));
-                assert!(no_qr);
+                assert_eq!(qr, invites::QrStyle::Off);
                 assert!(json);
             }
+            _ => panic!("parsed the wrong command"),
+        }
+        let cli = Cli::try_parse_from([
+            "waserver", "invite", "team", "Phone", "a@b.c", "--qr", "compat",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Invite { qr, .. } => assert_eq!(qr, invites::QrStyle::Compat),
             _ => panic!("parsed the wrong command"),
         }
     }
