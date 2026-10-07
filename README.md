@@ -8,8 +8,10 @@
 
 ## About Wispers Access
 
-Wispers Access makes it easy to share a web app with your coworkers or friends
-without having to publish it to the internet.
+Wispers Access makes it easy to share a web app with your coworkers, friends, or
+family without having to publish it to the internet. Guests install the Wispers
+Access app, scan a QR code, and then simply browse your app. No need to deal
+with the complexity and security risk of exposing your app.
 
 <p align="center">
   <picture>
@@ -19,24 +21,28 @@ without having to publish it to the internet.
   </picture>
 </p>
 
-This is most useful for your internal apps, for example your team's ERP
-software, that vibe-coded app your team finds useful, or your private photo
-archive at home. Until now, sharing these apps usually meant putting them on the
-internet. If you're self-hosting, that's hard to do securely. If you put the app
-on the cloud, you give your cloud provider access to your internal data.
-Installing a VPN helps, but smartphone support is often limited, and if you have
-multiple VPNs (like your company and home VPNs) they'll clash.
+A perennial problem with self-hosted software is that it's hard to give people
+access to it. Whether it's your company's ERP software, that vibe-coded app your
+team likes, or your private photo archive at home, they're not very useful if
+people can't reach them. You could put your app on the internet, but that's
+increasingly hard to do securely. Anything reachable from the internet gets
+probed around the clock, by scripts and by AI agents. VPNs can help, but your
+phone can only be on one at a time, and your relatives may not want to set one
+up.
 
-Wispers Access solves this with a secure peer-to-peer connection from each guest
-device to the machine running the app (using either
-[iroh](https://iroh.computer), or the home-grown alternative [Wispers
-Connect](https://connect.wispers.dev)). Internally, the secure connections work
-like VPN connections, but because they're at the application level, they never
-clash, not even with your existing VPN. Wispers also aims to be as
-cloud-independent as possible. Peer-to-peer connection establishment (or
-relaying if necessary) still requires rendezvous servers hosted in the cloud,
-but those servers are cryptographically unable to eavesdrop on your traffic or
-to inject malicious nodes.
+Wispers Access solves this by automatically connecting your guests' devices
+through secure peer-to-peer channels to the machines running the web apps you
+want to share. Internally, the secure connections work like VPN connections, but
+because they're at the application level, they never clash, not even with your
+existing VPN. All your guests see is an app that magically connects them to your
+web app.
+
+No cloud service has access to your app or your traffic. The peer-to-peer
+channels are built on [iroh](https://iroh.computer) or on our own [Wispers
+Connect](https://connect.wispers.dev). Finding each other (and relaying when no
+direct path exists) still needs rendezvous servers in the cloud, but those
+servers are cryptographically unable to eavesdrop on your traffic or to inject
+malicious nodes.
 
 ## Project status
 
