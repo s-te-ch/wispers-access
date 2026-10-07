@@ -46,10 +46,10 @@ malicious nodes.
 
 ## Project status
 
-Wispers Access is currently in open beta. The Android client is in open testing
-([Play Store](https://play.google.com/store/apps/details?id=dev.wispers.access.android)).
-The iOS client is in open testing
-([TestFlight](https://testflight.apple.com/join/AjsJChhq)).
+Wispers Access is currently in open beta. All clients are in open testing:
+* Get Android client from the ([Play Store](https://play.google.com/store/apps/details?id=dev.wispers.access.android)).
+* Get the iOS client from ([TestFlight](https://testflight.apple.com/join/AjsJChhq))
+* Get the desktop app from [GitHub releases](https://github.com/s-te-ch/wispers-access/releases?q=%22Wispers+Access+desktop%22)
 
 ## Quick start
 
