@@ -54,9 +54,14 @@ export const join = (inviteCode: string) => invoke<Share>("join", { inviteCode }
 
 export const leave = (shareId: string) => invoke<void>("leave", { shareId });
 
-/** Whether the app launches at login, where the window is the place for that
- * setting: `null` where a menu (macOS's app menu, the tray's) has it. */
-export const launchAtLogin = () => invoke<boolean | null>("launch_at_login");
+/** What closing the window does: hide it, with the app running on in the
+ * menu bar or tray, or quit, where nothing else holds the app. Then the window
+ * carries the settings a menu would. */
+export type WindowPolicy = "hideOnClose" | "quitOnClose";
+
+export const windowPolicy = () => invoke<WindowPolicy>("window_policy");
+
+export const launchAtLogin = () => invoke<boolean>("launch_at_login");
 
 export const setLaunchAtLogin = (enabled: boolean) =>
   invoke<void>("set_launch_at_login", { enabled });

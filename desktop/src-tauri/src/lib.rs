@@ -38,19 +38,20 @@ pub fn run() {
                         );
                     }
                     // On macOS, install the menu bar; elsewhere, the tray
-                    // icon if there is a tray.
+                    // icon if there is a tray. Either holds the app while
+                    // the window is closed; without, closing it quits.
                     #[cfg(target_os = "macos")]
-                    let holder = menu::add(app).map(|()| Holder::Dock);
+                    let policy = menu::add(app).map(|()| WindowPolicy::HideOnClose);
                     #[cfg(not(target_os = "macos"))]
-                    let holder = if tray::available() {
-                        tray::add(app).map(|()| Holder::Tray)
+                    let policy = if tray::available() {
+                        tray::add(app).map(|()| WindowPolicy::HideOnClose)
                     } else {
                         tracing::info!("no tray, closing the window quits");
-                        Ok(Holder::Window)
+                        Ok(WindowPolicy::QuitOnClose)
                     };
-                    match holder {
-                        Ok(holder) => {
-                            app.manage(holder);
+                    match policy {
+                        Ok(policy) => {
+                            app.manage(policy);
                             Ok(())
                         }
                         Err(e) => {
@@ -74,6 +75,7 @@ pub fn run() {
             shares::join,
             shares::leave,
             autostart::restart,
+            window_policy,
             autostart::launch_at_login,
             autostart::set_launch_at_login,
         ])
@@ -96,23 +98,39 @@ fn report_failed_start(error: &anyhow::Error) {
         .show();
 }
 
-/// What holds the app while its window is closed, so the user can bring the
-/// window back and quit.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Holder {
-    /// The dock icon brings the window back, and Quit is in the app menu.
-    Dock,
-    /// The tray icon's menu does both.
-    Tray,
-    /// Nothing, so closing the window quits.
-    Window,
+/// What the window does when closed, which depends on whether anything else
+/// (the macOS menu bar, a tray) holds the app's menu.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowPolicy {
+    /// Closing hides it; the app keeps running.
+    HideOnClose,
+    /// Closing quits. The window is all there is, so a hidden launch shows it
+    /// minimized, and the window carries the settings a menu would.
+    QuitOnClose,
+}
+
+impl WindowPolicy {
+    /// The policy setup chose, or hide on close if it hasn't yet.
+    pub fn of(manager: &impl Manager<tauri::Wry>) -> Self {
+        manager
+            .try_state::<Self>()
+            .map_or(Self::HideOnClose, |policy| *policy)
+    }
+}
+
+/// The window's policy, for the window to know whether it carries the
+/// settings a menu would.
+#[tauri::command]
+fn window_policy(app: tauri::AppHandle) -> WindowPolicy {
+    WindowPolicy::of(&app)
 }
 
 /// The app outlives its window, so the proxy keeps serving the browser while
-/// the window is away, wherever there is a dock or tray to hold it.
+/// the window is away, wherever there is a menu bar or tray to hold it.
 fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-        if window.try_state::<Holder>().as_deref() == Some(&Holder::Window) {
+        if WindowPolicy::of(window) == WindowPolicy::QuitOnClose {
             return;
         }
         api.prevent_close();
@@ -124,15 +142,15 @@ fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
 
 /// Reveal the app window. The window is configured invisible and shown once the
 /// event loop runs (which is not at all for an autostart at login, unless
-/// there is no dock or tray to hold the app: then it shows minimized, since
-/// closing it is how to quit).
+/// closing the window quits: then it shows minimized, since closing it is how
+/// to quit).
 ///
 /// Reopen is the dock icon clicked while the window is hidden. That event only
 /// exists on macOS.
 fn show_window_on(app: &tauri::AppHandle, event: tauri::RunEvent) {
     match event {
         tauri::RunEvent::Ready if !autostart::launched_hidden() => show_window(app),
-        tauri::RunEvent::Ready if app.try_state::<Holder>().as_deref() == Some(&Holder::Window) => {
+        tauri::RunEvent::Ready if WindowPolicy::of(app) == WindowPolicy::QuitOnClose => {
             show_window_minimized(app)
         }
         #[cfg(target_os = "macos")]
