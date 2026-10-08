@@ -135,7 +135,7 @@ invite code). The shared app opens right inside Wispers Access.
 
 ### … or on a desktop
 
-There are also clients for desktop OSs (currently macOS and Windows), which you
+There are also clients for desktop OSs (macOS, Windows and Linux), which you
 can download from
 [GitHub releases](https://github.com/s-te-ch/wispers-access/releases?q=%22Wispers+Access+desktop%22).
 Instead of scanning a QR code you copy-paste the invite code, but otherwise

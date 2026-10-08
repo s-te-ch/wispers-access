@@ -1,8 +1,9 @@
 //! Autostart at login.
 //!
-//! This is on by default but can be toggled, in the app menu on macOS and in
-//! the tray menu elsewhere. An autostart at login starts without the window,
-//! since the point of is running the proxy, not showing a window.
+//! This is on by default but can be toggled, in the app menu on macOS, in
+//! the tray menu elsewhere, and in the window where there is no tray. An
+//! autostart at login starts without the window, since the point is running
+//! the proxy, not showing a window (without a tray the app starts minimised).
 
 use tauri::menu::{CheckMenuItem, MenuEvent};
 use tauri::{AppHandle, Manager, Wry};
@@ -26,11 +27,11 @@ pub fn enable_on_first_run(app: &AppHandle) -> anyhow::Result<()> {
     if cfg!(debug_assertions) {
         return Ok(());
     }
-    let marker = app.path().app_data_dir()?.join("launch-at-login-defaulted");
+    let marker = app.path().app_data_dir()?.join("autostart-defaulted");
     if marker.exists() {
         return Ok(());
     }
-    app.autolaunch().enable()?;
+    set_enabled(app, true)?;
     std::fs::write(&marker, "")?;
     Ok(())
 }
@@ -40,11 +41,30 @@ pub fn launched_hidden() -> bool {
     std::env::args().any(|arg| arg == HIDDEN_FLAG)
 }
 
+/// Whether the app launches at login.
+pub fn is_enabled(app: &AppHandle) -> bool {
+    app.autolaunch().is_enabled().unwrap_or(false)
+}
+
+pub fn set_enabled(app: &AppHandle, enabled: bool) -> Result<(), tauri_plugin_autostart::Error> {
+    let manager = app.autolaunch();
+    if enabled {
+        manager.enable()
+    } else {
+        manager.disable()
+    }
+}
+
 /// Build and return the "Launch at Login" item, checked to match the setting.
 pub fn menu_item(app: &AppHandle) -> tauri::Result<CheckMenuItem<Wry>> {
-    let enabled = app.autolaunch().is_enabled().unwrap_or(false);
-    let item =
-        CheckMenuItem::with_id(app, MENU_ID, "Launch at Login", true, enabled, None::<&str>)?;
+    let item = CheckMenuItem::with_id(
+        app,
+        MENU_ID,
+        "Launch at Login",
+        true,
+        is_enabled(app),
+        None::<&str>,
+    )?;
     app.manage(LaunchAtLoginItem(item.clone()));
     Ok(item)
 }
@@ -53,7 +73,7 @@ const MENU_ID: &str = "launch-at-login";
 
 struct LaunchAtLoginItem(CheckMenuItem<Wry>);
 
-/// Handle a click in a menu, ours or not. If ours, change autolaunch accordingly.
+/// Handle a click in a menu, ours or not. If ours, change autostart accordingly.
 pub fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     if event.id.as_ref() != MENU_ID {
         return;
@@ -62,14 +82,8 @@ pub fn on_menu_event(app: &AppHandle, event: MenuEvent) {
         return;
     };
     let wanted = item.0.is_checked().unwrap_or(false);
-    let manager = app.autolaunch();
-    let result = if wanted {
-        manager.enable()
-    } else {
-        manager.disable()
-    };
-    if let Err(e) = result {
-        tracing::warn!(error = %e, "could not change launch at login");
+    if let Err(e) = set_enabled(app, wanted) {
+        tracing::warn!(error = %e, "could not change autostart");
         let _ = item.0.set_checked(!wanted);
     }
 }
@@ -84,4 +98,15 @@ pub fn restart(app: AppHandle) {
     env.args_os.retain(|arg| arg != HIDDEN_FLAG);
     app.cleanup_before_exit();
     tauri::process::restart(&env)
+}
+
+/// The autostart setting, for the window's "Launch at Login" switch.
+#[tauri::command]
+pub fn autostart_enabled(app: AppHandle) -> bool {
+    is_enabled(&app)
+}
+
+#[tauri::command]
+pub fn set_autostart_enabled(app: AppHandle, enabled: bool) -> Result<(), String> {
+    set_enabled(&app, enabled).map_err(|e| e.to_string())
 }

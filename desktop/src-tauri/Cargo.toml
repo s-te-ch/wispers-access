@@ -37,3 +37,10 @@ apple-native-keyring-store = { version = "1", features = ["keychain"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = "1"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus = "5"
+# The Secret Service needs an async runtime and a crypto backend picked.
+# async-io is the one zbus already runs on here (via rfd, the opener and
+# single-instance plugins); Rust crypto saves depending on the system OpenSSL.
+zbus-secret-service-keyring-store = { version = "1", features = ["rt-async-io-crypto-rust"] }

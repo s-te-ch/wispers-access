@@ -54,6 +54,19 @@ export const join = (inviteCode: string) => invoke<Share>("join", { inviteCode }
 
 export const leave = (shareId: string) => invoke<void>("leave", { shareId });
 
+/** What closing the window does: hide it, with the app running on in the
+ * menu bar or tray, or quit, where nothing else holds the app. Then the window
+ * carries the settings a menu would. */
+export type WindowPolicy = "hideOnClose" | "quitOnClose";
+
+export const windowPolicy = () => invoke<WindowPolicy>("window_policy");
+
+/** Whether the app launches at login. */
+export const autostartEnabled = () => invoke<boolean>("autostart_enabled");
+
+export const setAutostartEnabled = (enabled: boolean) =>
+  invoke<void>("set_autostart_enabled", { enabled });
+
 /** Restarts the app, window showing. Used after a software update. */
 export const restart = () => invoke<void>("restart");
 

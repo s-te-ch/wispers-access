@@ -32,21 +32,18 @@ pub fn run() {
                 Ok(desktop) => {
                     app.manage(desktop);
                     if let Err(e) = autostart::enable_on_first_run(&handle) {
-                        tracing::warn!(
-                            error = format!("{e:#}"),
-                            "could not turn launch at login on"
-                        );
+                        tracing::warn!(error = format!("{e:#}"), "could not turn autostart on");
                     }
-                    // On macOS, install the menu bar; Elsewhere, the tray icon.
-                    #[cfg(target_os = "macos")]
-                    let menus = menu::add(app);
-                    #[cfg(not(target_os = "macos"))]
-                    let menus = tray::add(app);
-                    if let Err(e) = menus {
-                        report_failed_start(&e.into());
-                        std::process::exit(1)
+                    match add_menus(app) {
+                        Ok(policy) => {
+                            app.manage(policy);
+                            Ok(())
+                        }
+                        Err(e) => {
+                            report_failed_start(&e.into());
+                            std::process::exit(1)
+                        }
                     }
-                    Ok(())
                 }
                 Err(e) => {
                     report_failed_start(&e);
@@ -63,6 +60,9 @@ pub fn run() {
             shares::join,
             shares::leave,
             autostart::restart,
+            window_policy,
+            autostart::autostart_enabled,
+            autostart::set_autostart_enabled,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
@@ -83,11 +83,57 @@ fn report_failed_start(error: &anyhow::Error) {
         .show();
 }
 
+/// What the window does when closed, which depends on whether anything else
+/// (the macOS menu bar, a tray) holds the app's menu.
+#[derive(Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WindowPolicy {
+    /// Closing hides it; the app keeps running.
+    HideOnClose,
+    /// Closing quits. The window is all there is, so a hidden launch shows it
+    /// minimized, and the window carries the settings a menu would.
+    QuitOnClose,
+}
+
+impl WindowPolicy {
+    /// The policy setup chose, or hide on close if it hasn't yet.
+    pub fn of(manager: &impl Manager<tauri::Wry>) -> Self {
+        manager
+            .try_state::<Self>()
+            .map_or(Self::HideOnClose, |policy| *policy)
+    }
+}
+
+/// On macOS, install the menu bar; elsewhere, the tray icon if there is a
+/// tray. Either holds the app while the window is closed; without, closing it
+/// quits.
+fn add_menus(app: &tauri::App) -> tauri::Result<WindowPolicy> {
+    #[cfg(target_os = "macos")]
+    menu::add(app)?;
+    #[cfg(not(target_os = "macos"))]
+    if !tray::available() {
+        tracing::info!("no tray, closing the window quits");
+        return Ok(WindowPolicy::QuitOnClose);
+    }
+    #[cfg(not(target_os = "macos"))]
+    tray::add(app)?;
+    Ok(WindowPolicy::HideOnClose)
+}
+
+/// The window's policy, for the window to know whether it carries the
+/// settings a menu would.
+#[tauri::command]
+fn window_policy(app: tauri::AppHandle) -> WindowPolicy {
+    WindowPolicy::of(&app)
+}
+
 /// The app outlives its window, so the proxy keeps serving the browser while
-/// the window is away. On macOS the dock icon brings it back and Quit is in
-/// the app menu; elsewhere the tray icon does both.
+/// the window is away, wherever there is a menu bar or tray to hold it.
 fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+        if WindowPolicy::of(window) == WindowPolicy::QuitOnClose {
+            return;
+        }
         api.prevent_close();
         if let Err(e) = window.hide() {
             tracing::warn!(error = %e, "could not hide the window");
@@ -96,13 +142,18 @@ fn hide_instead_of_closing(window: &tauri::Window, event: &tauri::WindowEvent) {
 }
 
 /// Reveal the app window. The window is configured invisible and shown once the
-/// event loop runs (which isnot at all for an autostart at login).
+/// event loop runs (which is not at all for an autostart at login, unless
+/// closing the window quits: then it shows minimized, since closing it is how
+/// to quit).
 ///
 /// Reopen is the dock icon clicked while the window is hidden. That event only
 /// exists on macOS.
 fn show_window_on(app: &tauri::AppHandle, event: tauri::RunEvent) {
     match event {
         tauri::RunEvent::Ready if !autostart::launched_hidden() => show_window(app),
+        tauri::RunEvent::Ready if WindowPolicy::of(app) == WindowPolicy::QuitOnClose => {
+            show_window_minimized(app)
+        }
         #[cfg(target_os = "macos")]
         tauri::RunEvent::Reopen { .. } => show_window(app),
         _ => {}
@@ -115,6 +166,17 @@ fn show_window(app: &tauri::AppHandle) {
         let _ = window.unminimize();
         let _ = window.show();
         let _ = window.set_focus();
+    }
+}
+
+/// Shows the window minimized. Minimized before it shows, which X11 honours
+/// so the window never appears; Wayland only minimizes shown windows, so
+/// again after, which may flash it briefly.
+fn show_window_minimized(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.minimize();
+        let _ = window.show();
+        let _ = window.minimize();
     }
 }
 
@@ -143,7 +205,7 @@ impl Desktop {
     /// open would do.
     fn start(app: tauri::AppHandle) -> anyhow::Result<Self> {
         let data_dir = app.path().app_data_dir()?;
-        let secrets = secrets::PlatformSecretStore::open(&app.config().identifier);
+        let secrets = secrets::PlatformSecretStore::open(&app.config().identifier, &data_dir)?;
         let client = sdk::Client::new(sdk::ClientConfig {
             data_dir: data_dir.join("sdk").to_string_lossy().into_owned(),
             secrets: secrets.map(|store| Arc::new(store) as Arc<dyn sdk::SecretStore>),
