@@ -34,22 +34,10 @@ pub fn run() {
                     if let Err(e) = autostart::enable_on_first_run(&handle) {
                         tracing::warn!(
                             error = format!("{e:#}"),
-                            "could not turn launch at login on"
+                            "could not turn autostart on"
                         );
                     }
-                    // On macOS, install the menu bar; elsewhere, the tray
-                    // icon if there is a tray. Either holds the app while
-                    // the window is closed; without, closing it quits.
-                    #[cfg(target_os = "macos")]
-                    let policy = menu::add(app).map(|()| WindowPolicy::HideOnClose);
-                    #[cfg(not(target_os = "macos"))]
-                    let policy = if tray::available() {
-                        tray::add(app).map(|()| WindowPolicy::HideOnClose)
-                    } else {
-                        tracing::info!("no tray, closing the window quits");
-                        Ok(WindowPolicy::QuitOnClose)
-                    };
-                    match policy {
+                    match add_menus(app) {
                         Ok(policy) => {
                             app.manage(policy);
                             Ok(())
@@ -117,6 +105,22 @@ impl WindowPolicy {
             .try_state::<Self>()
             .map_or(Self::HideOnClose, |policy| *policy)
     }
+}
+
+/// On macOS, install the menu bar; elsewhere, the tray icon if there is a
+/// tray. Either holds the app while the window is closed; without, closing it
+/// quits.
+fn add_menus(app: &tauri::App) -> tauri::Result<WindowPolicy> {
+    #[cfg(target_os = "macos")]
+    menu::add(app)?;
+    #[cfg(not(target_os = "macos"))]
+    if !tray::available() {
+        tracing::info!("no tray, closing the window quits");
+        return Ok(WindowPolicy::QuitOnClose);
+    }
+    #[cfg(not(target_os = "macos"))]
+    tray::add(app)?;
+    Ok(WindowPolicy::HideOnClose)
 }
 
 /// The window's policy, for the window to know whether it carries the
