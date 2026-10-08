@@ -122,5 +122,7 @@ fn credential_store() -> keyring_core::Result<Arc<CredentialStore>> {
 
 #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn credential_store() -> keyring_core::Result<Arc<CredentialStore>> {
-    Err(Error::NotSupportedByStore("no credential store on this platform".into()))
+    Err(Error::NotSupportedByStore(
+        "no credential store on this platform".into(),
+    ))
 }

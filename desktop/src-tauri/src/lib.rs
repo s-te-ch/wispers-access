@@ -32,10 +32,7 @@ pub fn run() {
                 Ok(desktop) => {
                     app.manage(desktop);
                     if let Err(e) = autostart::enable_on_first_run(&handle) {
-                        tracing::warn!(
-                            error = format!("{e:#}"),
-                            "could not turn autostart on"
-                        );
+                        tracing::warn!(error = format!("{e:#}"), "could not turn autostart on");
                     }
                     match add_menus(app) {
                         Ok(policy) => {
