@@ -76,8 +76,8 @@ pub fn run() {
             shares::leave,
             autostart::restart,
             window_policy,
-            autostart::launch_at_login,
-            autostart::set_launch_at_login,
+            autostart::autostart_enabled,
+            autostart::set_autostart_enabled,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

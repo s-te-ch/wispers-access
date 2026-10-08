@@ -1,15 +1,15 @@
 <script lang="ts">
-  import { launchAtLogin, setLaunchAtLogin, windowPolicy } from "$lib/api";
+  import { autostartEnabled, setAutostartEnabled, windowPolicy } from "$lib/api";
   import { onMount } from "svelte";
 
-  // The launch at login setting, where the window carries it: on Linux
+  // The autostart setting, where the window carries it: on Linux
   // desktops without a tray. Everywhere else a menu has it and this shows
   // nothing. Null until known, or where a menu has it.
   let enabled = $state<boolean | null>(null);
   let error = $state<string | null>(null);
 
   onMount(async () => {
-    if ((await windowPolicy()) === "quitOnClose") enabled = await launchAtLogin();
+    if ((await windowPolicy()) === "quitOnClose") enabled = await autostartEnabled();
   });
 
   async function toggle() {
@@ -17,7 +17,7 @@
     const wanted = !enabled;
     error = null;
     try {
-      await setLaunchAtLogin(wanted);
+      await setAutostartEnabled(wanted);
       enabled = wanted;
     } catch (e) {
       error = String(e);

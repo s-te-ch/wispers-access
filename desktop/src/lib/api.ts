@@ -61,10 +61,11 @@ export type WindowPolicy = "hideOnClose" | "quitOnClose";
 
 export const windowPolicy = () => invoke<WindowPolicy>("window_policy");
 
-export const launchAtLogin = () => invoke<boolean>("launch_at_login");
+/** Whether the app launches at login. */
+export const autostartEnabled = () => invoke<boolean>("autostart_enabled");
 
-export const setLaunchAtLogin = (enabled: boolean) =>
-  invoke<void>("set_launch_at_login", { enabled });
+export const setAutostartEnabled = (enabled: boolean) =>
+  invoke<void>("set_autostart_enabled", { enabled });
 
 /** Restarts the app, window showing. Used after a software update. */
 export const restart = () => invoke<void>("restart");
