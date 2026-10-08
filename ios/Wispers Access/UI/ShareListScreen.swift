@@ -97,7 +97,7 @@ struct ShareListScreen: View {
                     .padding(.vertical, 12)
             }
             ForEach(share.apps, id: \.id) { app in
-                let key = BrowseKey(shareID: share.id, appID: app.id)
+                let key = SharedAppId(shareID: share.id, appID: app.id)
                 NavigationLink(
                     value: share.state == .live ? ShareRoute.browse(key) : ShareRoute.detail(share.id)
                 ) {

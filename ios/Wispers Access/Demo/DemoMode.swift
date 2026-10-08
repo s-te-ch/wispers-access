@@ -51,22 +51,23 @@ enum DemoMode {
                 if let url = Bundle.main.url(forResource: app.slug, withExtension: "png"),
                     let png = try? Data(contentsOf: url)
                 {
-                    icons.update(png, rank: 1, for: BrowseKey(shareID: entry.slug, appID: app.slug))
+                    icons.update(png, rank: 1, for: SharedAppId(shareID: entry.slug, appID: app.slug))
                 }
             }
         }
         return ShareManager(client: nil, icons: icons, activity: activity, shares: shares)
     }
 
-    /// A screen to open on launch (`--demo-detail <share slug>`, e.g. `home`),
-    /// so capture scripts can shoot the detail screen without synthesizing taps.
-    static var initialRoute: ShareRoute? {
+    /// A share whose detail to show on launch (`--demo-detail <share slug>`,
+    /// e.g. `home`), so capture scripts can shoot the detail screen without
+    /// synthesizing taps.
+    static var initialDetail: ShareId? {
         guard active else { return nil }
         let args = ProcessInfo.processInfo.arguments
         guard let flag = args.firstIndex(of: "--demo-detail"), flag + 1 < args.count else {
             return nil
         }
-        return .detail(args[flag + 1])
+        return args[flag + 1]
     }
 
     /// Whether to open the add-app sheet on launch (`--demo-add`), pre-filled

@@ -10,6 +10,13 @@
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
+	<!-- On iPad each open app gets a window of its own (see AppWindow), so
+	     the OS switches between them. iPhone ignores this. -->
+	<key>UIApplicationSceneManifest</key>
+	<dict>
+		<key>UIApplicationSupportsMultipleScenes</key>
+		<true/>
+	</dict>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Used to connect directly to shared apps on devices in your network.</string>
 </dict>

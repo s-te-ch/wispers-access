@@ -20,24 +20,24 @@ final class ShareIconStore {
     }
 
     /// The cached icon bytes for an app, if any — feeds `ShareAvatar`.
-    func iconData(for key: BrowseKey) -> Data? { records[Self.record(key)]?.png }
+    func iconData(for key: SharedAppId) -> Data? { records[Self.record(key)]?.png }
 
     /// An icon to stand for the share as a whole: the first of its apps that
     /// has one.
     func iconData(forAnyAppOf share: Share) -> Data? {
         share.apps.lazy
-            .compactMap { self.iconData(for: BrowseKey(shareID: share.id, appID: $0.id)) }
+            .compactMap { self.iconData(for: SharedAppId(shareID: share.id, appID: $0.id)) }
             .first
     }
 
     /// The rank of the cached icon (0 if none) — the bar a new one must beat.
-    func rank(for key: BrowseKey) -> Int { records[Self.record(key)]?.rank ?? 0 }
+    func rank(for key: SharedAppId) -> Int { records[Self.record(key)]?.rank ?? 0 }
 
     /// Stores a harvested icon unless the cached one out-ranks it (a higher
     /// rung of the ladder), or is the same rank and the same bytes. Same rank
     /// with different bytes replaces, so a site that changes its icon is
     /// picked up. The caller has already validated the bytes decode.
-    func update(_ png: Data, rank: Int, for key: BrowseKey) {
+    func update(_ png: Data, rank: Int, for key: SharedAppId) {
         if let cached = records[Self.record(key)] {
             guard rank > cached.rank || (rank == cached.rank && cached.png != png) else { return }
         }
@@ -53,7 +53,7 @@ final class ShareIconStore {
         if records.count != before { persist() }
     }
 
-    private static func record(_ key: BrowseKey) -> String { "\(key.shareID)/\(key.appID)" }
+    private static func record(_ key: SharedAppId) -> String { "\(key.shareID)/\(key.appID)" }
 
     // MARK: - Private
 

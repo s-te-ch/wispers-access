@@ -8,7 +8,7 @@ import WispersAccessSdk
 /// is how you switch — while the session stays warm for a while.
 struct BrowserView: View {
     @Environment(ShareManager.self) private var manager
-    let key: BrowseKey
+    let key: SharedAppId
 
     var body: some View {
         ZStack {

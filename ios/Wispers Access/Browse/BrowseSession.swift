@@ -3,8 +3,11 @@ import Observation
 import WebKit
 import WispersAccessSdk
 
-/// One app of one share, as the browse sessions tell them apart.
-struct BrowseKey: Hashable, Sendable {
+/// Identifies one shared app across this app. An app's id is unique only
+/// within its share, so it takes both. Browse sessions, cached icons, routes,
+/// quick actions and iPad windows all refer to an app by it; Codable for the
+/// windows, which the system restores with their value.
+nonisolated struct SharedAppId: Hashable, Codable, Sendable {
     let shareID: ShareId
     let appID: String
 }
@@ -16,9 +19,9 @@ struct BrowseKey: Hashable, Sendable {
 @MainActor
 @Observable
 final class BrowseSession: Identifiable {
-    let key: BrowseKey
+    let key: SharedAppId
     let name: String
-    nonisolated var id: BrowseKey { key }
+    nonisolated var id: SharedAppId { key }
 
     private(set) var url: URL?
     var isLoading = true
@@ -35,9 +38,9 @@ final class BrowseSession: Identifiable {
         app: SharedApp,
         proxy: PerAppProxy,
         auth: ProxyAuth,
-        onIcon: @escaping (BrowseKey, Data, Int) -> Void = { _, _, _ in }
+        onIcon: @escaping (SharedAppId, Data, Int) -> Void = { _, _, _ in }
     ) {
-        self.key = BrowseKey(shareID: share.id, appID: app.id)
+        self.key = SharedAppId(shareID: share.id, appID: app.id)
         self.name = app.name.isEmpty ? share.name : app.name
         self.proxy = proxy
         self.auth = auth
