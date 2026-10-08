@@ -14,7 +14,7 @@ struct Wispers_AccessApp: App {
     @State private var manager = DemoMode.active ? DemoMode.makeManager() : ShareManager.live()
 
     var body: some Scene {
-        WindowGroup {
+        WindowGroup(id: RosterWindow.id) {
             RootView()
                 .environment(manager)
                 .environment(manager.icons)

@@ -8,12 +8,15 @@ struct RootView: View {
     @Environment(ShareManager.self) private var manager
     @Environment(QuickActionInbox.self) private var quickActions
     @Environment(\.openWindow) private var openWindow
+    @Environment(\.scenePhase) private var scenePhase
     @State private var router = BrowseRouter(showing: DemoMode.initialDetail)
 
     var body: some View {
         Group {
             if BrowseRouter.opensWindows {
                 ShareSplitView()
+                    // So the app windows' "Shares" button can find this window.
+                    .background(RosterWindow.Registrar(isActive: scenePhase == .active))
             } else {
                 ShareStack()
             }
