@@ -90,7 +90,7 @@ struct ShareDetailScreen: View {
                     .padding(.vertical, 8)
             }
             ForEach(share.apps, id: \.id) { app in
-                let key = BrowseKey(shareID: shareID, appID: app.id)
+                let key = SharedAppId(shareID: shareID, appID: app.id)
                 let card = AppCard(
                     app: app,
                     isLive: manager.browser.isWarm(key),

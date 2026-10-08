@@ -20,6 +20,10 @@ struct Wispers_AccessApp: App {
                 .environment(manager.icons)
                 .environment(QuickActionInbox.shared)
         }
+        // iPadOS's windowed mode opens a new window at a size of its choosing,
+        // which can be narrow enough to collapse the sidebar layout into a
+        // phone-like stack. Ask for room for the sidebar and the detail.
+        .defaultSize(width: 1000, height: 760)
         // The app as a whole, not one window: keep the app-icon shortcuts
         // current — Apple's cue to refresh them — and let the SDK check its
         // connections after a longer stint away.
@@ -38,10 +42,12 @@ struct Wispers_AccessApp: App {
 
         // iPad only: each open app in a window of its own, opened from the
         // roster, so the OS switches between them like between any apps.
-        WindowGroup(for: BrowseKey.self) { $key in
+        WindowGroup(for: SharedAppId.self) { $key in
             AppWindow(key: key)
                 .environment(manager)
                 .environment(manager.icons)
         }
+        // A web app wants a desktop-sized window, not a phone-sized one.
+        .defaultSize(width: 1100, height: 800)
     }
 }

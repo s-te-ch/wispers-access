@@ -8,7 +8,7 @@ import WispersAccessSdk
 /// gone: the share removed from this device, or the app no longer shared.
 struct AppWindow: View {
     /// Nil only if the system restored a window whose value it couldn't read.
-    let key: BrowseKey?
+    let key: SharedAppId?
 
     @Environment(ShareManager.self) private var manager
     @Environment(\.dismissWindow) private var dismissWindow

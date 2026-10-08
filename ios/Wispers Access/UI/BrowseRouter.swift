@@ -4,7 +4,7 @@ import WispersAccessSdk
 
 /// A destination reachable from the roster.
 enum ShareRoute: Hashable {
-    case browse(BrowseKey)
+    case browse(SharedAppId)
     case detail(ShareId)
 }
 
@@ -45,13 +45,13 @@ final class BrowseRouter {
     /// screen when there are several to choose from, or none yet.
     func open(_ share: Share) {
         if share.state == .live, share.apps.count == 1 {
-            path.append(.browse(BrowseKey(shareID: share.id, appID: share.apps[0].id)))
+            path.append(.browse(SharedAppId(shareID: share.id, appID: share.apps[0].id)))
         } else {
             path.append(.detail(share.id))
         }
     }
 
-    func open(_ key: BrowseKey) {
+    func open(_ key: SharedAppId) {
         path.append(.browse(key))
     }
 }

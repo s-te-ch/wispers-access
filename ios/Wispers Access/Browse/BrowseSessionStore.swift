@@ -17,25 +17,25 @@ final class BrowseSessionStore {
     private(set) var sessions: [BrowseSession] = []
     /// The apps whose browser is currently on screen: at most one on iPhone,
     /// one per app window on iPad.
-    private(set) var onScreen: Set<BrowseKey> = []
+    private(set) var onScreen: Set<SharedAppId> = []
 
     /// How long a backgrounded session stays warm before it's torn down.
     private let warmTTL: Duration = .seconds(300)
-    @ObservationIgnored private var evictionTasks: [BrowseKey: Task<Void, Never>] = [:]
+    @ObservationIgnored private var evictionTasks: [SharedAppId: Task<Void, Never>] = [:]
 
     /// Reports a site icon harvested by a session's web view (app, bytes, rank).
-    @ObservationIgnored private let onIcon: (BrowseKey, Data, Int) -> Void
+    @ObservationIgnored private let onIcon: (SharedAppId, Data, Int) -> Void
 
-    init(onIcon: @escaping (BrowseKey, Data, Int) -> Void = { _, _, _ in }) {
+    init(onIcon: @escaping (SharedAppId, Data, Int) -> Void = { _, _, _ in }) {
         self.onIcon = onIcon
     }
 
-    func session(for key: BrowseKey) -> BrowseSession? {
+    func session(for key: SharedAppId) -> BrowseSession? {
         sessions.first { $0.key == key }
     }
 
     /// Whether an app has a live (warm) session — drives the roster's live marker.
-    func isWarm(_ key: BrowseKey) -> Bool {
+    func isWarm(_ key: SharedAppId) -> Bool {
         sessions.contains { $0.key == key }
     }
 
@@ -44,7 +44,7 @@ final class BrowseSessionStore {
     /// takes to start or resume it.
     @discardableResult
     func open(_ share: Share, _ app: SharedApp, proxy: PerAppProxy, auth: ProxyAuth) -> BrowseSession {
-        let key = BrowseKey(shareID: share.id, appID: app.id)
+        let key = SharedAppId(shareID: share.id, appID: app.id)
         let session: BrowseSession
         if let existing = self.session(for: key) {
             session = existing
@@ -58,14 +58,14 @@ final class BrowseSessionStore {
     }
 
     /// Marks an app's browser as on screen: cancels any pending eviction.
-    func markActive(_ key: BrowseKey) {
+    func markActive(_ key: SharedAppId) {
         cancelEviction(key)
         onScreen.insert(key)
     }
 
     /// The browser for this app left the screen: start its warm-TTL countdown.
     /// Re-opening within the TTL cancels it and reuses the warm web view.
-    func resignActive(_ key: BrowseKey) {
+    func resignActive(_ key: SharedAppId) {
         onScreen.remove(key)
         scheduleEviction(key)
     }
@@ -78,7 +78,7 @@ final class BrowseSessionStore {
         }
     }
 
-    func close(_ key: BrowseKey) {
+    func close(_ key: SharedAppId) {
         cancelEviction(key)
         if let index = sessions.firstIndex(where: { $0.key == key }) {
             sessions[index].stop()
@@ -87,7 +87,7 @@ final class BrowseSessionStore {
         onScreen.remove(key)
     }
 
-    private func scheduleEviction(_ key: BrowseKey) {
+    private func scheduleEviction(_ key: SharedAppId) {
         cancelEviction(key)
         let ttl = warmTTL
         evictionTasks[key] = Task { [weak self] in
@@ -99,7 +99,7 @@ final class BrowseSessionStore {
         }
     }
 
-    private func cancelEviction(_ key: BrowseKey) {
+    private func cancelEviction(_ key: SharedAppId) {
         evictionTasks[key]?.cancel()
         evictionTasks[key] = nil
     }

@@ -187,7 +187,7 @@ private struct ShareRow: View {
             ForEach(share.apps.prefix(3), id: \.id) { app in
                 ShareAvatar(
                     nickname: app.name,
-                    iconPNG: icons.iconData(for: BrowseKey(shareID: share.id, appID: app.id)),
+                    iconPNG: icons.iconData(for: SharedAppId(shareID: share.id, appID: app.id)),
                     size: 20
                 )
                 .padding(2)

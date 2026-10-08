@@ -11,12 +11,12 @@ enum QuickAction {
     private static let appIDKey = "appID"
 
     /// The target app of an "open app" shortcut, if the item is one of ours.
-    static func target(of item: UIApplicationShortcutItem) -> BrowseKey? {
+    static func target(of item: UIApplicationShortcutItem) -> SharedAppId? {
         guard item.type == openAppType,
             let shareID = item.userInfo?[shareIDKey] as? String,
             let appID = item.userInfo?[appIDKey] as? String
         else { return nil }
-        return BrowseKey(shareID: shareID, appID: appID)
+        return SharedAppId(shareID: shareID, appID: appID)
     }
 
     /// The dynamic shortcut list from the roster: the apps of the most
@@ -48,7 +48,7 @@ enum QuickAction {
 @Observable
 final class QuickActionInbox {
     static let shared = QuickActionInbox()
-    var pending: BrowseKey?
+    var pending: SharedAppId?
 
     nonisolated init() {}
 

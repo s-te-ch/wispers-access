@@ -51,7 +51,7 @@ enum DemoMode {
                 if let url = Bundle.main.url(forResource: app.slug, withExtension: "png"),
                     let png = try? Data(contentsOf: url)
                 {
-                    icons.update(png, rank: 1, for: BrowseKey(shareID: entry.slug, appID: app.slug))
+                    icons.update(png, rank: 1, for: SharedAppId(shareID: entry.slug, appID: app.slug))
                 }
             }
         }

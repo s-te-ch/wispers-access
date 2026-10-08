@@ -15,10 +15,10 @@ import WispersAccessSdk
 final class IconHarvester: NSObject, WKScriptMessageHandler {
     static let messageName = "waIcon"
 
-    private let key: BrowseKey
-    private let onIcon: (BrowseKey, Data, Int) -> Void
+    private let key: SharedAppId
+    private let onIcon: (SharedAppId, Data, Int) -> Void
 
-    init(key: BrowseKey, onIcon: @escaping (BrowseKey, Data, Int) -> Void) {
+    init(key: SharedAppId, onIcon: @escaping (SharedAppId, Data, Int) -> Void) {
         self.key = key
         self.onIcon = onIcon
     }
