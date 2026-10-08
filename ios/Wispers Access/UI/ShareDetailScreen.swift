@@ -3,12 +3,15 @@ import WispersAccessSdk
 
 /// Details for one share: online status, avatar, name, last-connected / joined
 /// info, its apps to open, and Remove. Reads the live share from the manager by
-/// id, so a change or removal reflects immediately.
+/// id, so a change or removal reflects immediately. Pushed on iPhone; the
+/// sidebar's detail pane on iPad, where its apps open in windows of their own.
 struct ShareDetailScreen: View {
     let shareID: ShareId
     @Environment(ShareManager.self) private var manager
     @Environment(ShareIconStore.self) private var icons
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.openWindow) private var openWindow
+    @Environment(\.horizontalSizeClass) private var horizontalSizeClass
     @State private var confirmingRemoval = false
 
     var body: some View {
@@ -21,7 +24,7 @@ struct ShareDetailScreen: View {
                 Color.clear.onAppear { dismiss() }
             }
         }
-        .navigationTitle("Shared with you")
+        .navigationTitle(BrowseRouter.opensWindows ? "" : "Shared with you")
         .navigationBarTitleDisplayMode(.inline)
         .task {
             while !Task.isCancelled {
@@ -45,6 +48,10 @@ struct ShareDetailScreen: View {
             HStack(spacing: 8) {
                 InfoCard(label: "LAST CONNECTED", value: date(manager.activity.lastConnected(shareID)))
                 InfoCard(label: "JOINED", value: date(share.joinedAt))
+                // Only where there's room for a third, as on the desktop.
+                if horizontalSizeClass == .regular {
+                    InfoCard(label: "CONNECTION", value: describe(share.transport))
+                }
             }
             if share.state != .live {
                 TerminalShareExplanation(state: share.state)
@@ -52,22 +59,25 @@ struct ShareDetailScreen: View {
                 apps(share)
             }
             removeButton
+                // On the button, so iPad's popover points at it.
+                .confirmationDialog("Remove \(name(share))?", isPresented: $confirmingRemoval) {
+                    Button("Remove", role: .destructive) {
+                        manager.delete(shareID)
+                        dismiss()
+                    }
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This device's access will be removed on the host. You'll need a new invitation code to rejoin.")
+                }
             Spacer()
         }
         .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .confirmationDialog("Remove \(name(share))?", isPresented: $confirmingRemoval) {
-            Button("Remove", role: .destructive) {
-                manager.delete(shareID)
-                dismiss()
-            }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text("This device's access will be removed on the host. You'll need a new invitation code to rejoin.")
-        }
+        .frame(maxWidth: 680, alignment: .leading)
+        .frame(maxWidth: .infinity)
     }
 
-    /// The share's apps as the roster shows them, each a tap away.
+    /// The share's apps as the roster shows them, each a tap away: pushed on
+    /// iPhone, in a window of their own on iPad (an open one comes forward).
     private func apps(_ share: Share) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("APPS")
@@ -81,14 +91,19 @@ struct ShareDetailScreen: View {
             }
             ForEach(share.apps, id: \.id) { app in
                 let key = BrowseKey(shareID: shareID, appID: app.id)
-                NavigationLink(value: ShareRoute.browse(key)) {
-                    AppCard(
-                        app: app,
-                        isLive: manager.browser.isWarm(key),
-                        iconData: icons.iconData(for: key)
-                    )
+                let card = AppCard(
+                    app: app,
+                    isLive: manager.browser.isWarm(key),
+                    iconData: icons.iconData(for: key),
+                    opensWindow: BrowseRouter.opensWindows
+                )
+                if BrowseRouter.opensWindows {
+                    Button { openWindow(value: key) } label: { card }
+                        .buttonStyle(.plain)
+                } else {
+                    NavigationLink(value: ShareRoute.browse(key)) { card }
+                        .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }
@@ -103,6 +118,14 @@ struct ShareDetailScreen: View {
 
     private func name(_ share: Share) -> String {
         share.name.isEmpty ? "Untitled share" : share.name
+    }
+
+    private func describe(_ transport: Transport) -> String {
+        switch transport {
+        case .wispersConnect: "Wispers Connect"
+        case .iroh: "iroh"
+        case .tailscale: "Tailscale"
+        }
     }
 
     private func date(_ date: Date?) -> String {

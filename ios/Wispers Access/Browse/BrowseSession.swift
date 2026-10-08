@@ -3,8 +3,9 @@ import Observation
 import WebKit
 import WispersAccessSdk
 
-/// One app of one share, as the browse sessions tell them apart.
-struct BrowseKey: Hashable, Sendable {
+/// One app of one share, as the browse sessions tell them apart. Codable so
+/// it can be an iPad app window's value, restored with the window.
+nonisolated struct BrowseKey: Hashable, Codable, Sendable {
     let shareID: ShareId
     let appID: String
 }

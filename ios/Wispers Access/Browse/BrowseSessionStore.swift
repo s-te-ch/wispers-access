@@ -8,14 +8,16 @@ import WispersAccessSdk
 ///
 /// iPhone has no per-document task switcher, so the roster doubles as the
 /// switcher: opening an app pushes its browser; backing out to the roster (which
-/// marks what's live) is how you switch. A backgrounded session is torn down
-/// after a warm-TTL to free resources.
+/// marks what's live) is how you switch. On iPad each app has a window of its
+/// own instead, several of which can be on screen at once. A session whose
+/// browser left the screen is torn down after a warm-TTL to free resources.
 @MainActor
 @Observable
 final class BrowseSessionStore {
     private(set) var sessions: [BrowseSession] = []
-    /// The app whose browser is currently on screen, if any.
-    private(set) var active: BrowseKey?
+    /// The apps whose browser is currently on screen: at most one on iPhone,
+    /// one per app window on iPad.
+    private(set) var onScreen: Set<BrowseKey> = []
 
     /// How long a backgrounded session stays warm before it's torn down.
     private let warmTTL: Duration = .seconds(300)
@@ -58,13 +60,13 @@ final class BrowseSessionStore {
     /// Marks an app's browser as on screen: cancels any pending eviction.
     func markActive(_ key: BrowseKey) {
         cancelEviction(key)
-        active = key
+        onScreen.insert(key)
     }
 
     /// The browser for this app left the screen: start its warm-TTL countdown.
     /// Re-opening within the TTL cancels it and reuses the warm web view.
     func resignActive(_ key: BrowseKey) {
-        if active == key { active = nil }
+        onScreen.remove(key)
         scheduleEviction(key)
     }
 
@@ -82,7 +84,7 @@ final class BrowseSessionStore {
             sessions[index].stop()
             sessions.remove(at: index)
         }
-        if active == key { active = nil }
+        onScreen.remove(key)
     }
 
     private func scheduleEviction(_ key: BrowseKey) {
@@ -92,7 +94,7 @@ final class BrowseSessionStore {
             try? await Task.sleep(for: ttl)
             guard let self, !Task.isCancelled else { return }
             // Skip if it was re-opened while the timer ran.
-            guard self.active != key else { return }
+            guard !self.onScreen.contains(key) else { return }
             self.close(key)
         }
     }

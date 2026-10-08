@@ -1,42 +1,75 @@
 import SwiftUI
 import WispersAccessSdk
 
-/// Join a share by pasting its invite code or scanning its QR. The idle state
-/// offers both; once joining starts it shows step progress (Validating →
-/// Joining), and on success a "Joined" summary with Open / Back. The join
-/// itself is the SDK's, through `ShareManager`; this screen only drives the UI
-/// from the steps it reports.
+/// The add-a-share sheet: the join form, with Cancel while nothing is under
+/// way. On success it offers Open / Back, or, given `onJoined`, hands the share
+/// over and closes, for layouts that show the new share beside it (iPad).
 struct AddShareScreen: View {
-    @Environment(ShareManager.self) private var manager
+    var onJoined: ((Share) -> Void)?
+
     @Environment(BrowseRouter.self) private var router
     @Environment(\.dismiss) private var dismiss
-
-    @State private var tab: AddTab = .enterCode
-    @State private var code = DemoMode.presentAddSheet ? DemoMode.sampleInvite : ""
     @State private var phase: JoinPhase = .idle
-    @State private var errorMessage: String?
-    @State private var showingScanner = false
 
     var body: some View {
         NavigationStack {
             ZStack {
                 AccessColor.background.ignoresSafeArea()
-                content.padding(16)
+                form.padding(16)
             }
             .navigationTitle("Add a share")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                if isIdle {
+                if phase.isIdle {
                     ToolbarItem(placement: .cancellationAction) {
                         Button("Cancel") { dismiss() }
                     }
                 }
             }
-            .interactiveDismissDisabled(!isIdle)
+            .interactiveDismissDisabled(!phase.isIdle)
         }
     }
 
-    @ViewBuilder private var content: some View {
+    private var form: JoinShareForm {
+        JoinShareForm(
+            phase: $phase,
+            onJoined: onJoined.map { _ in handOver },
+            onOpen: open,
+            onBackToList: { dismiss() }
+        )
+    }
+
+    private func handOver(_ share: Share) {
+        onJoined?(share)
+        dismiss()
+    }
+
+    private func open(_ id: ShareId) {
+        // Defer the push to the roster's onDismiss — see BrowseRouter.
+        router.openAfterDismiss = id
+        dismiss()
+    }
+}
+
+/// Join a share by pasting its invite code or scanning its QR. The idle state
+/// offers both; once joining starts it shows step progress (Validating →
+/// Joining), and on success a "Joined" summary with Open / Back — unless
+/// `onJoined` takes the share instead. The join itself is the SDK's, through
+/// `ShareManager`; this form only drives the UI from the steps it reports.
+struct JoinShareForm: View {
+    @Binding var phase: JoinPhase
+    var onJoined: ((Share) -> Void)?
+    var onOpen: (ShareId) -> Void = { _ in }
+    var onBackToList: () -> Void = {}
+
+    @Environment(ShareManager.self) private var manager
+
+    @State private var tab: AddTab = .enterCode
+    @State private var code = DemoMode.presentAddSheet ? DemoMode.sampleInvite : ""
+    @State private var errorMessage: String?
+    @State private var showingScanner = false
+
+    var body: some View {
         switch phase {
         case .idle:
             idleContent
@@ -44,7 +77,7 @@ struct AddShareScreen: View {
             JoinStepList(steps: JoinStep.allCases.map { ($0.label, stepStatus($0, current: current)) })
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         case .joined(let share):
-            JoinSuccess(nickname: share.name, onOpen: { open(share.id) }, onBackToList: { dismiss() })
+            JoinSuccess(nickname: share.name, onOpen: { onOpen(share.id) }, onBackToList: onBackToList)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
     }
@@ -184,25 +217,19 @@ struct AddShareScreen: View {
             let share = try await manager.join(inviteCode: trimmedCode) { step in
                 phase = .joining(step)
             }
-            phase = .joined(share)
+            if let onJoined {
+                phase = .idle
+                onJoined(share)
+            } else {
+                phase = .joined(share)
+            }
         } catch {
             phase = .idle
             errorMessage = error.localizedDescription
         }
     }
 
-    private func open(_ id: ShareId) {
-        // Defer the push to the roster's onDismiss — see BrowseRouter.
-        router.openAfterDismiss = id
-        dismiss()
-    }
-
     // MARK: Helpers
-
-    private var isIdle: Bool {
-        if case .idle = phase { return true }
-        return false
-    }
 
     private var trimmedCode: String {
         code.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -216,10 +243,15 @@ struct AddShareScreen: View {
 
 private enum AddTab: Hashable { case enterCode, scanQR }
 
-private enum JoinPhase {
+enum JoinPhase {
     case idle
     case joining(JoinStep)
     case joined(Share)
+
+    var isIdle: Bool {
+        if case .idle = self { return true }
+        return false
+    }
 }
 
 private enum StepStatus { case pending, running, done }
