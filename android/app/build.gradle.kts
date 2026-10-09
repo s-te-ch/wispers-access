@@ -21,12 +21,16 @@ android {
             minorApiLevel = 1
         }
     }
+    // The NDK AGP strips native libraries with and extracts their symbol
+    // tables from. Without a pinned version AGP looks for its own default,
+    // and when that one is not installed it silently skips both steps.
+    ndkVersion = "29.0.14206865"
 
     defaultConfig {
         applicationId = "dev.wispers.access.android"
         minSdk = 28
         targetSdk = 36
-        versionCode = 10
+        versionCode = 11
         versionName = "1.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -50,6 +54,12 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Pack the SDK's native symbol table into the bundle so Play can
+            // symbolicate native crashes and ANRs. The Rust release build
+            // carries no DWARF, so SYMBOL_TABLE is all there is to ship.
+            ndk {
+                debugSymbolLevel = "SYMBOL_TABLE"
+            }
         }
     }
     compileOptions {
