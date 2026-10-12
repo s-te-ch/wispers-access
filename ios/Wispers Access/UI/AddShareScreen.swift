@@ -77,7 +77,12 @@ struct JoinShareForm: View {
             JoinStepList(steps: JoinStep.allCases.map { ($0.label, stepStatus($0, current: current)) })
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         case .joined(let share):
-            JoinSuccess(nickname: share.name, onOpen: { onOpen(share.id) }, onBackToList: onBackToList)
+            JoinSuccess(
+                nickname: share.name,
+                appCount: share.apps.count,
+                onOpen: { onOpen(share.id) },
+                onBackToList: onBackToList
+            )
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
     }
@@ -273,6 +278,9 @@ private struct JoinStepList: View {
 
 private struct JoinSuccess: View {
     let nickname: String
+    /// Decides the label: a single app opens directly, otherwise the share's
+    /// detail lists them (as on Android).
+    let appCount: Int
     let onOpen: () -> Void
     let onBackToList: () -> Void
 
@@ -281,7 +289,9 @@ private struct JoinSuccess: View {
             JoinStepList(steps: JoinStep.allCases.map { ($0.label, .done) })
             StepRow(label: nickname.isEmpty ? "Joined" : "Joined “\(nickname)”", status: .done)
             VStack(spacing: 8) {
-                Button(action: onOpen) { Text("Open app ↗").accessFilledButton() }
+                Button(action: onOpen) {
+                    Text(appCount == 1 ? "Open app ↗" : "Show apps").accessFilledButton()
+                }
                 Button(action: onBackToList) {
                     Text("Back to list").accessOutlinedButton(tint: AccessColor.primaryDark)
                 }
