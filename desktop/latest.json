@@ -1,14 +1,10 @@
 {
-  "version": "0.1.1",
+  "version": "1.0.0-rc1",
   "platforms": {
     "darwin-aarch64": {
-      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v0.1.1/Wispers.Access.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekpsL0VYWjdtK0pxRjUrUE1YN1kyODl5TXB3VHRvc2xNRExBZTR1djRuVXhsampsdmhLdzBqVk50dzBhWmpsb2NFTkZiRFd6cmF3eU95TmZiRUZxcmc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwODgzMTAyCWZpbGU6V2lzcGVycyBBY2Nlc3MuYXBwLnRhci5negl2ZXJzaW9uOjAuMS4xCnlYSzVDR09wOHBXaVlrWFUvR3BXWTRSNEZ4Y09OeWVObGp3dmo4TkQ1RUFYM29SNmsxMkkrNVAxRkM3aElKVUZvQ3A5VW9FT1FVRCtEa1BwOW90RUFBPT0K"
-    },
-    "windows-x86_64": {
-      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v0.1.1/Wispers.Access_0.1.1_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekxiZWVBWGtDTWN3VmtGSmY2R253RitoZHViWEVNOWxYT3Z5RVlUdFVVRGZGbG9ycG9KRUFjVVVxUjZTSm9TVkd6VWYwb2V1Tm9PS3FLMUVqV1dicUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwODgzOTcyCWZpbGU6V2lzcGVycyBBY2Nlc3NfMC4xLjFfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4xClkrYThiYnl3UEVXQ1l4Wkp0ZU9wOTN5dDBTRmV1TUxwcm9KOGRpVDdiS0xVMHRadkFwc1dMaTBaRFFCZWF6TWQ2UVFjb3N5NjdidU1oYjhJd3l1UkJRPT0K"
+      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.0.0-rc1/Wispers.Access.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekl4ZnYxcHRoM3hzR2tqVndNaFJzZzN6SFFob1ZsengzQkdSQWcrbW4xdjh0SW1EVEZsUHpSWHd6NDExeCtrTXUrV1l2cDhHVHl5S0huR1V6YmV6dEFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxODEzMTI5CWZpbGU6V2lzcGVycyBBY2Nlc3MuYXBwLnRhci5negl2ZXJzaW9uOjEuMC4wLXJjMQp1bDFGMENkRFl6YUVVTHZFTEc4Nm5PSWtJall5cVA2QmdBN2JkbE1mZ0U0d21SYW1rMTJvSmNXOGZQdTgrOUZvNEc0Z0lYb2JVMmVxdk85VGhzVGxCUT09Cg=="
     }
   },
-  "pub_date": "2026-10-01T19:46:12Z"
+  "pub_date": "2026-10-12T13:52:38Z"
 }
