@@ -397,6 +397,25 @@ pub struct ApiError {
     pub error: String,
 }
 
+/// The `User-Agent` value for an SDK of the given `version`.
+pub fn client_user_agent(version: &str) -> String {
+    format!("{CLIENT_PRODUCT}/{version}")
+}
+
+/// Extracts the version from a user agent string as created by
+/// [`client_user_agent`].
+pub fn client_version(user_agent: &str) -> Option<semver::Version> {
+    let first = user_agent.split_whitespace().next()?;
+    let version = first.strip_prefix(CLIENT_PRODUCT)?.strip_prefix('/')?;
+    semver::Version::parse(version).ok()
+}
+
+/// The product token used by [`client_user_agent`] and [`client_version`].
+const CLIENT_PRODUCT: &str = "wispers-access-sdk";
+
+/// The `error` sent with a 426 Upgrade Required.
+pub const CLIENT_TOO_OLD: &str = "client-too-old";
+
 /// Why an activation was refused, the `error` of its [`ApiError`]. Values are
 /// only ever added.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -697,6 +716,21 @@ mod tests {
             assert_eq!(t.as_str().parse::<Transport>(), Ok(t));
         }
         assert!("hub".parse::<Transport>().is_err());
+    }
+
+    #[test]
+    fn client_version_reads_the_sdk_token_only() {
+        assert_eq!(
+            client_version(&client_user_agent("0.2.0")),
+            Some(semver::Version::new(0, 2, 0))
+        );
+        assert_eq!(
+            client_version("wispers-access-sdk/1.4.0 wispers-access-ios/2.0.0"),
+            Some(semver::Version::new(1, 4, 0))
+        );
+        assert_eq!(client_version("Mozilla/5.0"), None);
+        assert_eq!(client_version("wispers-access-sdk/latest"), None);
+        assert_eq!(client_version(""), None);
     }
 
     #[test]

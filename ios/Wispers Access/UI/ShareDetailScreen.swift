@@ -158,6 +158,7 @@ private struct StatusRow: View {
         case .offline: return "OFFLINE"
         case .unknown: return "UNKNOWN"
         case .checking: return "CHECKING…"
+        case .outdated: return "UPDATE NEEDED"
         case .removed, .revoked: return "NO LONGER AVAILABLE"
         }
     }

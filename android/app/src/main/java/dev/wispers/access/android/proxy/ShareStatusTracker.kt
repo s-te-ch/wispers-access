@@ -77,7 +77,7 @@ class ShareStatusTracker @Inject constructor(
                 coroutineScope {
                     for (share in shares) {
                         // Terminal is forever; the share's own state renders.
-                        if (share.state != ShareState.LIVE) continue
+                        if (share.state.isTerminal) continue
                         launch { checkShare(share) }
                     }
                 }

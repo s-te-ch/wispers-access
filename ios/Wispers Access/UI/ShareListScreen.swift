@@ -182,6 +182,7 @@ private struct ShareHeader: View {
         case .offline: status = "OFFLINE"
         case .unknown: status = "UNKNOWN"
         case .checking: status = "CHECKING…"
+        case .outdated: return "UPDATE NEEDED"
         case .removed, .revoked: return "NO LONGER SHARED"
         }
         guard let lastConnected, let ago = Self.shortAgo(lastConnected) else { return status }

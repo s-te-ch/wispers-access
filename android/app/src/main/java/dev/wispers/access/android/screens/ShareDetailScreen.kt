@@ -323,6 +323,7 @@ private fun StatusRow(availability: ShareAvailability?) {
                 ShareAvailability.ONLINE -> "ONLINE"
                 ShareAvailability.OFFLINE -> "OFFLINE"
                 ShareAvailability.UNKNOWN -> "UNKNOWN"
+                ShareAvailability.OUTDATED -> "UPDATE NEEDED"
                 ShareAvailability.REMOVED, ShareAvailability.REVOKED -> "NO LONGER AVAILABLE"
                 null -> "CHECKING…"
             },

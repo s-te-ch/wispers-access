@@ -404,6 +404,7 @@ private fun statusLine(availability: ShareAvailability?, lastConnected: Instant?
         ShareAvailability.ONLINE -> "ONLINE"
         ShareAvailability.OFFLINE -> "OFFLINE"
         ShareAvailability.UNKNOWN -> "UNKNOWN"
+        ShareAvailability.OUTDATED -> return "UPDATE NEEDED"
         ShareAvailability.REMOVED, ShareAvailability.REVOKED -> return "NO LONGER SHARED"
         null -> "CHECKING"
     }

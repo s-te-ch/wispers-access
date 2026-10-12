@@ -449,7 +449,7 @@ impl StateDb {
                      JOIN invites i ON i.id = g.invite_id WHERE g.peer_id = ?1"
                 ),
                 [peer_id],
-                |r| Ok((guest_from_row(r)?, r.get(7)?)),
+                |r| Ok((guest_from_row(r)?, r.get("secret_hash")?)),
             )
             .optional()
             .map_err(Error::Db)?;
