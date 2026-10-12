@@ -8011,6 +8011,7 @@ dependencies = [
  "rusqlite",
  "rusqlite_migration",
  "rustls",
+ "semver",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -8929,7 +8930,7 @@ dependencies = [
 
 [[package]]
 name = "wispers-access-sdk"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
@@ -8959,6 +8960,7 @@ name = "wispers-access-wire"
 version = "0.1.0"
 dependencies = [
  "data-encoding",
+ "semver",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

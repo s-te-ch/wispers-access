@@ -13,9 +13,10 @@ import androidx.compose.ui.unit.dp
 import dev.wispers.access.sdk.ShareState
 
 /**
- * Explains a terminal share: what happened and that only removal remains.
- * Shared between the detail screen and the WebView activity (a pinned shortcut
- * can still land there), so the story reads the same everywhere.
+ * Explains why a share can't be used - what happened, and what remains to do.
+ * For example, update the app, or remove the share. Shared between the detail
+ * screen and the WebView activity (a pinned shortcut can still land there), so
+ * the story reads the same everywhere.
  */
 @Composable
 fun TerminalShareExplanation(state: ShareState, modifier: Modifier = Modifier) {
@@ -25,20 +26,30 @@ fun TerminalShareExplanation(state: ShareState, modifier: Modifier = Modifier) {
             verticalArrangement = Arrangement.spacedBy(8.dp),
         ) {
             Text(
-                text = "This share is no longer available",
+                text = when (state) {
+                    ShareState.OUTDATED -> "This app is too old for this share"
+                    else -> "This share is no longer available"
+                },
                 style = MaterialTheme.typography.titleMedium,
             )
             Text(
                 text = when (state) {
+                    ShareState.OUTDATED ->
+                        "The share's host runs a newer version of Wispers Access than this app " +
+                            "understands. Update the app to keep using the share."
                     ShareState.REMOVED ->
-                        "The share was removed by its host and can't be reached anymore. "
+                        "The share was removed by its host and can't be reached anymore. " +
+                            REMOVAL_HINT
                     ShareState.REVOKED ->
-                        "This device's access was revoked by the share's host. "
-                    ShareState.LIVE -> "The share is available. "
-                } + "You can remove it from this device; joining again needs a new invitation code.",
+                        "This device's access was revoked by the share's host. " + REMOVAL_HINT
+                    ShareState.LIVE -> "The share is available. " + REMOVAL_HINT
+                },
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
     }
 }
+
+private const val REMOVAL_HINT =
+    "You can remove it from this device. Joining again needs a new invitation code."

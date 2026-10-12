@@ -143,6 +143,7 @@ fn list(client: &sdk::Client) -> Result<()> {
 fn describe_state(state: sdk::ShareState) -> &'static str {
     match state {
         sdk::ShareState::Live => "ok",
+        sdk::ShareState::Outdated => "the host node needs a newer version of waclient",
         sdk::ShareState::Removed => "the share was removed by its host node",
         sdk::ShareState::Revoked => "this device's access was revoked",
     }
@@ -191,10 +192,7 @@ async fn serve(client: &sdk::Client, port: u16) -> Result<()> {
     // Ask every live share's host node whether the config changed since the
     // last run. Best effort and off the startup path - an unreachable host node
     // just leaves the stored copy in place.
-    for share in shares
-        .into_iter()
-        .filter(|s| s.state == sdk::ShareState::Live)
-    {
+    for share in shares.into_iter().filter(|s| !s.state.is_terminal()) {
         let client = client.clone();
         let proxy = proxy.clone();
         tokio::spawn(async move {

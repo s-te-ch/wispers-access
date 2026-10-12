@@ -15,7 +15,7 @@ struct StatusDot: View {
                 .frame(width: size, height: size)
         case .online:
             Circle().fill(AccessColor.online).frame(width: size, height: size)
-        case .offline, .unknown:
+        case .offline, .unknown, .outdated:
             Circle().fill(AccessColor.outline).frame(width: size, height: size)
         case .removed, .revoked:
             Circle().fill(AccessColor.destructive).frame(width: size, height: size)

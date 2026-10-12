@@ -4,7 +4,7 @@
   import {
     describeAvailability,
     describeTransport,
-    explainTerminalState,
+    explainUnusableState,
     isoDate,
   } from "$lib/format";
   import AppIcon from "./AppIcon.svelte";
@@ -48,9 +48,13 @@
 
   {#if share.state !== "live"}
     <div class="mt-8 rounded-2xl bg-info-card p-4">
-      <h2 class="font-semibold">This share is no longer available</h2>
+      <h2 class="font-semibold">
+        {share.state === "outdated"
+          ? "This app is too old for this share"
+          : "This share is no longer available"}
+      </h2>
       <p class="mt-1 text-[14px] leading-relaxed text-on-surface-variant">
-        {explainTerminalState(share.state)}
+        {explainUnusableState(share.state)}
       </p>
     </div>
   {:else}

@@ -4,7 +4,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-export type ShareState = "live" | "removed" | "revoked";
+export type ShareState = "live" | "outdated" | "removed" | "revoked";
 
 export type AppKind = "web" | "jellyfin" | "immich";
 
@@ -29,7 +29,7 @@ export interface Share {
 }
 
 /** Share availability: reachable or not, or the host node turned us away for good. */
-export type Availability = "online" | "offline" | "unknown" | "removed" | "revoked";
+export type Availability = "online" | "offline" | "unknown" | "outdated" | "removed" | "revoked";
 
 export interface ShareStatus {
   availability: Availability;

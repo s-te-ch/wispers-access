@@ -55,6 +55,10 @@ pub enum SdkError {
     /// refused. Includes the transport's own bookkeeping on the way.
     #[error("{0}")]
     HostNode(String),
+    /// The host node runs a newer Wispers Access than this SDK understands
+    /// and turned the request away. The user should update the app.
+    #[error("{0}")]
+    ClientTooOld(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -90,8 +94,9 @@ pub struct ClientConfig {
 #[uniffi::export(with_foreign)]
 pub trait Observer: Send + Sync {
     /// The stored share changed: it was joined, its name or apps changed,
-    /// or its host node turned this device away for good. Called from the
-    /// client's runtime, for `leave` never (the caller knows).
+    /// its host node turned this device away for good, or it needs a newer
+    /// app (or stopped needing one). Called from the client's runtime, for
+    /// `leave` never (the caller knows).
     fn on_share_changed(&self, share: Share);
 }
 
@@ -135,11 +140,23 @@ pub struct Share {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum ShareState {
     Live,
+    /// The host node runs a newer Wispers Access than this SDK understands
+    /// and no longer serves it. The apps are not usable until the user
+    /// updates the app.
+    Outdated,
     /// The host node no longer knows this device's key: the share was
     /// removed, or this device was forgotten. Only `leave` makes sense.
     Removed,
     /// The host node revoked this device. Only `leave` makes sense.
     Revoked,
+}
+
+impl ShareState {
+    /// True if the state means we can't use this share anymore. I.e. the host
+    /// node has forgotten about our guest node or revoked its access.
+    pub fn is_terminal(self) -> bool {
+        matches!(self, ShareState::Removed | ShareState::Revoked)
+    }
 }
 
 // The wire types the surface carries, mirrored for the bindings.
@@ -201,7 +218,13 @@ impl Client {
             let result = async {
                 let info = transports::join(invite, &row, &client.inner.secrets)
                     .await
-                    .map_err(SdkError::host_node)?;
+                    .map_err(|e| {
+                        if e.is::<guest_node::ClientTooOld>() {
+                            SdkError::ClientTooOld(e.to_string())
+                        } else {
+                            SdkError::host_node(e)
+                        }
+                    })?;
                 client.record_join(&row, &info).map_err(SdkError::storage)
             }
             .await;
@@ -241,32 +264,32 @@ impl Client {
             .transpose()
     }
 
-    /// Asks the host node whether the share changed since the stored copy.
-    /// `Some` carries the share as it is now, which may also mean that the
-    /// host node has turned this device away for good; `None` means nothing
-    /// changed. The observer hears about a change too.
+    /// Asks the host node whether the share has changed since we stored a copy
+    /// of its config. `None` means nothing changed. `Some` can mean several
+    /// things: the share config has changed, or the host node has changed its
+    /// mind about serving our guest node (it got removed, revoked, or is simply
+    /// too old).
     pub async fn refresh(&self, share: ShareId) -> Result<Option<Share>> {
         let client = self.clone();
         self.on_runtime(async move {
             let row = client.row(&share)?;
             let before = row.read_share().map_err(SdkError::storage)?;
-            if before.state != ShareState::Live {
+            if before.state.is_terminal() {
                 return Ok(None);
             }
-            let node = match client.guest_node(share.as_str()).await? {
+            let node = match client.restore_guest_node(share.as_str()).await? {
                 Lookup::Live(node) => node,
                 // The store learned this during restore, above.
                 Lookup::Dead(_) => return Ok(Some(row.read_share().map_err(SdkError::storage)?)),
                 Lookup::Unknown => return Err(SdkError::NoSuchShare(share.to_string())),
             };
-            let after = match node.refresh().await {
-                Ok(Some(_)) => row.read_share().map_err(SdkError::storage)?,
-                Ok(None) => return Ok(None),
-                Err(guest_node::RefreshError::Terminal) => {
-                    row.read_share().map_err(SdkError::storage)?
-                }
-                Err(guest_node::RefreshError::Transient(e)) => return Err(SdkError::host_node(e)),
-            };
+            // Refresh the guest node's metadata. Fail on transient errors
+            // (unreachable etc). Other errors get written to the DB.
+            if let Err(guest_node::RefreshError::Transient(e)) = node.refresh().await {
+                return Err(SdkError::host_node(e));
+            }
+            // Re-read the row, which was updated by refresh().
+            let after = row.read_share().map_err(SdkError::storage)?;
             Ok((after != before).then_some(after))
         })
         .await
@@ -455,10 +478,11 @@ impl Client {
             .ok_or_else(|| SdkError::NoSuchShare(share.to_string()))
     }
 
-    /// The guest node of a share, by id or label, restoring its transport on
-    /// first use. A terminal answer from the transport is recorded in the
-    /// store, so the share is dead from then on without dialling again.
-    pub(crate) async fn guest_node(&self, key: &str) -> Result<Lookup> {
+    /// Restore the guest node of a share, by id or label. The first call
+    /// restores its transport, which may reach the hub. Later calls find it
+    /// cached. A terminal answer from the transport is recorded in the store,
+    /// so the share is dead from then on without dialling again.
+    pub(crate) async fn restore_guest_node(&self, key: &str) -> Result<Lookup> {
         let Some(row) = self.inner.db.find_row(key).map_err(SdkError::storage)? else {
             return Ok(Lookup::Unknown);
         };

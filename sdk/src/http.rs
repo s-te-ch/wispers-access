@@ -290,7 +290,7 @@ async fn forward(
         authenticator.scrub(req.headers_mut());
     }
 
-    let share = match client.guest_node(&share).await {
+    let share = match client.restore_guest_node(&share).await {
         Ok(Lookup::Live(share)) => share,
         Ok(Lookup::Dead(state)) => return Ok(gone(state)),
         Ok(Lookup::Unknown) => {

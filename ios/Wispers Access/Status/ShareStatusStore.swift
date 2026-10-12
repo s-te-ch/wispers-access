@@ -3,24 +3,35 @@ import Observation
 import WispersAccessSdk
 
 /// Availability of a share for the status dot and labels. `.checking`, `.online`,
-/// `.offline` and `.unknown` are transient observations; `.removed` / `.revoked`
-/// are terminal — the host node has definitively turned this device away.
+/// `.offline` and `.unknown` are transient observations; `.outdated` lasts
+/// until the app is updated; `.removed` / `.revoked` are terminal — the host
+/// node has definitively turned this device away.
 enum Availability {
     case checking  // not yet checked
     case online
     case offline
     case unknown  // check failed for a reason other than the host node saying no
+    case outdated  // the host node wants a newer app
     case removed
     case revoked
 }
 
 extension ShareState {
-    /// The SDK's terminal states as availabilities; nil while live.
+    /// The SDK's non-live states as availabilities; nil while live.
     var availability: Availability? {
         switch self {
         case .live: nil
+        case .outdated: .outdated
         case .removed: .removed
         case .revoked: .revoked
+        }
+    }
+
+    /// Whether the host node has turned this device away for good.
+    var isTerminal: Bool {
+        switch self {
+        case .removed, .revoked: true
+        case .live, .outdated: false
         }
     }
 }
@@ -39,16 +50,17 @@ final class ShareStatusStore {
         statuses[id] ?? .checking
     }
 
-    /// Refreshes every live share concurrently, each under its own deadline
-    /// so one unreachable host node can't wedge the others. Terminal shares
-    /// are skipped: the SDK's store already knows.
+    /// Refreshes every live share concurrently, each under its own deadline so
+    /// one unreachable host node can't wedge the others. Skips shares where the
+    /// node was removed/revoked, but retries if we previously got an "outdated"
+    /// error.
     func refresh(_ shares: [Share], using client: Client?, activity: ShareActivityStore) async {
         // Demo roster: fixed statuses, no host to poll.
         guard let client else {
             statuses = DemoMode.statuses
             return
         }
-        let live = shares.filter { $0.state == .live }
+        let live = shares.filter { !$0.state.isTerminal }
         await withTaskGroup(of: (ShareId, Availability).self) { group in
             for share in live {
                 group.addTask {

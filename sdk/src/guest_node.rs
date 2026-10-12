@@ -16,7 +16,7 @@ use wispers_access_wire as wire;
 
 /// This device's guest node in one share: its transport to the host node,
 /// its row in the store, and the guest API calls it makes. Restored on the
-/// share's first use, by `Client::guest_node`.
+/// share's first use, by `Client::restore_guest_node`.
 pub struct GuestNode {
     /// The `<share>` label in `<app>.<share>.wa.localhost`.
     label: String,
@@ -126,16 +126,34 @@ impl GuestNode {
     }
 
     /// Asks the host node for the share if it changed since the stored copy,
-    /// and stores the answer. `None` = unchanged.
+    /// and stores the answer. `None` = unchanged. This may reply with an error
+    /// indicating that the guest node's status has changed, e.g. it got revoked
+    /// or its SDK version is too old.
     pub async fn refresh(&self) -> Result<Option<ShareInfo>, RefreshError> {
         let stream = self.open_stream().await.map_err(|e| match e {
             TransportError::Terminal(_) => RefreshError::Terminal,
             TransportError::Transient(e) => RefreshError::Transient(e),
         })?;
         let known = self.row.read_share_config_hash()?;
-        let info = fetch_info(stream, known).await?;
+        let info = match fetch_info(stream, known).await {
+            Ok(info) => info,
+            Err(e) if e.is::<ClientTooOld>() => {
+                if self.row.write_outdated(true)? {
+                    warn!(
+                        share = self.label,
+                        "the host node needs a newer version of this app"
+                    );
+                    self.observer.on_share_changed(self.row.read_share()?);
+                }
+                return Err(RefreshError::Outdated);
+            }
+            Err(e) => return Err(RefreshError::Transient(e)),
+        };
+        let previously_outdated = self.row.write_outdated(false)?;
         if let Some(info) = &info {
             self.row.write_share_info(info)?;
+        }
+        if previously_outdated || info.is_some() {
             self.observer.on_share_changed(self.row.read_share()?);
         }
         Ok(info)
@@ -208,6 +226,8 @@ pub enum RefreshError {
     /// The host node has turned this device away for good. The store has
     /// the state.
     Terminal,
+    /// This guest node's SDK is too old to talk to the host node.
+    Outdated,
     Transient(anyhow::Error),
 }
 
@@ -216,6 +236,12 @@ impl From<anyhow::Error> for RefreshError {
         RefreshError::Transient(e)
     }
 }
+
+/// The host node answered 426 Upgrade Required: it serves no SDK this old.
+/// Any guest API call can get it, so it is one error, found by downcast.
+#[derive(Debug, thiserror::Error)]
+#[error("this app is too old for the share's host; update Wispers Access and try again")]
+pub struct ClientTooOld;
 
 /// `GET /v1/share` over a fresh stream. `None` when the host node says the
 /// share is unchanged since `known`. Also what `join` uses, before there is a
@@ -236,6 +262,7 @@ pub async fn fetch_info(stream: Stream, known: Option<ConfigHash>) -> Result<Opt
     match resp.status() {
         StatusCode::NOT_MODIFIED => Ok(None),
         StatusCode::OK => Ok(Some(read_share(resp).await?)),
+        StatusCode::UPGRADE_REQUIRED => Err(ClientTooOld.into()),
         status => anyhow::bail!("the host node answered {} to GET /v1/share", status),
     }
 }
@@ -257,6 +284,9 @@ pub async fn activate(stream: Stream, secret: &wire::InviteSecret) -> Result<Sha
     if resp.status() == StatusCode::OK {
         return read_share(resp).await;
     }
+    if resp.status() == StatusCode::UPGRADE_REQUIRED {
+        return Err(ClientTooOld.into());
+    }
     let status = resp.status();
     let body = resp.into_body().collect().await?.to_bytes();
     match serde_json::from_slice::<wire::ApiError>(&body) {
@@ -277,6 +307,7 @@ pub async fn leave(stream: Stream) -> Result<()> {
         .context("DELETE /v1/guest")?;
     match resp.status() {
         StatusCode::NO_CONTENT => Ok(()),
+        StatusCode::UPGRADE_REQUIRED => Err(ClientTooOld.into()),
         status => anyhow::bail!("the host node answered {} to DELETE /v1/guest", status),
     }
 }
@@ -296,6 +327,12 @@ async fn guest_api_request(
     let headers = req.headers_mut();
     headers.insert(hyper::header::HOST, "waserver".parse().expect("valid"));
     headers.insert(hyper::header::CONNECTION, "close".parse().expect("valid"));
+    headers.insert(
+        hyper::header::USER_AGENT,
+        wire::client_user_agent(env!("CARGO_PKG_VERSION"))
+            .parse()
+            .expect("a semver is a valid header value"),
+    );
     Ok(sender.send_request(req).await?)
 }
 
@@ -354,6 +391,97 @@ mod tests {
         fn drop_connection(&self) {
             self.connected.store(false, Ordering::SeqCst);
         }
+    }
+
+    /// A transport whose host node answers every guest API request with
+    /// `status`, after checking that the request named this SDK's version.
+    struct Answering {
+        status: &'static str,
+        user_agents: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl Transport for Answering {
+        fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>> {
+            Box::pin(async {
+                let (near, far) = tokio::io::duplex(4096);
+                let status = self.status;
+                let user_agents = self.user_agents.clone();
+                tokio::spawn(async move {
+                    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+                    let mut far = BufReader::new(far);
+                    // The CTRL stream's type byte, then HTTP/1.1 headers.
+                    let mut first = [0u8; 1];
+                    tokio::io::AsyncReadExt::read_exact(&mut far, &mut first)
+                        .await
+                        .unwrap();
+                    let mut line = String::new();
+                    loop {
+                        line.clear();
+                        far.read_line(&mut line).await.unwrap();
+                        if let Some(ua) = line.strip_prefix("user-agent: ") {
+                            user_agents.lock().unwrap().push(ua.trim().to_owned());
+                        }
+                        if line == "\r\n" {
+                            break;
+                        }
+                    }
+                    let body = r#"{"error":"client-too-old"}"#;
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    far.get_mut().write_all(response.as_bytes()).await.unwrap();
+                    far.get_mut().shutdown().await.unwrap();
+                });
+                Ok(Box::new(near) as Stream)
+            })
+        }
+
+        fn check_connection(
+            &self,
+            _deadline: std::time::Duration,
+        ) -> BoxFuture<'_, Result<ConnectionCheck, TransportError>> {
+            Box::pin(async { Ok(ConnectionCheck::NoConnection) })
+        }
+
+        fn drop_connection(&self) {}
+    }
+
+    #[tokio::test]
+    async fn a_426_marks_the_share_outdated_until_the_host_node_serves_again() {
+        let db = storage::DB::in_memory();
+        let row = db.new_row().unwrap();
+        row.write_deduped_hostname("rt").unwrap();
+        row.mark_complete().unwrap();
+        let user_agents = Arc::new(Mutex::new(Vec::new()));
+        // A node per answer; the row outlives them in the store.
+        let stored_row = || db.find_row("rt").unwrap().expect("the row");
+        let node = |status| {
+            GuestNode::new(
+                "rt".into(),
+                stored_row(),
+                Box::new(Answering {
+                    status,
+                    user_agents: user_agents.clone(),
+                }),
+                Arc::new(NoObserver),
+            )
+        };
+
+        assert!(matches!(
+            node("426 Upgrade Required").refresh().await,
+            Err(RefreshError::Outdated)
+        ));
+        assert!(stored_row().read_outdated().unwrap());
+        assert_eq!(
+            user_agents.lock().unwrap().as_slice(),
+            [wire::client_user_agent(env!("CARGO_PKG_VERSION"))]
+        );
+
+        // Updated and served again: back to live, without a share body.
+        assert!(matches!(node("304 Not Modified").refresh().await, Ok(None)));
+        assert!(!stored_row().read_outdated().unwrap());
     }
 
     #[tokio::test(start_paused = true)]

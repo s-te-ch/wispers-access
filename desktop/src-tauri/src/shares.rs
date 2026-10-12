@@ -22,7 +22,7 @@ pub struct ShareView {
     /// The transport's full name, `iroh` or `wispers-connect`.
     transport: &'static str,
     apps: Vec<AppView>,
-    /// `live`, `removed` or `revoked`.
+    /// `live`, `outdated`, `removed` or `revoked`.
     state: &'static str,
     joined_at_ms: u64,
     last_connected_ms: Option<u64>,
@@ -77,6 +77,7 @@ impl ShareView {
 fn describe_state(state: sdk::ShareState) -> &'static str {
     match state {
         sdk::ShareState::Live => "live",
+        sdk::ShareState::Outdated => "outdated",
         sdk::ShareState::Removed => "removed",
         sdk::ShareState::Revoked => "revoked",
     }
@@ -96,7 +97,8 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShareStatus {
-    /// `online`, `offline`, `unknown`, or the terminal `removed` / `revoked`.
+    /// `online`, `offline`, `unknown`, `outdated` (the host node wants a newer
+    /// app), or the terminal `removed` / `revoked`.
     availability: &'static str,
     last_connected_ms: Option<u64>,
 }

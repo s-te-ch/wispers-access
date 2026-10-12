@@ -222,6 +222,7 @@ private struct ShareRow: View {
         case .offline: "offline"
         case .unknown: "unknown"
         case .checking: "checking…"
+        case .outdated: "update needed"
         case .removed, .revoked: "no longer available"
         }
     }

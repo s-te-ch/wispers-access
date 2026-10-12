@@ -29,6 +29,8 @@ export function describeAvailability(availability: Availability | "checking"): s
       return "unknown";
     case "checking":
       return "checking…";
+    case "outdated":
+      return "update needed";
     case "removed":
     case "revoked":
       return "no longer available";
@@ -47,13 +49,18 @@ export function describeTransport(transport: Share["transport"]): string {
   }
 }
 
-/** Why a terminal share is terminal, and what remains to do with it. */
-export function explainTerminalState(state: Share["state"]): string {
-  const what =
-    state === "removed"
-      ? "The share was removed by its host and can't be reached anymore."
-      : "This device's access was revoked by the share's host.";
-  return `${what} You can remove it from this device; joining again needs a new invitation code.`;
+/** Why a share can't be used, and what to do about it. */
+export function explainUnusableState(state: Share["state"]): string {
+  switch (state) {
+    case "outdated":
+      return "The share's host runs a newer version of Wispers Access than this app understands. Update the app to keep using the share.";
+    case "removed":
+      return "The share was removed by its host and can't be reached anymore. You can remove it from this device; joining again needs a new invitation code.";
+    case "revoked":
+      return "This device's access was revoked by the share's host. You can remove it from this device; joining again needs a new invitation code.";
+    case "live":
+      return "";
+  }
 }
 
 export const count = (n: number, noun: string) => `${n} ${noun}${n === 1 ? "" : "s"}`;

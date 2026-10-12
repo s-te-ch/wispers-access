@@ -34,7 +34,8 @@ export class ShareManager {
     this.selectedId = id;
   }
 
-  /** The dot and label for a share: terminal states are forever, the rest is the last check. */
+  /** The dot and label for a share: a non-live state shows as itself, the rest
+   * is the last check. */
   availability(share: Share): Availability | "checking" {
     if (share.state !== "live") return share.state;
     return this.statuses[share.id] ?? "checking";
@@ -60,9 +61,17 @@ export class ShareManager {
     return api.openApp(shareId, appId);
   }
 
-  /** Checks every live share concurrently; one unreachable host node does not hold up the others. */
+  /**
+   * Checks every share concurrently that may still answer (live, or outdated
+   * until the app is updated), so one unreachable host node does not hold up
+   * the others.
+   */
   async checkAll() {
-    await Promise.all(this.shares.filter((s) => s.state === "live").map((s) => this.check(s.id)));
+    await Promise.all(
+      this.shares
+        .filter((s) => s.state === "live" || s.state === "outdated")
+        .map((s) => this.check(s.id)),
+    );
   }
 
   private async check(id: string) {

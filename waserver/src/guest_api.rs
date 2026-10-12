@@ -50,12 +50,19 @@ async fn route(
     ctx: StreamContext,
     peer: Peer,
 ) -> Result<Response<BoxedBody>, Infallible> {
+    let client_version = client_version(&req);
     info!(
         method = %req.method(),
         path = req.uri().path(),
         user_id = peer.user_id.as_deref().unwrap_or("-"),
+        client_version = client_version.as_ref().map_or("-".to_owned(), |v| v.to_string()),
         "guest API request"
     );
+
+    // Check guest node version.
+    if client_too_old(client_version.as_ref(), &peer) {
+        return Ok(error(StatusCode::UPGRADE_REQUIRED, wire::CLIENT_TOO_OLD));
+    }
 
     // Handle unauthorised peers first. They're only allowed to activate.
     if !(peer.is_authorized() || req.uri().path() == wire::ACTIVATION_PATH) {
@@ -73,6 +80,37 @@ async fn route(
         _ => error(StatusCode::NOT_FOUND, "no such route"),
     };
     Ok(response)
+}
+
+/// The SDK version from the request's `User-Agent`, if any.
+fn client_version(req: &Request<Incoming>) -> Option<semver::Version> {
+    req.headers()
+        .get(hyper::header::USER_AGENT)
+        .and_then(|v| v.to_str().ok())
+        .and_then(wire::client_version)
+}
+
+/// The oldest SDK this host node still accepts.
+const MIN_CLIENT_VERSION: semver::Version = semver::Version::new(0, 0, 0);
+
+/// True if the guest nodes's SDK is too old for this waserver.
+fn client_too_old(client_version: Option<&semver::Version>, peer: &Peer) -> bool {
+    let too_old = older_than(client_version, &MIN_CLIENT_VERSION);
+    if too_old {
+        warn!(
+            peer_id = peer.peer_id,
+            client_version = client_version.map_or("unsaid".to_owned(), |v| v.to_string()),
+            minimum = %MIN_CLIENT_VERSION,
+            "guest API request from a client too old for this host node"
+        );
+    }
+    too_old
+}
+
+/// Whether a `client_version` is below `minimum`.
+fn older_than(client_version: Option<&semver::Version>, minimum: &semver::Version) -> bool {
+    const UNSAID: semver::Version = semver::Version::new(0, 0, 0);
+    *client_version.unwrap_or(&UNSAID) < *minimum
 }
 
 /// The share config, stripped down to what a guest node cares about, with the
@@ -262,4 +300,26 @@ fn full(bytes: Vec<u8>) -> BoxedBody {
 
 fn empty() -> BoxedBody {
     full(Vec::new())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_client_is_too_old_below_the_minimum_or_when_it_sends_no_version() {
+        let v = |s: &str| semver::Version::parse(s).unwrap();
+        let minimum = v("0.2.0");
+        assert!(older_than(Some(&v("0.1.9")), &minimum));
+        assert!(!older_than(Some(&v("0.2.0")), &minimum));
+        assert!(!older_than(Some(&v("1.0.0")), &minimum));
+        assert!(older_than(None, &minimum));
+    }
+
+    #[test]
+    fn a_minimum_of_zero_serves_every_client() {
+        let none = semver::Version::new(0, 0, 0);
+        assert!(!older_than(None, &none));
+        assert!(!older_than(Some(&none), &none));
+    }
 }

@@ -310,6 +310,17 @@ impl Row {
         Ok(())
     }
 
+    /// Records whether the host node told our guest node it's too old. Returns
+    /// `true` if this write changed the value.
+    pub fn write_outdated(&self, outdated: bool) -> Result<bool> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let changed = conn.execute(
+            "UPDATE shares SET outdated = ?1 WHERE id = ?2 AND outdated != ?1",
+            rusqlite::params![outdated, self.id],
+        )?;
+        Ok(changed > 0)
+    }
+
     /// When this device joined the share.
     pub fn read_joined_at(&self) -> Result<SystemTime> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
@@ -329,6 +340,7 @@ impl Row {
             .as_deref()
             .and_then(crate::transports::TerminalState::parse)
         {
+            None if self.read_outdated()? => ShareState::Outdated,
             None => ShareState::Live,
             Some(crate::transports::TerminalState::Removed) => ShareState::Removed,
             Some(crate::transports::TerminalState::Revoked) => ShareState::Revoked,
@@ -352,6 +364,17 @@ impl Row {
             |r| r.get::<_, Option<String>>(0),
         )?;
         Ok(state)
+    }
+
+    /// Whether the host node last turned this device away as too old.
+    pub fn read_outdated(&self) -> Result<bool> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let outdated: bool = conn.query_row(
+            "SELECT outdated FROM shares WHERE id = ?1",
+            [self.id],
+            |r| r.get(0),
+        )?;
+        Ok(outdated)
     }
 
     /// The port a `PerApp` proxy last served this app on.
@@ -456,6 +479,9 @@ fn migrations() -> Migrations<'static> {
                  PRIMARY KEY (share_id, app_id)
              ) STRICT;",
         ),
+        // v2 — record when the guest node was told it's outdated
+        // (guest_node.rs, `ClientTooOld`).
+        M::up("ALTER TABLE shares ADD COLUMN outdated INTEGER NOT NULL DEFAULT 0;"),
     ])
 }
 
