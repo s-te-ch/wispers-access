@@ -10,7 +10,9 @@
 #  2. tag that commit, push the tag.
 #
 # All binaries and image slices are built on native runners for their
-# architecture.
+# architecture. The Linux binaries are built inside manylinux_2_28 containers
+# (AlmaLinux 8), so they run on any distro with glibc 2.28 or newer (RHEL 8,
+# Debian 10, Ubuntu 18.10, and up).
 #
 # macOS binaries are Developer ID-signed and notarized so Gatekeeper accepts
 # browser-downloaded tarballs. (The Windows binary is not signed: the
@@ -38,6 +40,11 @@ permissions:
 
 env:
   IMAGE: ghcr.io/s-te-ch/wispers/access/waserver
+  # The Linux build containers, pinned by date tag like the actions are by SHA.
+  MANYLINUX_X86_64: quay.io/pypa/manylinux_2_28_x86_64:2026.10.10-1
+  MANYLINUX_AARCH64: quay.io/pypa/manylinux_2_28_aarch64:2026.10.10-1
+  # Minimum glibc version the Linux binary needs.
+  GLIBC_FLOOR: "2.28"
 
 jobs:
   # Parses the tag into component + version, verifies it against Cargo.toml,
@@ -60,14 +67,14 @@ jobs:
 
           case "$component" in
             waserver)
-              matrix='[{"os": "ubuntu-24.04", "target": "linux-amd64"},
-                       {"os": "ubuntu-24.04-arm", "target": "linux-arm64"},
+              matrix='[{"os": "ubuntu-24.04", "target": "linux-amd64", "container": "'"$MANYLINUX_X86_64"'"},
+                       {"os": "ubuntu-24.04-arm", "target": "linux-arm64", "container": "'"$MANYLINUX_AARCH64"'"},
                        {"os": "macos-26", "target": "macos-arm64"},
                        {"os": "windows-2025", "target": "windows-amd64"}]'
               ;;
             waclient)
-              matrix='[{"os": "ubuntu-24.04", "target": "linux-amd64"},
-                       {"os": "ubuntu-24.04-arm", "target": "linux-arm64"},
+              matrix='[{"os": "ubuntu-24.04", "target": "linux-amd64", "container": "'"$MANYLINUX_X86_64"'"},
+                       {"os": "ubuntu-24.04-arm", "target": "linux-arm64", "container": "'"$MANYLINUX_AARCH64"'"},
                        {"os": "macos-26", "target": "macos-arm64"},
                        {"os": "windows-2025", "target": "windows-amd64"}]'
               ;;
@@ -96,6 +103,9 @@ jobs:
       matrix:
         include: ${{ fromJSON(needs.meta.outputs.matrix) }}
     runs-on: ${{ matrix.os }}
+    # Linux entries build in a container (see the header); the others on the
+    # runner, which an empty value means.
+    container: ${{ matrix.container }}
     # Windows builds BoringSSL and AWS-LC from source, which takes a while.
     timeout-minutes: 45
     defaults:
@@ -105,14 +115,20 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Same native build deps as CI (boring-sys needs libclang, tonic/prost
-      # need protoc), with the same apt hardening against stalled mirrors.
+      # need protoc). The manylinux container brings cmake and a C++ toolchain
+      # and runs as root. AlmaLinux 8 has no protoc package, so that comes
+      # from the protobuf release.
       - name: Install native build deps (Linux)
         if: runner.os == 'Linux'
         timeout-minutes: 5
         run: |
-          APT="sudo apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15"
-          $APT update
-          $APT install -y --no-install-recommends protobuf-compiler libclang-dev
+          dnf install -y clang-devel
+          arch="$(uname -m)"
+          [ "$arch" = aarch64 ] && arch=aarch_64
+          curl -fsSL --retry 3 -o protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-$arch.zip"
+          (cd /usr/local && unzip -oq "$OLDPWD/protoc.zip" bin/protoc 'include/*')
+          rm protoc.zip
       - name: Install native build deps (macOS)
         if: runner.os == 'macOS'
         timeout-minutes: 5
@@ -135,6 +151,17 @@ jobs:
         env:
           RUSTFLAGS: ${{ runner.os == 'Windows' && '-C target-feature=+crt-static' || '' }}
         run: cargo build --release -p ${{ needs.meta.outputs.component }}
+
+      - name: Check the glibc floor (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          needed="$(objdump -T "target/release/${{ needs.meta.outputs.component }}" \
+            | grep -o 'GLIBC_2\.[0-9]*' | sort -t. -k2 -n -u | tail -n 1)"
+          echo "newest glibc symbol version needed: $needed"
+          if [ "$(printf '%s\n' "$GLIBC_FLOOR" "${needed#GLIBC_}" | sort -t. -k2 -n | tail -n 1)" != "$GLIBC_FLOOR" ]; then
+            echo "the binary needs glibc ${needed#GLIBC_}, above the $GLIBC_FLOOR floor" >&2
+            exit 1
+          fi
 
       - name: Sign and notarize (macOS)
         if: runner.os == 'macOS'

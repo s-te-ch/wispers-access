@@ -28,8 +28,10 @@ Windows, take the zip from the releases page.
 The [releases page](https://github.com/s-te-ch/wispers-access/releases) has
 one archive per platform, `waserver-<version>-<platform>.tar.gz`, holding the
 binary and the licence, and a `SHA256SUMS` file with every archive's
-checksum. Download the archive for your platform and the checksum file, check
-the archive, unpack it, and copy the binary into place. For example:
+checksum. The Linux binaries run on any distribution with glibc 2.28 or
+newer, which is RHEL 8, Debian 10, Ubuntu 18.10 and everything since.
+Download the archive for your platform and the checksum file, check the
+archive, unpack it, and copy the binary into place. For example:
 
 ```sh
 release=https://github.com/s-te-ch/wispers-access/releases/download/waserver-v1.0.0-rc1
