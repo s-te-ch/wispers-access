@@ -24,22 +24,24 @@ main() {
   tmp="$(mktemp -d)"
   trap 'rm -rf "$tmp"' EXIT
   fetch "https://api.github.com/repos/$REPO/releases?per_page=100" "$tmp/releases.json"
+  installed=""
   upgraded=""
   for component in $COMPONENTS; do
     install_component "$component"
   done
-  case ":$PATH:" in
-    *":$prefix:"*) ;;
-    *) say "Note: $prefix is not on your PATH." ;;
+  check_path
+  case " $upgraded " in
+    *" waserver "*)
+      say "A running waserver keeps the old version until it is restarted" \
+        "(systemctl restart 'waserver@*', or waserver stop and start)." ;;
   esac
-  if [ -n "$upgraded" ]; then
-    say "A running waserver keeps the old version until it is restarted" \
-      "(systemctl restart 'waserver@*', or waserver stop and start)."
-  fi
-  say ""
-  say "Next: share an app with 'waserver init <share> \"<Name>\"', then 'waserver edit <share>';"
-  say "see https://github.com/$REPO#quick-start. For a systemd service, see"
-  say "https://github.com/$REPO/tree/main/integrations/systemd."
+  case " $installed " in
+    *" waserver "*)
+      say ""
+      say "Next: share an app with 'waserver init <share> \"<Name>\"', then 'waserver edit <share>';"
+      say "see https://github.com/$REPO#quick-start. For a systemd service, see"
+      say "https://github.com/$REPO/tree/main/integrations/systemd." ;;
+  esac
 }
 
 parse_args() {
@@ -92,6 +94,7 @@ install_component() {
     upgraded="$upgraded $component"
   else
     say "Installing $component $version"
+    installed="$installed $component"
   fi
   archive="$component-$version-$target.tar.gz"
   base="https://github.com/$REPO/releases/download/$component-v$version"
@@ -140,6 +143,22 @@ install_binary() {
   else
     die "$prefix is not writable and there is no sudo; run as root or use --prefix"
   fi
+}
+
+# Warn when the tools in $prefix are not the ones a shell will run. That is, if
+# $prefix is not on the PATH, or ifanother copy (a cargo install, say) comes
+# first.
+check_path() {
+  case ":$PATH:" in
+    *":$prefix:"*) ;;
+    *) say "Note: $prefix is not on your PATH."; return ;;
+  esac
+  for component in $COMPONENTS; do
+    found="$(command -v "$component" 2>/dev/null || true)"
+    if [ -n "$found" ] && ! [ "$found" -ef "$prefix/$component" ]; then
+      say "Note: '$component' on your PATH is $found, which shadows $prefix/$component."
+    fi
+  done
 }
 
 fetch() {
