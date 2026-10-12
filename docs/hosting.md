@@ -34,12 +34,12 @@ Download the archive for your platform and the checksum file, check the
 archive, unpack it, and copy the binary into place. For example:
 
 ```sh
-release=https://github.com/s-te-ch/wispers-access/releases/download/waserver-v1.0.0-rc1
-curl -fsSLO $release/waserver-1.0.0-rc1-linux-amd64.tar.gz
+release=https://github.com/s-te-ch/wispers-access/releases/download/waserver-v1.0.0-rc2
+curl -fsSLO $release/waserver-1.0.0-rc2-linux-amd64.tar.gz
 curl -fsSLO $release/SHA256SUMS
 sha256sum -c --ignore-missing SHA256SUMS  # On macOS: shasum -a 256 -c SHA256SUMS 2>/dev/null | grep OK
-tar xzf waserver-1.0.0-rc1-linux-amd64.tar.gz
-sudo install -m 755 waserver-1.0.0-rc1-linux-amd64/waserver /usr/local/bin/
+tar xzf waserver-1.0.0-rc2-linux-amd64.tar.gz
+sudo install -m 755 waserver-1.0.0-rc2-linux-amd64/waserver /usr/local/bin/
 ```
 
 ## Running waserver
@@ -130,7 +130,7 @@ services:
     image: example/myapp:latest
 
   waserver:
-    image: ghcr.io/s-te-ch/wispers/access/waserver:1.0.0-rc1
+    image: ghcr.io/s-te-ch/wispers/access/waserver:1.0.0-rc2
     environment:
       SHARE_ID: team  # The share ID. The container inits it on first start
     volumes:
