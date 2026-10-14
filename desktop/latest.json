@@ -1,18 +1,10 @@
 {
-  "version": "1.0.0-rc1",
+  "version": "1.0.0",
   "platforms": {
     "darwin-aarch64": {
-      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.0.0-rc1/Wispers.Access.app.tar.gz",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekl4ZnYxcHRoM3hzR2tqVndNaFJzZzN6SFFob1ZsengzQkdSQWcrbW4xdjh0SW1EVEZsUHpSWHd6NDExeCtrTXUrV1l2cDhHVHl5S0huR1V6YmV6dEFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxODEzMTI5CWZpbGU6V2lzcGVycyBBY2Nlc3MuYXBwLnRhci5negl2ZXJzaW9uOjEuMC4wLXJjMQp1bDFGMENkRFl6YUVVTHZFTEc4Nm5PSWtJall5cVA2QmdBN2JkbE1mZ0U0d21SYW1rMTJvSmNXOGZQdTgrOUZvNEc0Z0lYb2JVMmVxdk85VGhzVGxCUT09Cg=="
-    },
-    "linux-x86_64-appimage": {
-      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.0.0-rc1/Wispers.Access_1.0.0-rc1_amd64.AppImage",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYeklGbENqQXdIU1FuRDVxUm9VWTl1WUhUaENydHRCd1ZIc01oZ2pMWVJOelZ1Z0hUV2pVam05ZG00Y29XK3hxemdEMXJjMExXbVllYldqcTFKU20xMFE0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxODE0ODkwCWZpbGU6V2lzcGVycyBBY2Nlc3NfMS4wLjAtcmMxX2FtZDY0LkFwcEltYWdlCXZlcnNpb246MS4wLjAtcmMxCmtXVURmcVRaWmFCek55STBNQmNOL2FTbTBhL0licmhBMmdlWi90RHlrNExRODZ4YUdyQXFZaGJESy9rYTIveVZnV1lwQ2s2dWcvMTRVWmNqbGxROENnPT0K"
-    },
-    "linux-x86_64-deb": {
-      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.0.0-rc1/Wispers.Access_1.0.0-rc1_amd64.deb",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekdjNjUyV3pwQUxlalF4N0xLNmxmQVJvQnpnY3p5THdtMjJjWVVrWldVei9WbjlOYkd5NnRLSlhZNjFlUG1PYUNKcnY3bStrUkNpOWlKVVIycG1RMXdNPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxODE0ODkwCWZpbGU6V2lzcGVycyBBY2Nlc3NfMS4wLjAtcmMxX2FtZDY0LmRlYgl2ZXJzaW9uOjEuMC4wLXJjMQpCMjZuNU1heGN3OUNBWkZrNG9zV2JPdFlkVGszaFpZeDAvNy9kcUtkdDIzazllRTIwcHF2WEJjclFOaHFNell6M0ZHT1dBWk5qRDVaV2R6bktFZE9BZz09Cg=="
+      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.0.0/Wispers.Access.app.tar.gz",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYelBuTC9odUp0TTU5bWduYWVGU2E2VFFlWm9NNjZJUG1hNU5iaDY4TGRNa09ySThCV3ZtRjZxTVZwN3Z0VmxqNk81cEZVdXJBNSt0dVNCMGsxV2x4ekFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTc5NzcxCWZpbGU6V2lzcGVycyBBY2Nlc3MuYXBwLnRhci5negl2ZXJzaW9uOjEuMC4wClJha05yKzBaZGFSUnQxMWZqQmcwNGdjV045SnFCbHpqb1RiYlJCTjNQOFVvSDB5N09hMHc3WW82d2Y0T2JYMEdKOWFLb01reTBvcDdqclNnRzJaRERRPT0K"
     }
   },
-  "pub_date": "2026-10-12T14:21:30Z"
+  "pub_date": "2026-10-14T12:10:01Z"
 }
