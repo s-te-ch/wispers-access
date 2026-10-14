@@ -48,10 +48,11 @@ malicious nodes.
 
 Wispers Access is currently in open beta.
 
-All clients are in open testing:
-* Get Android client from the ([Play Store](https://play.google.com/store/apps/details?id=dev.wispers.access.android)).
-* Get the iOS client from ([TestFlight](https://testflight.apple.com/join/AjsJChhq))
-* Get the desktop app from [GitHub releases](https://github.com/s-te-ch/wispers-access/releases?q=%22Wispers+Access+desktop%22)
+Guests find the apps, with a walkthrough, at
+[access.wispers.dev](https://access.wispers.dev). Directly:
+* Android: [Play Store](https://play.google.com/store/apps/details?id=dev.wispers.access.android).
+* iOS: [TestFlight](https://testflight.apple.com/join/AjsJChhq), until App Store review is through.
+* Desktop (macOS, Windows, Linux): [GitHub releases](https://github.com/s-te-ch/wispers-access/releases?q=%22Wispers+Access+desktop%22).
 
 Instructions for setting up the server are in the quick start section below.
 
@@ -136,7 +137,7 @@ invite code). The shared app opens right inside Wispers Access.
 ### … or on a desktop
 
 There are also clients for desktop OSs (macOS, Windows and Linux), which you
-can download from
+can download from [access.wispers.dev](https://access.wispers.dev) or
 [GitHub releases](https://github.com/s-te-ch/wispers-access/releases?q=%22Wispers+Access+desktop%22).
 Instead of scanning a QR code you copy-paste the invite code, but otherwise
 things are very similar.
