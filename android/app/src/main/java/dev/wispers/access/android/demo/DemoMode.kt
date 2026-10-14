@@ -49,45 +49,42 @@ object DemoMode {
         shares = ROSTER.map { it.toShare(now) }
         statuses = ROSTER.associate { it.slug to it.availability }
         lastConnected = ROSTER.associate { it.slug to now - it.lastConnected }
-        icons = ROSTER.associate { entry ->
-            BrowseKey(entry.slug, APP_ID) to activity.assets.open("demo/${entry.slug}.png").readBytes()
-        }
+        icons = ROSTER.flatMap { share ->
+            share.apps.map { app ->
+                BrowseKey(share.slug, app.slug) to activity.assets.open("demo/${app.slug}.png").readBytes()
+            }
+        }.toMap()
     }
 
     private const val EXTRA_DEMO = "demo"
-    private const val APP_ID = "app"
 
-    // Known self-hosted tools anchor the "that's my stack" reaction; one bespoke
-    // entry shows shares aren't limited to famous products. Names are nominative
-    // word-mark use; the icons are our own brand-colored glyphs, not the logos.
+    // Two shares, as a guest would really have them: one from work, one from
+    // home, two apps each. Known self-hosted tools anchor the "that's my stack"
+    // reaction; one bespoke entry shows shares aren't limited to famous
+    // products. Names are nominative word-mark use; the icons are our own
+    // brand-colored glyphs, not the logos.
     private val ROSTER = listOf(
         DemoShare(
-            nickname = "Stats (Grafana)",
-            slug = "grafana",
+            nickname = "Work",
+            slug = "work",
             availability = ShareAvailability.ONLINE,
             lastConnected = Duration.ofMinutes(2),
             joined = Duration.ofDays(24),
+            apps = listOf(
+                DemoApp(name = "ERP (Odoo)", slug = "odoo"),
+                DemoApp(name = "Duty Roster", slug = "duty-roster"),
+            ),
         ),
         DemoShare(
-            nickname = "ERP (Odoo)",
-            slug = "odoo",
+            nickname = "Home",
+            slug = "home",
             availability = ShareAvailability.ONLINE,
             lastConnected = Duration.ofHours(1),
-            joined = Duration.ofDays(18),
-        ),
-        DemoShare(
-            nickname = "Files (Nextcloud)",
-            slug = "nextcloud",
-            availability = ShareAvailability.ONLINE,
-            lastConnected = Duration.ofMinutes(30),
             joined = Duration.ofDays(11),
-        ),
-        DemoShare(
-            nickname = "Duty Roster",
-            slug = "duty-roster",
-            availability = ShareAvailability.OFFLINE,
-            lastConnected = Duration.ofDays(1),
-            joined = Duration.ofDays(5),
+            apps = listOf(
+                DemoApp(name = "Files (Nextcloud)", slug = "nextcloud"),
+                DemoApp(name = "Stats (Grafana)", slug = "grafana"),
+            ),
         ),
     )
 
@@ -97,15 +94,19 @@ object DemoMode {
         val availability: ShareAvailability,
         val lastConnected: Duration,
         val joined: Duration,
+        val apps: List<DemoApp>,
     ) {
         fun toShare(now: Instant) = Share(
             id = slug,
             name = nickname,
             label = slug,
             transport = Transport.IROH,
-            apps = listOf(SharedApp(id = APP_ID, name = nickname, kind = AppKind.WEB)),
+            apps = apps.map { SharedApp(id = it.slug, name = it.name, kind = AppKind.WEB) },
             state = ShareState.LIVE,
             joinedAt = now - joined,
         )
     }
+
+    /** One app of a demo share; its icon ships as `assets/demo/<slug>.png`. */
+    private data class DemoApp(val name: String, val slug: String)
 }
