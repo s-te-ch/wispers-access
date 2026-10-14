@@ -6,8 +6,8 @@
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYelBuTC9odUp0TTU5bWduYWVGU2E2VFFlWm9NNjZJUG1hNU5iaDY4TGRNa09ySThCV3ZtRjZxTVZwN3Z0VmxqNk81cEZVdXJBNSt0dVNCMGsxV2x4ekFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTc5NzcxCWZpbGU6V2lzcGVycyBBY2Nlc3MuYXBwLnRhci5negl2ZXJzaW9uOjEuMC4wClJha05yKzBaZGFSUnQxMWZqQmcwNGdjV045SnFCbHpqb1RiYlJCTjNQOFVvSDB5N09hMHc3WW82d2Y0T2JYMEdKOWFLb01reTBvcDdqclNnRzJaRERRPT0K"
     },
     "windows-x86_64": {
-      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.0.0/Wispers.Access_0.1.1_x64-setup.exe",
-      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekxiZWVBWGtDTWN3VmtGSmY2R253RitoZHViWEVNOWxYT3Z5RVlUdFVVRGZGbG9ycG9KRUFjVVVxUjZTSm9TVkd6VWYwb2V1Tm9PS3FLMUVqV1dicUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwODgzOTcyCWZpbGU6V2lzcGVycyBBY2Nlc3NfMC4xLjFfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4xClkrYThiYnl3UEVXQ1l4Wkp0ZU9wOTN5dDBTRmV1TUxwcm9KOGRpVDdiS0xVMHRadkFwc1dMaTBaRFFCZWF6TWQ2UVFjb3N5NjdidU1oYjhJd3l1UkJRPT0K"
+      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.0.0/Wispers.Access_1.0.0_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYek5SRVFsYlFQY2F5bGtmWHZNc2ZLazZ4bXE0MGZmT2ZLRWJYYkNwa053L2lHM2xWSk1mMWdqbXh3amx3Y0RrUmdRRFN3a1NaM1N2OE9GRzA4cDZGMUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTgwMjUzCWZpbGU6V2lzcGVycyBBY2Nlc3NfMS4wLjBfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjEuMC4wCk1GL3l1Ny83djg1U2RkN1lIbHdJN3FMSXNpK1R1MTB5amhRdHV5Z0Z6bTBvL21QaUxUN1hOeWZuditDTERUbnZDNEVKeHVhSkxmNmtMZUxXTjdhVUFBPT0K"
     },
     "linux-x86_64-appimage": {
       "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.0.0/Wispers.Access_1.0.0_amd64.AppImage",
@@ -18,5 +18,5 @@
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekw4TFI1L3REaWpxeG9DVkVRVG9XVFY1QTNDcUNWajNoTWsxWVBuR2M4SkhQeTY0SE1lZEJhamdDMmhUZ1dYZVVxbTZpZ3hBdjVhQ2kvdVM3WG5VWWdjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTgwODk1CWZpbGU6V2lzcGVycyBBY2Nlc3NfMS4wLjBfYW1kNjQuZGViCXZlcnNpb246MS4wLjAKeVgyeEw0UXhpNzBqSnpOKzJ1ZElmVFc0emxVOG00bDNYT0ZOeUxRdDEva1hSRkdxckNkR0RhYW5UbnIzVUMrRFovN3Z3VUt3MHpKNzkvb2tVZUNVRFE9PQo="
     }
   },
-  "pub_date": "2026-10-14T13:44:10Z"
+  "pub_date": "2026-10-14T11:48:54Z"
 }
