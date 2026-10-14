@@ -107,7 +107,7 @@ writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
 const extra = platform === "darwin" ? readdirSync(join(bundleDir, "dmg")).filter((f) => f.endsWith(".dmg")).map((f) => join(bundleDir, "dmg", f)) : [];
 const files = [...extra, ...hosts.flatMap((host) => [host.bundle, `${host.bundle}.sig`])].map((f) => `"${f}"`).join(" ");
 const publish = releaseExists
-  ? `gh release upload ${release} ${files}`
+  ? `gh release upload ${release} --clobber ${files}`
   : `gh release create ${release} --title "Wispers Access desktop ${version}" --generate-notes ${files}`;
 console.log(`
 Wrote desktop/latest.json for ${version} (${Object.keys(manifest.platforms).join(", ")}). To publish:
