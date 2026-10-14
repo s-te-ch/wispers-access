@@ -4,7 +4,11 @@
     "darwin-aarch64": {
       "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.0.0/Wispers.Access.app.tar.gz",
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYelBuTC9odUp0TTU5bWduYWVGU2E2VFFlWm9NNjZJUG1hNU5iaDY4TGRNa09ySThCV3ZtRjZxTVZwN3Z0VmxqNk81cEZVdXJBNSt0dVNCMGsxV2x4ekFnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkxOTc5NzcxCWZpbGU6V2lzcGVycyBBY2Nlc3MuYXBwLnRhci5negl2ZXJzaW9uOjEuMC4wClJha05yKzBaZGFSUnQxMWZqQmcwNGdjV045SnFCbHpqb1RiYlJCTjNQOFVvSDB5N09hMHc3WW82d2Y0T2JYMEdKOWFLb01reTBvcDdqclNnRzJaRERRPT0K"
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.0.0/Wispers.Access_0.1.1_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekxiZWVBWGtDTWN3VmtGSmY2R253RitoZHViWEVNOWxYT3Z5RVlUdFVVRGZGbG9ycG9KRUFjVVVxUjZTSm9TVkd6VWYwb2V1Tm9PS3FLMUVqV1dicUFZPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwODgzOTcyCWZpbGU6V2lzcGVycyBBY2Nlc3NfMC4xLjFfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjAuMS4xClkrYThiYnl3UEVXQ1l4Wkp0ZU9wOTN5dDBTRmV1TUxwcm9KOGRpVDdiS0xVMHRadkFwc1dMaTBaRFFCZWF6TWQ2UVFjb3N5NjdidU1oYjhJd3l1UkJRPT0K"
     }
   },
-  "pub_date": "2026-10-14T12:10:01Z"
+  "pub_date": "2026-10-14T12:17:33Z"
 }
