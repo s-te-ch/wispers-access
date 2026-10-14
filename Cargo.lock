@@ -7991,7 +7991,7 @@ dependencies = [
 
 [[package]]
 name = "waserver"
-version = "1.0.0-rc2"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "bytes",
