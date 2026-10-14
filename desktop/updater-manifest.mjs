@@ -5,7 +5,7 @@
 // with the bundles attached before the manifest lands on main.
 
 import { execFileSync } from "node:child_process";
-import { existsSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { arch, platform } from "node:process";
@@ -18,12 +18,22 @@ const metadata = JSON.parse(
 );
 const version = metadata.packages.find((p) => p.name === "wispers-access-desktop").version;
 const bundleDir = join(metadata.target_directory, "release", "bundle");
+const config = JSON.parse(readFileSync(join(here, "src-tauri", "tauri.conf.json"), "utf8"));
+const productName = config.productName;
 
-/** The bundle in the bundle directory's `dir` whose name ends in `suffix`. */
+/** The bundle in the bundle directory's `dir` whose name ends in `suffix`.
+ * `tauri build` leaves older builds' bundles in the same directory, and
+ * `0.1.1` and `1.0.0-rc1` sort before `1.0.0`, so a bundle's name must
+ * contain the version being released. The macOS tarball carries no version
+ * in its name, so for it the newest file wins. */
 function find(dir, suffix) {
   const path = join(bundleDir, dir);
-  const file = existsSync(path) && readdirSync(path).find((f) => f.endsWith(suffix));
-  return file ? join(path, file) : undefined;
+  if (!existsSync(path)) return undefined;
+  const candidates = readdirSync(path)
+    .filter((f) => f.endsWith(suffix) && (f === `${productName}${suffix}` || f.includes(`_${version}_`)))
+    .map((f) => join(path, f))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  return candidates[0];
 }
 
 /** The update bundles and the platform keys the updater looks them up under.
@@ -47,7 +57,6 @@ function hostBundles() {
 }
 
 const hosts = hostBundles();
-const config = JSON.parse(readFileSync(join(here, "src-tauri", "tauri.conf.json"), "utf8"));
 if (hosts.length === 0) {
   console.error(`no update bundles for ${platform}`);
   process.exit(1);
