@@ -48,8 +48,8 @@ malicious nodes.
 
 Wispers Access is currently in open beta.
 
-Guests find the apps, with a walkthrough, at
-[access.wispers.dev](https://access.wispers.dev). Directly:
+Guests can find the apps (plus an installation guide) at
+[access.wispers.dev](https://access.wispers.dev). Direct links:
 * Android: [Play Store](https://play.google.com/store/apps/details?id=dev.wispers.access.android).
 * iOS: [TestFlight](https://testflight.apple.com/join/AjsJChhq), until App Store review is through.
 * Desktop (macOS, Windows, Linux): [GitHub releases](https://github.com/s-te-ch/wispers-access/releases?q=%22Wispers+Access+desktop%22).
@@ -76,23 +76,23 @@ curl -fsSL https://raw.githubusercontent.com/s-te-ch/wispers-access/main/install
 
 This puts the newest `waserver` and `waclient` into `/usr/local/bin`. You can
 also just download the binaries from the [releases
-page](https://github.com/s-te-ch/wispers-access/releases). Prefer containers?
-Follow the quick start in the [container README](waserver/docker/README.md)
-instead. See the [hosting guide](docs/hosting.md) for more details on installing
-and running waserver, and the [FAQ](docs/faq.md) when something does not work
-as expected.
+page](https://github.com/s-te-ch/wispers-access/releases). Or if you prefer
+containers, follow the quick start in the [container
+README](waserver/docker/README.md) instead. There's also a [hosting
+guide](docs/hosting.md) and the [FAQ](docs/faq.md).
 
 ### 2. Share your app
 
-Say the app you want to share is listening on port 3000. Then,
+Say the app you want to share is listening on port 3000 (apps that use several
+ports or origins aren't supported yet). Then,
 
 ```sh
 waserver init team "Awesome Team"
 ```
 
-This creates a *share* for your team (the apps you share and the people you
-share them with) and prints the path of its `share.toml`. Add the app there
-(`waserver edit team` opens the file in your editor):
+This creates a *share* for your team and prints the path of its `share.toml`.
+Add the app to that TOML file (`waserver edit team` opens the file in your
+editor):
 
 ```toml
 [[app]]
@@ -101,19 +101,21 @@ name = "My App"
 upstream = ":3000"  # host:port, or :port for localhost
 ```
 
-Then serve the share (`waserver start team` runs it in the background instead):
+That's the config done. Now serve the share:
 
 ```sh
 waserver serve team
 ```
 
-Later edits to `share.toml` apply with `waserver reload team`. `waserver edit
-team` does both in one go.
+(`waserver start team` runs it in the background instead.) If you later edit
+`share.toml`, make sure to apply the changes with `waserver reload team`.
+`waserver edit team` does both in one go.
 
 ### 3. Invite a device
 
-Invites are minted by the running server from step 2, so run this in a second
-terminal (or use `waserver start team`):
+Next, invite somebody to the share you just created. Invites are minted by the
+running server from step 2, so run this in a second terminal (or use `waserver
+start team`):
 
 ```sh
 waserver invite team "Alice's phone" alice@example.com --png invite.png
@@ -121,35 +123,32 @@ waserver invite team "Alice's phone" alice@example.com --png invite.png
 
 This produces the invite in three different formats: a `wax1_…` invite code to
 copy-paste, an ASCII art QR code to scan with the phone, and the same QR code as
-a PNG. The user ID (`alice@example.com`) is a label you choose; the shared app
-sees it on every request in the `x-wispers-access-user` header, so it knows who
-is connected without needing its own login.
+a PNG. The user ID (`alice@example.com`) is a label you choose. `waserver` sends
+this label to your app with every proxied request, in the
+`x-wispers-access-user` header.
 
 ### 4. Open it on a phone
 
-Install Wispers Access from the
-[Play Store](https://play.google.com/store/apps/details?id=dev.wispers.access.android)
-(Android) or via
-[TestFlight](https://testflight.apple.com/join/AjsJChhq) (iOS), tap **+**, and
-scan the QR code (or copy-paste the
-invite code). The shared app opens right inside Wispers Access.
+If you haven't yet, install a Wispers Access client. Choose Android or iOS from
+https://access.wispers.dev. The device you're installing it on does _not_ have
+to be on your LAN or VPN.
+
+Open the app, tap **+**, and scan the QR code (or copy-paste the invite code).
+The shared app opens right inside Wispers Access.
 
 ### … or on a desktop
 
-There are also clients for desktop OSs (macOS, Windows and Linux), which you
-can download from [access.wispers.dev](https://access.wispers.dev) or
-[GitHub releases](https://github.com/s-te-ch/wispers-access/releases?q=%22Wispers+Access+desktop%22).
-Instead of scanning a QR code you copy-paste the invite code, but otherwise
-things are very similar.
+For desktop (macOS, Windows and Linux), choose a client from
+https://access.wispers.dev and install it (the certificate we used to sign the
+Windows client is pretty fresh, so SmartScreen may show a warning).
 
-Finally, for Linux and the terminal in general, there's `waclient` (from the same releases page as `waserver`). To use it, do:
+Open the app, click "+ Add a share", paste the invite code (`wax1_...`), click
+"Join". When opening a shared app on desktop, your system browser will open a
+new tab and show the app there.
 
-```sh
-waclient join wax1_…      # the invite code from step 3
-waclient serve 8000
-```
-
-It will print a URL per app — open it in your normal browser.
+Finally, if you'd rather stick to the CLI, there's also `waclient` (installed
+together with `waserver`). It's useful for local testing but not something you'd
+tell your relatives to install =)
 
 ## When to use something else
 
@@ -173,6 +172,17 @@ encrypted _and_ membership is verified peer-to-peer, so the rendezvous server
 cryptographically cannot read your traffic or sneak a device into your share.
 Tunnel providers and mesh-VPN coordination servers have to be trusted on one or
 both of these.
+
+## Choosing peer-to-peer transports
+
+Wispers Access includes two distinct libraries for establishing secure
+peer-to-peer connections between the host node and the guest nodes, iroh (the
+default) and Wispers Connect. You can specify a transport when initialising a
+share, with `--transport=iroh` or `--transport=wispers-connect`. If in doubt, go
+with iroh. It's quickly becoming a standard for peer-to-peer connectivity.
+Wispers Connect is the home-grown version, created before iroh was published.
+The upside of Wispers Connect is that we can fix bugs or implement features
+ourselves.
 
 ## Licensing
 
