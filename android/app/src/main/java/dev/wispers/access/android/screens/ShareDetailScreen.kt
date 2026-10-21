@@ -54,10 +54,12 @@ import dev.wispers.access.android.ShareManager
 import dev.wispers.access.android.addToHomescreen
 import dev.wispers.access.android.demo.DemoMode
 import dev.wispers.access.android.disableShortcuts
+import dev.wispers.access.android.proxy.ForwardProxyHolder
 import dev.wispers.access.android.proxy.ShareAvailability
 import dev.wispers.access.android.proxy.ShareStatusTracker
 import dev.wispers.access.android.proxy.toAvailability
 import dev.wispers.access.android.storage.ShareExtras
+import dev.wispers.access.android.whyUnavailable
 import dev.wispers.access.sdk.Share
 import dev.wispers.access.sdk.ShareId
 import dev.wispers.access.sdk.ShareState
@@ -80,6 +82,7 @@ class ShareDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val manager: ShareManager,
     private val extras: ShareExtras,
+    private val forwardProxy: ForwardProxyHolder,
     statusTracker: ShareStatusTracker,
     @param:ApplicationContext private val appContext: Context,
 ) : ViewModel() {
@@ -116,6 +119,7 @@ class ShareDetailViewModel @Inject constructor(
         viewModelScope.launch {
             disableShortcuts(appContext, share, "This app was removed")
             manager.leave(share.id)
+            forwardProxy.forget(share.id)
             _removed.value = true
         }
     }
@@ -263,14 +267,18 @@ private fun ShareDetailContent(
             }
             for (app in share.apps) {
                 val key = BrowseKey(share.id, app.id)
+                val unavailable = whyUnavailable(app)
                 AppCard(
                     app = app,
                     iconPng = icons[key],
-                    enabled = true,
-                    onClick = { onOpenApp(key) },
-                    footer = {
-                        TextButton(onClick = { onAddToHomescreen(app) }) {
-                            Text("Add to homescreen")
+                    enabled = unavailable == null,
+                    note = unavailable,
+                    onClick = { if (unavailable == null) onOpenApp(key) },
+                    footer = if (unavailable != null) null else {
+                        {
+                            TextButton(onClick = { onAddToHomescreen(app) }) {
+                                Text("Add to homescreen")
+                            }
                         }
                     },
                 )

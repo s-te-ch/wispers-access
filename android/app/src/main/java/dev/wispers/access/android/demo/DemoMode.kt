@@ -5,6 +5,7 @@ import android.content.pm.ApplicationInfo
 import dev.wispers.access.android.BrowseKey
 import dev.wispers.access.android.proxy.ShareAvailability
 import dev.wispers.access.sdk.AppKind
+import dev.wispers.access.sdk.AppProxyMode
 import dev.wispers.access.sdk.Share
 import dev.wispers.access.sdk.ShareId
 import dev.wispers.access.sdk.ShareState
@@ -101,7 +102,16 @@ object DemoMode {
             name = nickname,
             label = slug,
             transport = Transport.IROH,
-            apps = apps.map { SharedApp(id = it.slug, name = it.name, kind = AppKind.WEB) },
+            apps = apps.map {
+                SharedApp(
+                    id = it.slug,
+                    name = it.name,
+                    kind = AppKind.WEB,
+                    mode = AppProxyMode.REVERSE_PROXY,
+                    startUrl = null,
+                    proxiedOrigins = emptyList(),
+                )
+            },
             state = ShareState.LIVE,
             joinedAt = now - joined,
         )

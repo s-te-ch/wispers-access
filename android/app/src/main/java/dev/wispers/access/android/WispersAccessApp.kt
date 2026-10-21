@@ -4,6 +4,7 @@ import android.app.Application
 import android.content.pm.ApplicationInfo
 import android.webkit.WebView
 import dagger.hilt.android.HiltAndroidApp
+import dev.wispers.access.android.proxy.ForwardProxyHolder
 import dev.wispers.access.android.proxy.NetworkMonitor
 import dev.wispers.access.android.proxy.ProxyHolder
 import dev.wispers.access.android.proxy.ResumeMonitor
@@ -27,6 +28,9 @@ class WispersAccessApp : Application() {
 
     @Inject
     lateinit var proxy: ProxyHolder
+
+    @Inject
+    lateinit var forwardProxy: ForwardProxyHolder
 
     @Inject
     lateinit var networkMonitor: NetworkMonitor
@@ -56,6 +60,7 @@ class WispersAccessApp : Application() {
         )
         registerActivityLifecycleCallbacks(foregroundTracker)
         proxy.start()
+        forwardProxy.start()
         networkMonitor.start()
         resumeMonitor.start()
     }

@@ -16,11 +16,13 @@ hiltNavigationCompose = "1.2.0"
 navigationCompose = "2.9.8"
 zxingEmbedded = "4.3.0"
 swipeRefresh = "1.1.0"
+webkit = "1.14.0"
 jna = "5.17.0"
 kotlinxCoroutines = "1.10.2"
 
 [libraries]
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "kotlinxCoroutines" }
+androidx-webkit = { group = "androidx.webkit", name = "webkit", version.ref = "webkit" }
 androidx-swiperefreshlayout = { group = "androidx.swiperefreshlayout", name = "swiperefreshlayout", version.ref = "swipeRefresh" }
 zxing-android-embedded = { group = "com.journeyapps", name = "zxing-android-embedded", version.ref = "zxingEmbedded" }
 androidx-core-ktx = { group = "androidx.core", name = "core-ktx", version.ref = "coreKtx" }

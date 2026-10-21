@@ -113,6 +113,7 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.zxing.android.embedded)
     implementation(libs.androidx.swiperefreshlayout)
+    implementation(libs.androidx.webkit)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)
