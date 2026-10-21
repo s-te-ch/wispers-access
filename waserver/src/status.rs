@@ -534,13 +534,10 @@ async fn probe_origin(origin: &str) -> bool {
 
 /// True if a TCP connection to the upstream succeeds.
 async fn probe_upstream(upstream: &str) -> bool {
-    tokio::time::timeout(
-        UPSTREAM_PROBE_TIMEOUT,
-        crate::reverse_proxy::connect_upstream(upstream),
-    )
-    .await
-    .map(|r| r.is_ok())
-    .unwrap_or(false)
+    tokio::time::timeout(UPSTREAM_PROBE_TIMEOUT, crate::upstream::connect(upstream))
+        .await
+        .map(|r| r.is_ok())
+        .unwrap_or(false)
 }
 
 pub(crate) fn invite_status(

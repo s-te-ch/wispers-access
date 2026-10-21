@@ -1,9 +1,11 @@
 //! The server side of the wire protocol (see the `wispers-access-wire` crate).
-//! Data plane streams get proxied to the app they name, control plane streams
-//! get routed to the guest API. For backward compatibility, raw HTTP from
-//! legacy clients get proxied to the default app.
+//! Data plane streams get proxied (REVERSE_PROXY to the app they name,
+//! FORWARD_PROXY to the origin they name), control plane streams get routed to
+//! the guest API. For backward compatibility, raw HTTP from legacy clients get
+//! proxied to the default app.
 
 use crate::config::{AppConfig, AppProxyMode, ShareConfig};
+use crate::forward_proxy;
 use crate::guest_api;
 use crate::reverse_proxy::{self, Target};
 use crate::storage;
@@ -84,9 +86,8 @@ where
             reverse_proxy::serve(stream, target, user_id).await?;
         }
         Some(FirstByte::Typed(StreamType::ForwardProxy)) => {
-            // TODO: Served by forward_proxy.rs, the next part of this change.
-            warn!("FORWARD_PROXY streams are not served yet, closing");
-            stream.shutdown().await.ok();
+            let user_id = peer.user_id.expect("data plane peers are authorized");
+            forward_proxy::serve(stream, &ctx.config, user_id).await?;
         }
         Some(FirstByte::LegacyHttp(raw_byte)) => {
             let user_id = peer.user_id.expect("data plane peers are authorized");
@@ -459,6 +460,99 @@ proxied_origins = ["http://localhost:4200", "https://sso.internal"]
         // Legacy requests find no default app on a forward-proxy-only share.
         let response = exchange(context(FORWARD_PROXY_SHARE), Some("bob"), GET.to_vec()).await;
         assert!(split_response(&response).0.starts_with("http/1.1 503"));
+    }
+
+    /// A share with one forward-proxy app whose only origin is `port` on
+    /// 127.0.0.1.
+    fn forward_proxy_context(port: u16) -> StreamContext {
+        context(&format!(
+            "name = \"Dev\"\n[[app]]\nid = \"dev\"\nmode = \"forward-proxy\"\n\
+             start_url = \"http://127.0.0.1:{port}/\"\n\
+             proxied_origins = [\"http://127.0.0.1:{port}\"]\n"
+        ))
+    }
+
+    /// An upstream that sends back whatever it receives over plain TCP.
+    async fn tcp_echo_upstream() -> u16 {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            loop {
+                let (mut tcp, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let (mut r, mut w) = tcp.split();
+                    tokio::io::copy(&mut r, &mut w).await.ok();
+                });
+            }
+        });
+        port
+    }
+
+    fn forward_proxy_stream(host: &str, port: u16, bytes: &[u8]) -> Vec<u8> {
+        let body = serde_json::to_vec(&wire::ForwardProxyPreamble {
+            host: host.to_owned(),
+            port,
+        })
+        .unwrap();
+        let mut out = vec![StreamType::ForwardProxy as u8];
+        out.extend_from_slice(&(body.len() as u32).to_be_bytes());
+        out.extend_from_slice(&body);
+        out.extend_from_slice(bytes);
+        out
+    }
+
+    /// Splits what the host sent on a FORWARD_PROXY stream into its reply and
+    /// the bytes after it.
+    fn split_tunnel(raw: &[u8]) -> (wire::ForwardProxyReply, Vec<u8>) {
+        let len = u32::from_be_bytes(raw[..4].try_into().unwrap()) as usize;
+        let reply = serde_json::from_slice(&raw[4..4 + len]).unwrap();
+        (reply, raw[4 + len..].to_vec())
+    }
+
+    #[tokio::test]
+    async fn forward_proxy_stream_tunnels_to_a_proxied_origin() {
+        let port = tcp_echo_upstream().await;
+        let response = exchange(
+            forward_proxy_context(port),
+            Some("bob"),
+            forward_proxy_stream("127.0.0.1", port, b"any bytes at all"),
+        )
+        .await;
+        let (reply, rest) = split_tunnel(&response);
+        assert_eq!(reply.error, None);
+        assert_eq!(rest, b"any bytes at all");
+    }
+
+    #[tokio::test]
+    async fn forward_proxy_stream_to_another_origin_is_not_allowed() {
+        let port = tcp_echo_upstream().await;
+        let other = tcp_echo_upstream().await;
+        let response = exchange(
+            forward_proxy_context(port),
+            Some("bob"),
+            forward_proxy_stream("127.0.0.1", other, b"hello"),
+        )
+        .await;
+        let (reply, rest) = split_tunnel(&response);
+        assert_eq!(reply.error, Some(wire::ForwardProxyError::NotAllowed));
+        assert!(rest.is_empty());
+    }
+
+    #[tokio::test]
+    async fn forward_proxy_stream_to_a_closed_port_is_unreachable() {
+        let closed = {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let response = exchange(
+            forward_proxy_context(closed),
+            Some("bob"),
+            forward_proxy_stream("127.0.0.1", closed, b"hello"),
+        )
+        .await;
+        let (reply, rest) = split_tunnel(&response);
+        assert_eq!(reply.error, Some(wire::ForwardProxyError::Unreachable));
+        assert!(rest.is_empty());
     }
 
     #[tokio::test]

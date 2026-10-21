@@ -153,6 +153,18 @@ impl ShareConfig {
         self.apps.iter().find(|app| app.id == app_id)
     }
 
+    /// Whether a forward-proxy app lists an origin at `host:port`. The scheme
+    /// doesn't count: a tunnel carries opaque bytes, so the host can't tell
+    /// `http` from `https` anyway.
+    pub fn has_proxied_origin(&self, host: &str, port: u16) -> bool {
+        self.apps.iter().any(|app| match &app.mode {
+            AppProxyMode::ForwardProxy { origins, .. } => origins
+                .iter()
+                .any(|o| o.host().eq_ignore_ascii_case(host) && o.port() == port),
+            AppProxyMode::ReverseProxy { .. } => false,
+        })
+    }
+
     /// The app used for requests that name no app: the first in reverse-proxy
     /// mode, the only mode the clients sending such requests know.
     ///
@@ -384,7 +396,7 @@ pub fn is_valid_id(s: &str) -> bool {
 /// Parse an upstream dial target in `host:port` form into a normalized
 /// `host:port` string. An empty host (`:3000`) means `localhost`. It's
 /// `localhost` rather than `127.0.0.1` so the dial tries both IPv4 and IPv6
-/// addresses families if available (see `reverse_proxy::connect_upstream`). IPv6
+/// addresses families if available (see `upstream::connect`). IPv6
 /// literals would need bracket form (`[::1]:3000`) and aren't handled.
 pub fn parse_upstream(s: &str) -> Result<String, String> {
     let s = s.trim();
@@ -494,6 +506,19 @@ upstream = ":3000"
         assert_eq!(cfg.apps[0].upstream(), None);
         // Legacy clients only know reverse-proxy apps.
         assert_eq!(cfg.default_app().unwrap().id, "grafana");
+    }
+
+    #[test]
+    fn proxied_origins_match_by_host_and_port() {
+        let cfg = ShareConfig::parse(FORWARD_PROXY).unwrap();
+        assert!(cfg.has_proxied_origin("localhost", 4200));
+        assert!(cfg.has_proxied_origin("LocalHost", 1337));
+        // The default port of the scheme.
+        assert!(cfg.has_proxied_origin("sso.internal", 443));
+        assert!(!cfg.has_proxied_origin("sso.internal", 80));
+        assert!(!cfg.has_proxied_origin("localhost", 4201));
+        // Upstreams of reverse-proxy apps aren't tunnel targets.
+        assert!(!cfg.has_proxied_origin("localhost", 3000));
     }
 
     #[test]

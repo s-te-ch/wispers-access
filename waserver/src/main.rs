@@ -1,6 +1,7 @@
 mod config;
 mod daemon;
 mod editing;
+mod forward_proxy;
 mod guest_api;
 mod initialization;
 mod invites;
@@ -12,6 +13,7 @@ mod reverse_proxy;
 mod serving;
 mod status;
 mod storage;
+mod upstream;
 mod wcbe;
 mod wispers_connect_transport;
 
