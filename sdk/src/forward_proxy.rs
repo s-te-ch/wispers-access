@@ -11,7 +11,7 @@ use crate::loopback::{
     BoxedBody, empty_body, error_response, gone_response, is_protocol_upgrade_request,
     means_browser_went_away, relay_upgraded_connection, strip_hop_by_hop_headers,
 };
-use crate::reverse_proxy::constant_time_eq;
+use crate::secrets::constant_time_eq;
 use crate::transports::{Stream, TransportError};
 use crate::{Client, Lookup, ShareId, SharedApp};
 use anyhow::{Context, Result};
@@ -48,7 +48,7 @@ impl Credentials {
             .lock()
             .expect("unpoisoned")
             .entry(share.clone())
-            .or_insert_with(|| random_hex(32))
+            .or_insert_with(crate::secrets::mint_secret)
             .clone()
     }
 
@@ -71,13 +71,6 @@ impl Credentials {
             .find(|(share, _)| share.as_str() == username)?;
         constant_time_eq(password, expected).then(|| share.clone())
     }
-}
-
-/// `n` random bytes from the OS, as lowercase hex.
-fn random_hex(n: usize) -> String {
-    let mut bytes = vec![0u8; n];
-    getrandom::fill(&mut bytes).expect("the OS random source is available");
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Serves every connection against the client's shares, until cancelled.
@@ -230,7 +223,7 @@ fn lists_origin(apps: &[SharedApp], host: &str, port: u16) -> bool {
 
 /// A FORWARD_PROXY stream to `host:port` that the host node has connected, or
 /// the response telling the browser why not.
-async fn open_tunnel(
+pub(crate) async fn open_tunnel(
     node: &crate::guest_node::GuestNode,
     host: &str,
     port: u16,
@@ -295,7 +288,7 @@ fn tunnel(mut req: hyper::Request<Incoming>, mut stream: Stream) -> hyper::Respo
 /// Sends a request for an `http` URL down the stream in origin form, as the
 /// app expects it, and its response back. On a 101, the connection is relayed
 /// from then on.
-async fn forward(
+pub(crate) async fn forward(
     mut req: hyper::Request<Incoming>,
     stream: Stream,
     share: &str,
@@ -374,190 +367,9 @@ fn unavailable_response() -> hyper::Response<BoxedBody> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::guest_node::GuestNode;
-    use crate::transports::{BoxFuture, ConnectionCheck, TerminalState, Transport};
-    use crate::{ClientConfig, ForwardProxy, NoObserver};
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use crate::test_support::Setup;
+    use crate::transports::TerminalState;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::sync::OnceCell;
-
-    /// A host node that serves FORWARD_PROXY streams as waserver does, minus
-    /// the check of the target, and counts them.
-    struct FakeHost {
-        streams: Arc<AtomicUsize>,
-    }
-
-    impl Transport for FakeHost {
-        fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>> {
-            Box::pin(async {
-                self.streams.fetch_add(1, Ordering::SeqCst);
-                let (near, mut far) = tokio::io::duplex(64 * 1024);
-                tokio::spawn(async move {
-                    let mut first = [0u8; 1];
-                    far.read_exact(&mut first).await.unwrap();
-                    assert_eq!(first[0], wire::StreamType::ForwardProxy as u8);
-                    let preamble: wire::ForwardProxyPreamble =
-                        wire::read_message(&mut far).await.unwrap();
-                    let Ok(mut tcp) =
-                        TcpStream::connect((preamble.host.as_str(), preamble.port)).await
-                    else {
-                        let reply = ForwardProxyReply {
-                            error: Some(ForwardProxyError::Unreachable),
-                        };
-                        wire::write_message(&mut far, &reply).await.unwrap();
-                        return;
-                    };
-                    wire::write_message(&mut far, &ForwardProxyReply::default())
-                        .await
-                        .unwrap();
-                    tokio::io::copy_bidirectional(&mut far, &mut tcp).await.ok();
-                });
-                Ok(Box::new(near) as Stream)
-            })
-        }
-
-        fn check_connection(
-            &self,
-            _deadline: std::time::Duration,
-        ) -> BoxFuture<'_, Result<ConnectionCheck, TransportError>> {
-            Box::pin(async { Ok(ConnectionCheck::NoConnection) })
-        }
-
-        fn drop_connection(&self) {}
-    }
-
-    /// An app that answers every request with its request line and whether
-    /// it saw a `Proxy-Authorization` header.
-    async fn echo_app() -> u16 {
-        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-        tokio::spawn(async move {
-            loop {
-                let (tcp, _) = listener.accept().await.unwrap();
-                tokio::spawn(async move {
-                    let service = hyper::service::service_fn(|req: hyper::Request<_>| async move {
-                        let seen = format!(
-                            "{} {} proxy-authorization={}",
-                            req.method(),
-                            req.uri(),
-                            req.headers().contains_key("proxy-authorization")
-                        );
-                        Ok::<_, Infallible>(hyper::Response::new(http_body_util::Full::new(
-                            bytes::Bytes::from(seen),
-                        )))
-                    });
-                    let _ = http1_server::Builder::new()
-                        .serve_connection(TokioIo::new(tcp), service)
-                        .await;
-                });
-            }
-        });
-        port
-    }
-
-    /// A client with one share whose forward-proxy app lists the echo app's
-    /// origin, served by a [`FakeHost`], and its proxy.
-    struct Setup {
-        data_dir: std::path::PathBuf,
-        client: Client,
-        proxy: Arc<ForwardProxy>,
-        share: ShareId,
-        app_port: u16,
-        streams: Arc<AtomicUsize>,
-    }
-
-    impl Setup {
-        async fn new() -> Self {
-            let data_dir = std::env::temp_dir().join(format!(
-                "wispers-access-forward-proxy-{}",
-                uuid::Uuid::new_v4()
-            ));
-            let client = Client::new_with_runtime(
-                ClientConfig {
-                    data_dir: data_dir.to_string_lossy().into_owned(),
-                    secrets: None,
-                    observer: None,
-                },
-                tokio::runtime::Handle::current(),
-            )
-            .unwrap();
-            let app_port = echo_app().await;
-            let row = client.inner.db.new_row().unwrap();
-            row.write_share_info(&wire::ShareInfo {
-                config_hash: wire::ConfigHash(1),
-                name: "Dev".into(),
-                transport: "iroh".into(),
-                apps: vec![SharedApp {
-                    id: "dev".into(),
-                    name: "Dev".into(),
-                    kind: wire::AppKind::Web,
-                    mode: AppProxyMode::ForwardProxy,
-                    start_url: Some(format!("http://127.0.0.1:{app_port}/")),
-                    proxied_origins: vec![format!("http://127.0.0.1:{app_port}")],
-                }],
-                ca_certificates: Vec::new(),
-            })
-            .unwrap();
-            row.write_deduped_hostname("dev").unwrap();
-            row.mark_complete().unwrap();
-            let share = row.share_id().unwrap();
-            let streams = Arc::new(AtomicUsize::new(0));
-            let node = GuestNode::new(
-                "dev".into(),
-                row,
-                Box::new(FakeHost {
-                    streams: streams.clone(),
-                }),
-                Arc::new(NoObserver),
-            );
-            client.inner.guest_nodes.lock().unwrap().insert(
-                share.clone(),
-                Arc::new(OnceCell::new_with(Some(Arc::new(node)))),
-            );
-            let proxy = client.start_forward_proxy(0).await.unwrap();
-            Setup {
-                data_dir,
-                client,
-                proxy,
-                share,
-                app_port,
-                streams,
-            }
-        }
-
-        /// The `Proxy-Authorization` value for the share's credential.
-        fn authorization(&self) -> String {
-            let credential = self.proxy.credential(self.share.clone()).unwrap();
-            let pair = format!("{}:{}", credential.username, credential.password);
-            format!("Basic {}", BASE64.encode(pair.as_bytes()))
-        }
-
-        /// Sends `head` (a request without a body) to the proxy and returns
-        /// the connection and the response head, lowercased.
-        async fn send(&self, head: &str) -> (TcpStream, String) {
-            let mut tcp = TcpStream::connect(("127.0.0.1", self.proxy.port()))
-                .await
-                .unwrap();
-            tcp.write_all(head.as_bytes()).await.unwrap();
-            let mut received = Vec::new();
-            while !received.ends_with(b"\r\n\r\n") {
-                let mut byte = [0u8; 1];
-                tcp.read_exact(&mut byte).await.unwrap();
-                received.push(byte[0]);
-            }
-            (tcp, String::from_utf8(received).unwrap().to_lowercase())
-        }
-
-        fn streams(&self) -> usize {
-            self.streams.load(Ordering::SeqCst)
-        }
-    }
-
-    impl Drop for Setup {
-        fn drop(&mut self) {
-            std::fs::remove_dir_all(&self.data_dir).ok();
-        }
-    }
 
     #[tokio::test]
     async fn requests_without_the_shares_credential_are_challenged() {
@@ -604,7 +416,7 @@ mod tests {
         let mut response = String::new();
         tcp.read_to_string(&mut response).await.unwrap();
         assert!(
-            response.ends_with("GET /through proxy-authorization=false"),
+            response.ends_with("GET /through proxy-authorization=false cookie=-"),
             "{response}"
         );
         assert_eq!(setup.streams(), 1);
@@ -622,7 +434,7 @@ mod tests {
             ))
             .await;
         assert!(head.starts_with("http/1.1 200"), "{head}");
-        let expected = "GET /x?y=1 proxy-authorization=false";
+        let expected = "GET /x?y=1 proxy-authorization=false cookie=-";
         let mut body = vec![0u8; expected.len()];
         tcp.read_exact(&mut body).await.unwrap();
         assert_eq!(String::from_utf8(body).unwrap(), expected);

@@ -122,6 +122,24 @@ impl SecretStore for FileSecretStore {
     }
 }
 
+/// A new secret for the SDK's tokens, cookies and credentials: 32 random bytes
+/// from the OS, as lowercase hex.
+pub(crate) fn mint_secret() -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).expect("the OS random source is available");
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Whether two secrets are equal, compared in time that does not depend on
+/// where they differ.
+pub(crate) fn constant_time_eq(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    a.iter().zip(b).fold(0u8, |diff, (x, y)| diff | (x ^ y)) == 0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

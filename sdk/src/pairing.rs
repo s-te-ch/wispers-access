@@ -16,8 +16,9 @@
 //! request itself is answered in [`crate::reverse_proxy`]; this module is the secret,
 //! the cookie and the tokens.
 
-use crate::reverse_proxy::{PROXY_DOMAIN, RequiredCookie, constant_time_eq};
-use crate::secrets::{SecretScope, SecretStore, SecretStoreError};
+use crate::loopback::RequiredCookie;
+use crate::reverse_proxy::PROXY_DOMAIN;
+use crate::secrets::{SecretScope, SecretStore, SecretStoreError, constant_time_eq};
 use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -49,7 +50,7 @@ impl CookieIssuer {
             Some(bytes) => String::from_utf8(bytes)
                 .map_err(|_| SecretStoreError::Failed("the pairing secret is not text".into()))?,
             None => {
-                let secret = random_hex(32);
+                let secret = crate::secrets::mint_secret();
                 secrets.save(
                     SecretScope::Client,
                     SECRET_KEY.to_owned(),
@@ -75,7 +76,7 @@ impl CookieIssuer {
 
     /// A fresh one-time token, good for `token_lifetime`.
     pub fn mint_token(&self) -> String {
-        let token = random_hex(32);
+        let token = crate::secrets::mint_secret();
         let now = Instant::now();
         let mut tokens = self.tokens.lock().expect("unpoisoned");
         // Tokens nobody used go when the next one is minted.
@@ -125,13 +126,6 @@ pub fn is_pairing_cookie(name: &str) -> bool {
 
 /// A year: a pairing is a device-local capability, not a session.
 const COOKIE_MAX_AGE: u64 = 365 * 24 * 60 * 60;
-
-/// `n` random bytes from the OS, as lowercase hex.
-fn random_hex(n: usize) -> String {
-    let mut bytes = vec![0u8; n];
-    getrandom::fill(&mut bytes).expect("the OS random source is available");
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
-}
 
 #[cfg(test)]
 mod tests {

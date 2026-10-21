@@ -689,6 +689,12 @@ impl Origin {
         self.port
     }
 
+    /// Whether the host names the loopback: `localhost`, `127.0.0.1` or
+    /// `[::1]`.
+    pub fn is_loopback(&self) -> bool {
+        matches!(self.host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+    }
+
     fn default_port(&self) -> u16 {
         if self.https { 443 } else { 80 }
     }
@@ -1275,6 +1281,9 @@ mod tests {
             origin("https://[::1]:8443").to_string(),
             "https://[::1]:8443"
         );
+        assert!(origin("http://LOCALHOST:4200").is_loopback());
+        assert!(origin("https://[::1]:8443").is_loopback());
+        assert!(!origin("http://localhost.example").is_loopback());
 
         for bad in [
             "localhost:1234",

@@ -1,5 +1,6 @@
 //! Shared logic for proxy implementations for serving on the loopback device.
 
+use crate::secrets::constant_time_eq;
 use crate::transports::TerminalState;
 use anyhow::{Context, Result};
 use bytes::Bytes;
@@ -51,6 +52,66 @@ fn no_ipv6_loopback(e: &std::io::Error) -> bool {
         e.kind(),
         std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
     )
+}
+
+/// A cookie a loopback proxy demands on every request, so that only the client
+/// app's own WebViews get through: every process on the device can connect to
+/// the port.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct RequiredCookie {
+    pub name: String,
+    pub value: String,
+}
+
+impl RequiredCookie {
+    /// Whether the request's `Cookie` headers carry the cookie, compared in
+    /// time that does not depend on where the values differ.
+    pub(crate) fn is_presented_in(&self, headers: &hyper::HeaderMap) -> bool {
+        headers
+            .get_all(hyper::header::COOKIE)
+            .iter()
+            .filter_map(|v| v.to_str().ok())
+            .flat_map(|v| v.split(';'))
+            .filter_map(|pair| pair.trim().split_once('='))
+            .any(|(name, value)| name == self.name && constant_time_eq(value, &self.value))
+    }
+}
+
+/// Removes every cookie whose name passes `criterion` from the request's
+/// `Cookie` headers, so the shared app can't read them.
+pub(crate) fn strip_cookies(headers: &mut hyper::HeaderMap, criterion: impl Fn(&str) -> bool) {
+    use hyper::header::{COOKIE, HeaderValue};
+
+    // One `Cookie` header without the stripped `name=value` pairs, or
+    // nothing if that was all it carried.
+    let without_stripped = |header: &HeaderValue| -> Option<HeaderValue> {
+        let rest = header
+            .to_str()
+            .ok()?
+            .split(';')
+            .map(str::trim)
+            .filter(|pair| {
+                !pair
+                    .split_once('=')
+                    .is_some_and(|(name, _)| criterion(name))
+            })
+            .collect::<Vec<_>>()
+            .join("; ");
+        if rest.is_empty() {
+            return None;
+        }
+        HeaderValue::from_str(&rest).ok()
+    };
+
+    let kept: Vec<HeaderValue> = headers
+        .get_all(COOKIE)
+        .iter()
+        .filter_map(without_stripped)
+        .collect();
+    headers.remove(COOKIE);
+    for value in kept {
+        headers.append(COOKIE, value);
+    }
 }
 
 /// The body of a proxy's responses to the browser. Boxed, so it can be either
@@ -196,5 +257,41 @@ mod tests {
         let (port, listeners) = bind_port(0).await.unwrap();
         assert_ne!(port, taken);
         assert_eq!(listeners.len(), 2);
+    }
+
+    #[test]
+    fn the_required_cookie_is_found_among_others() {
+        let cookie = RequiredCookie {
+            name: "__wispers_proxy_auth".into(),
+            value: "s3cret".into(),
+        };
+        let mut headers = hyper::HeaderMap::new();
+        headers.insert(
+            hyper::header::COOKIE,
+            "a=1; __wispers_proxy_auth=s3cret".parse().unwrap(),
+        );
+        assert!(cookie.is_presented_in(&headers));
+        headers.insert(
+            hyper::header::COOKIE,
+            "__wispers_proxy_auth=s3cre".parse().unwrap(),
+        );
+        assert!(!cookie.is_presented_in(&headers));
+        assert!(!cookie.is_presented_in(&hyper::HeaderMap::new()));
+    }
+
+    #[test]
+    fn the_required_cookie_is_stripped_and_the_others_kept() {
+        let mut headers = hyper::HeaderMap::new();
+        headers.append(
+            hyper::header::COOKIE,
+            "a=1; __wispers_proxy_auth=s3cret; b=2".parse().unwrap(),
+        );
+        headers.append(
+            hyper::header::COOKIE,
+            "__wispers_proxy_auth=other".parse().unwrap(),
+        );
+        strip_cookies(&mut headers, |name| name == "__wispers_proxy_auth");
+        let left: Vec<_> = headers.get_all(hyper::header::COOKIE).iter().collect();
+        assert_eq!(left, ["a=1; b=2"]);
     }
 }

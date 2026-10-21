@@ -11,7 +11,7 @@ import dev.wispers.access.sdk.ForwardProxy
 import dev.wispers.access.sdk.ProxyCredential
 import dev.wispers.access.sdk.ShareId
 import dev.wispers.access.sdk.SharedApp
-import java.net.URI
+import dev.wispers.access.sdk.proxiedTargets
 import javax.inject.Inject
 import javax.inject.Singleton
 import kotlin.coroutines.resume
@@ -157,14 +157,5 @@ val webViewSupportsForwardProxy: Boolean by lazy {
  * in, so `ws://` URLs to the same port match as well. Null if one of them
  * doesn't parse, which makes the app one this version can't open.
  */
-fun proxiedHostPorts(app: SharedApp): List<String>? = app.proxiedOrigins.map { origin ->
-    val uri = runCatching { URI(origin) }.getOrNull() ?: return null
-    val host = uri.host ?: return null
-    val port = when {
-        uri.port != -1 -> uri.port
-        uri.scheme == "https" -> 443
-        uri.scheme == "http" -> 80
-        else -> return null
-    }
-    "$host:$port"
-}
+fun proxiedHostPorts(app: SharedApp): List<String>? =
+    proxiedTargets(app)?.map { "${it.host}:${it.port}" }

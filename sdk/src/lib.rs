@@ -16,15 +16,18 @@ mod guest_node;
 mod iroh_transport;
 mod logging;
 mod loopback;
+mod loopback_forwarding;
 mod pairing;
 mod reverse_proxy;
 mod secrets;
 mod storage;
+#[cfg(test)]
+mod test_support;
 mod transports;
 mod wispers_connect_transport;
 
 pub use logging::{LogLevel, LogSink, install_log_sink};
-pub use reverse_proxy::RequiredCookie;
+pub use loopback::RequiredCookie;
 pub use secrets::{FileSecretStore, SecretScope, SecretStore, SecretStoreError};
 pub use storage::ShareId;
 pub use wispers_access_wire::{AppKind, AppProxyMode, SharedApp, Transport};
@@ -33,7 +36,7 @@ use guest_node::GuestNode;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use transports::TerminalState;
@@ -61,6 +64,10 @@ pub enum SdkError {
     /// and turned the request away. The user should update the app.
     #[error("{0}")]
     ClientTooOld(String),
+    /// A port that one of the share's loopback origins needs is taken, by
+    /// another share's open app or by another process. The message says which.
+    #[error("{0}")]
+    PortInUse(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -201,6 +208,38 @@ pub fn validate_invite(invite_code: String) -> Result<Transport> {
     Ok(wire::Invite::parse(&invite_code)
         .map_err(|e| SdkError::InvalidInvite(e.to_string()))?
         .transport())
+}
+
+/// Where a forward-proxy app's proxied origins point, for the client app to
+/// set up its WebView's proxy with. `None` if one of them doesn't parse: the
+/// host node is newer than this SDK, and the app can't be opened.
+#[uniffi::export]
+pub fn proxied_targets(app: SharedApp) -> Option<Vec<ProxiedTarget>> {
+    app.proxied_origins
+        .iter()
+        .map(|origin| {
+            let origin = origin.parse::<wire::Origin>().ok()?;
+            Some(ProxiedTarget {
+                host: origin.host().to_owned(),
+                port: origin.port(),
+                https: origin.is_https(),
+                loopback: origin.is_loopback(),
+            })
+        })
+        .collect()
+}
+
+/// One of a forward-proxy app's proxied origins, taken apart.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ProxiedTarget {
+    /// A lowercase DNS name, an IPv4 literal, or an IPv6 literal in brackets.
+    pub host: String,
+    /// The port, the scheme's default if the origin names none.
+    pub port: u16,
+    pub https: bool,
+    /// Whether the host names the loopback (`localhost`, `127.0.0.1`,
+    /// `[::1]`), which some WebViews never send to a proxy.
+    pub loopback: bool,
 }
 
 #[uniffi::export]
@@ -439,6 +478,7 @@ impl Client {
                 client,
                 credentials,
                 bound_port: BoundPort { port, accept_loops },
+                loopback_forwarders: Default::default(),
             }))
         })
         .await
@@ -788,6 +828,8 @@ pub struct ForwardProxy {
     client: Client,
     credentials: Arc<forward_proxy::Credentials>,
     bound_port: BoundPort,
+    /// Each share's loopback forwarder while it lives.
+    loopback_forwarders: Arc<tokio::sync::Mutex<HashMap<ShareId, Weak<LoopbackForwarder>>>>,
 }
 
 #[uniffi::export]
@@ -813,6 +855,74 @@ impl ForwardProxy {
             password: self.credentials.password(&share),
         })
     }
+
+    /// For WebViews that don't send loopback hosts to a proxy (iOS), which
+    /// breaks normal forward-proxy mode whenver a shared app uses
+    /// localhost:port-style addresses. Instead, this attempts to bind the same
+    /// ports as the shared app, then proxies requests reaching those ports.
+    /// This can clash, in which case we fail with [`SdkError::PortInUse`].
+    pub async fn forward_loopback_origins(&self, share: ShareId) -> Result<Arc<LoopbackForwarder>> {
+        let client = self.client.clone();
+        let forwarders = self.loopback_forwarders.clone();
+        self.client
+            .on_runtime(async move {
+                let mut forwarders = forwarders.lock().await;
+                if let Some(live) = forwarders.get(&share).and_then(Weak::upgrade) {
+                    return Ok(live);
+                }
+                forwarders.retain(|_, forwarder| forwarder.strong_count() > 0);
+                let apps = client.row(&share)?.read_apps().map_err(SdkError::storage)?;
+                // Released by its drop if a port fails to bind.
+                let mut forwarder = LoopbackForwarder {
+                    cookie: RequiredCookie {
+                        name: loopback_forwarding::COOKIE_NAME.to_owned(),
+                        value: secrets::mint_secret(),
+                    },
+                    bound_ports: Vec::new(),
+                };
+                for (port, hosts) in loopback_forwarding::loopback_ports(&apps) {
+                    if let Some(holder) = forwarders.iter().find_map(|(holder, other)| {
+                        other
+                            .upgrade()
+                            .is_some_and(|other| other.ports().contains(&port))
+                            .then_some(holder)
+                    }) {
+                        let name = client
+                            .row(holder)?
+                            .read_names()
+                            .map_err(SdkError::storage)?
+                            .1;
+                        return Err(SdkError::PortInUse(format!(
+                            "port {port} is in use by an app of the share {name}"
+                        )));
+                    }
+                    let (_, listeners) = loopback::bind_port(port).await.map_err(|e| {
+                        SdkError::PortInUse(format!("port {port} is in use on this device: {e:#}"))
+                    })?;
+                    let forwarded = Arc::new(loopback_forwarding::ForwardedPort {
+                        client: client.clone(),
+                        share: share.clone(),
+                        port,
+                        hosts,
+                        cookie: forwarder.cookie.clone(),
+                    });
+                    let accept_loops = listeners
+                        .into_iter()
+                        .map(|listener| {
+                            client.inner.runtime.spawn(loopback_forwarding::accept_loop(
+                                listener,
+                                forwarded.clone(),
+                            ))
+                        })
+                        .collect();
+                    forwarder.bound_ports.push(BoundPort { port, accept_loops });
+                }
+                let forwarder = Arc::new(forwarder);
+                forwarders.insert(share, Arc::downgrade(&forwarder));
+                Ok(forwarder)
+            })
+            .await
+    }
 }
 
 impl Drop for ForwardProxy {
@@ -826,6 +936,38 @@ impl Drop for ForwardProxy {
 pub struct ProxyCredential {
     pub username: String,
     pub password: String,
+}
+
+/// A share's `http` loopback origins, forwarded to its host node while this
+/// lives (see [`ForwardProxy::forward_loopback_origins`]). Dropping the last
+/// reference releases the ports.
+#[derive(uniffi::Object)]
+pub struct LoopbackForwarder {
+    cookie: RequiredCookie,
+    bound_ports: Vec<BoundPort>,
+}
+
+#[uniffi::export]
+impl LoopbackForwarder {
+    /// The cookie every forwarded request must carry. The client app sets it
+    /// in the share's data store for `localhost` and `127.0.0.1`, `HttpOnly`
+    /// so pages can't read or delete it.
+    pub fn cookie(&self) -> RequiredCookie {
+        self.cookie.clone()
+    }
+
+    /// The ports being forwarded.
+    pub fn ports(&self) -> Vec<u16> {
+        self.bound_ports.iter().map(|bound| bound.port).collect()
+    }
+}
+
+impl Drop for LoopbackForwarder {
+    fn drop(&mut self) {
+        for bound in &self.bound_ports {
+            bound.release();
+        }
+    }
 }
 
 /// A port bound on each loopback address, with an accept loop per address.
@@ -1095,6 +1237,32 @@ mod tests {
                 .unwrap();
         tokio::spawn(conn);
         sender.send_request(req).await.unwrap()
+    }
+
+    #[test]
+    fn proxied_targets_take_origins_apart() {
+        let app = |origins: &[&str]| SharedApp {
+            id: "a".into(),
+            name: "a".into(),
+            kind: AppKind::Web,
+            mode: AppProxyMode::ForwardProxy,
+            start_url: None,
+            proxied_origins: origins.iter().map(|o| (*o).to_owned()).collect(),
+        };
+        let target = |host: &str, port, https, loopback| ProxiedTarget {
+            host: host.into(),
+            port,
+            https,
+            loopback,
+        };
+        assert_eq!(
+            proxied_targets(app(&["http://localhost:4200", "https://sso.internal"])),
+            Some(vec![
+                target("localhost", 4200, false, true),
+                target("sso.internal", 443, true, false),
+            ])
+        );
+        assert_eq!(proxied_targets(app(&["http://a:1", "nonsense"])), None);
     }
 
     #[test]
