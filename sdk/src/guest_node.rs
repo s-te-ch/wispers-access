@@ -125,6 +125,19 @@ impl GuestNode {
         Ok(stream)
     }
 
+    /// Opens a FORWARD_PROXY stream to `host:port`.
+    pub async fn open_forward_proxy_stream(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Stream, TransportError> {
+        let mut stream = self.open_stream().await?;
+        wire::open_forward_proxy_stream(&mut stream, host, port)
+            .await
+            .map_err(|e| TransportError::Transient(e.into()))?;
+        Ok(stream)
+    }
+
     /// Asks the host node for the share if it changed since the stored copy,
     /// and stores the answer. `None` = unchanged. This may reply with an error
     /// indicating that the guest node's status has changed, e.g. it got revoked

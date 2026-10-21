@@ -44,17 +44,17 @@ pub use wispers_access_wire::AppKind;
 pub struct AppConfig {
     /// Stable identifier, used by guest nodes when accessing a shared app.
     pub id: String,
-    /// Display name, shown to guests.
+    /// Display name, shown to guest nodes.
     pub name: String,
     /// Custom integrations (e.g. Jellyfin) use specific identifiers here,
     /// so the clients can find the shared apps they know how to work with.
     /// `web` is any web app browsed as is.
     pub kind: AppKind,
-    /// How guests reach the app.
+    /// How guest nodes reach the app.
     pub mode: AppProxyMode,
 }
 
-/// How guests reach an app, with what the mode needs. The wire's
+/// How guest nodes reach an app, with what the mode needs. The wire's
 /// [`AppProxyMode`](wispers_access_wire::AppProxyMode) explains the modes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AppProxyMode {
@@ -304,7 +304,7 @@ fn parse_app(entry: AppEntry) -> Result<AppConfig, Error> {
 }
 
 /// Parses a forward-proxy app's start URL and origins, checking that the
-/// origins cover the start URL, so that they are all a guest can reach.
+/// origins cover the start URL, so that they are all a guest node can reach.
 fn parse_forward_proxy(start_url: &str, origins: &[String]) -> Result<AppProxyMode, String> {
     let origins = origins
         .iter()
@@ -328,7 +328,7 @@ fn parse_forward_proxy(start_url: &str, origins: &[String]) -> Result<AppProxyMo
 
 /// Parses a `ca_certificates` entry, which must hold one PEM certificate that
 /// parses as X.509, and re-encodes it. Re-encoding keeps anything else pasted
-/// into the entry from reaching guests, such as a key under a label the PEM
+/// into the entry from reaching guest nodes, such as a key under a label the PEM
 /// parser skips.
 fn parse_ca_certificate(pem: &str) -> Result<String, String> {
     use rustls::pki_types::CertificateDer;
@@ -370,7 +370,7 @@ pub fn render_template(name: &str) -> String {
          #\n# [[app]]\n# id = \"myapp\"\n# name = \"My App\"\n# upstream = \":3000\"\n\
          #\n\
          # An app made of several origins (single sign-on, an API on its own host,\n\
-         # a dev setup) can use forward-proxy mode instead: guests browse it at its\n\
+         # a dev setup) can use forward-proxy mode instead: guest nodes browse it at its\n\
          # real URL, and requests to the listed origins go through the share.\n\
          #\n# [[app]]\n# id = \"dev\"\n# mode = \"forward-proxy\"\n\
          # start_url = \"http://localhost:4200/\"\n\
@@ -547,7 +547,7 @@ upstream = ":3000"
                 .contains("kind = \"web\"")
         );
         // The start URL's origin must be listed, so the list is everything
-        // a guest can reach.
+        // a guest node can reach.
         let other_port = "start_url = \"http://localhost:4201/\"\n";
         assert!(
             invalid(format!("{fp}{other_port}{origins}"))

@@ -1,16 +1,20 @@
-//! The loopback reverse proxy, the guest side of reverse-proxy mode.
+//! The loopback reverse proxy, the guest node's side of reverse-proxy mode.
 //!
 //! The user's browser talks to `http://<app>.<share>.wa.localhost:<port>`, and
 //! every request becomes one REVERSE_PROXY stream to the share's host node. The
 //! bare `http://wa.localhost:<port>` is used for browser pairing (see
 //! [`crate::pairing`]).
 
+use crate::loopback::{
+    BoxedBody, empty_body, error_response, gone_response, is_protocol_upgrade_request,
+    means_browser_went_away, relay_upgraded_connection, strip_hop_by_hop_headers,
+};
 use crate::pairing::{self, CookieIssuer};
-use crate::transports::{TerminalState, TransportError};
+use crate::transports::TransportError;
 use crate::{Client, Lookup, ShareId};
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use http_body_util::{BodyExt, Full, combinators::BoxBody};
+use http_body_util::{BodyExt, Full};
 use hyper::StatusCode;
 use hyper::body::Incoming;
 use hyper::client::conn::http1 as http1_client;
@@ -18,52 +22,9 @@ use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
 use std::collections::HashMap;
 use std::convert::Infallible;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
 use tracing::{info, warn};
-
-/// Bind a port on both loopback addresses, `127.0.0.1` and `::1`, since a
-/// browser may resolve `localhost` to either. Port `0` picks a free one.
-/// Returns the port and its listeners.
-///
-/// Only a machine without an IPv6 loopback gets IPv4 alone, with a warning: a
-/// port that is taken on one address is an error, or with port `0` another try.
-pub async fn bind_loopback_port(port: u16) -> Result<(u16, Vec<TcpListener>)> {
-    for _ in 0..PORT_TRIES {
-        let ipv4_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
-        let v4_listener = TcpListener::bind(ipv4_addr)
-            .await
-            .with_context(|| format!("failed to bind to {ipv4_addr}"))?;
-        let bound_port = v4_listener.local_addr()?.port();
-        let ipv6_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), bound_port);
-        match TcpListener::bind(ipv6_addr).await {
-            Ok(v6_listener) => return Ok((bound_port, vec![v4_listener, v6_listener])),
-            Err(e) if no_ipv6_loopback(&e) => {
-                warn!(error = format!("{e:#}"), "no IPv6 loopback");
-                return Ok((bound_port, vec![v4_listener]));
-            }
-            Err(_) if port == 0 => {
-                // The auto-assigned port for IPv4 isn't available on IPv6. Retry.
-                continue;
-            }
-            Err(e) => return Err(e.into()),
-        }
-    }
-    anyhow::bail!("no port free on both loopback addresses after {PORT_TRIES} tries")
-}
-
-/// How often port `0` is retried when the IPv4 pick is taken on `::1`.
-const PORT_TRIES: usize = 8;
-
-/// Whether binding `::1` failed because the machine has no IPv6 loopback,
-/// rather than because the port is taken.
-fn no_ipv6_loopback(e: &std::io::Error) -> bool {
-    matches!(
-        e.kind(),
-        std::io::ErrorKind::AddrNotAvailable | std::io::ErrorKind::Unsupported
-    )
-}
 
 /// The host-routed proxy's domain. Every browser resolves `*.localhost` to
 /// loopback, and the pairing cookie needs a dotted parent to be scoped to.
@@ -241,16 +202,10 @@ async fn handle_connection(
         .await;
     match served {
         Ok(()) => Ok(()),
-        // The client gave up on the response (a reload, a closed tab) and
-        // closed its socket. Routine for a browser, not a fault.
-        Err(e) if peer_went_away(&e) => Ok(()),
+        Err(e) if means_browser_went_away(&e) => Ok(()),
         Err(e) => Err(e).context("HTTP/1 connection error"),
     }
 }
-
-/// Body type used in responses we send back to the peer. Boxed so we can return
-/// either the upstream's streamed body or a locally-generated error body.
-type BoxedBody = BoxBody<Bytes, std::io::Error>;
 
 async fn forward(
     mut req: hyper::Request<Incoming>,
@@ -292,7 +247,7 @@ async fn forward(
 
     let share = match client.restore_guest_node(&share).await {
         Ok(Lookup::Live(share)) => share,
-        Ok(Lookup::Dead(state)) => return Ok(gone(state)),
+        Ok(Lookup::Dead(state)) => return Ok(gone_response(state)),
         Ok(Lookup::Unknown) => {
             return Ok(error_response(
                 StatusCode::NOT_FOUND,
@@ -315,7 +270,7 @@ async fn forward(
     // ... and open a REVERSE_PROXY stream to it, naming the app.
     let fwd_stream = match share.open_reverse_proxy_stream(&app).await {
         Ok(s) => s,
-        Err(TransportError::Terminal(state)) => return Ok(gone(state)),
+        Err(TransportError::Terminal(state)) => return Ok(gone_response(state)),
         Err(TransportError::Transient(e)) => {
             warn!(
                 share = share.label(),
@@ -352,7 +307,7 @@ async fn forward(
     // An Upgrade request (e.g. WebSocket) keeps its handshake headers and, on a
     // 101, becomes a raw byte relay. Capture the browser-side upgrade now, before
     // the request is consumed; it resolves once we send the 101 back.
-    let upgrade = is_upgrade_request(req.headers());
+    let upgrade = is_protocol_upgrade_request(req.headers());
     let peer_upgrade = upgrade.then(|| hyper::upgrade::on(&mut req));
 
     // Rewrite the query.
@@ -418,7 +373,7 @@ async fn forward(
         match peer_upgrade {
             Some(peer_upgrade) => {
                 let upstream_upgrade = hyper::upgrade::on(&mut resp);
-                tokio::spawn(splice_upgrade(peer_upgrade, upstream_upgrade));
+                tokio::spawn(relay_upgraded_connection(peer_upgrade, upstream_upgrade));
             }
             None => warn!(
                 share = share.label(),
@@ -536,30 +491,6 @@ fn redirect(location: &str, set_cookie: Option<String>) -> hyper::Response<Boxed
     }
 }
 
-/// Relay raw bytes both ways between the browser side and the QUIC-stream side
-/// after a successful protocol upgrade. Each direction ends at its own EOF — a
-/// half-close on one side is forwarded as a FIN while the opposite direction
-/// keeps flowing — so this returns only once both directions have closed. Both
-/// `Upgraded` halves carry any bytes hyper buffered past the handshake, so
-/// nothing is lost.
-async fn splice_upgrade(peer: hyper::upgrade::OnUpgrade, upstream: hyper::upgrade::OnUpgrade) {
-    let (peer, upstream) = match tokio::try_join!(peer, upstream) {
-        Ok(pair) => pair,
-        Err(e) => {
-            warn!(
-                error = format!("{e:#}"),
-                "upgrade handshake did not complete"
-            );
-            return;
-        }
-    };
-    let mut peer = TokioIo::new(peer);
-    let mut upstream = TokioIo::new(upstream);
-    if let Err(e) = tokio::io::copy_bidirectional(&mut peer, &mut upstream).await {
-        warn!(error = format!("{e:#}"), "upgraded relay error");
-    }
-}
-
 /// Extract host from the request. Works with both HTTP 1 & 2.
 fn extract_host(req: &hyper::Request<Incoming>) -> Result<String> {
     // Get the host header (or the "authority" in HTTP/2 lingo).
@@ -613,117 +544,9 @@ fn parse_host(host: &str) -> Result<Route> {
     }
 }
 
-/// Remove HTTP/1 hop-by-hop headers (RFC 7230 §6.1). `Transfer-Encoding` is
-/// handled by hyper itself, so we leave it alone. On an Upgrade exchange,
-/// `Connection` and `Upgrade` are preserved — they carry the handshake.
-//
-// Note: To be fully compliant, this should also process the `Connection`
-// header's value to remove the headers it names. De facto, `keep-alive` and
-// `close` are the only headers getting set.
-fn strip_hop_by_hop_headers(headers: &mut hyper::HeaderMap, is_upgrade: bool) {
-    for name in [
-        "keep-alive",
-        "proxy-authenticate",
-        "proxy-authorization",
-        "te",
-        "trailers",
-    ] {
-        headers.remove(name);
-    }
-    if !is_upgrade {
-        headers.remove("connection");
-        headers.remove("upgrade");
-    }
-}
-
-/// True if this is an HTTP/1.1 Upgrade request (e.g. WebSocket): a `Connection`
-/// header listing the `upgrade` token plus an `Upgrade` header naming the target
-/// protocol.
-fn is_upgrade_request(headers: &hyper::HeaderMap) -> bool {
-    headers.contains_key(hyper::header::UPGRADE) && connection_lists_upgrade(headers)
-}
-
-fn connection_lists_upgrade(headers: &hyper::HeaderMap) -> bool {
-    headers
-        .get(hyper::header::CONNECTION)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| {
-            v.split(',')
-                .any(|t| t.trim().eq_ignore_ascii_case("upgrade"))
-        })
-}
-
-fn empty_body() -> BoxedBody {
-    Full::new(Bytes::new())
-        .map_err(|never: Infallible| match never {})
-        .boxed()
-}
-
-/// Terminal is deliberate, not an outage: 410 tells the reader that retrying
-/// won't help, unlike a 502.
-fn gone(state: TerminalState) -> hyper::Response<BoxedBody> {
-    error_response(
-        StatusCode::GONE,
-        &format!(
-            "This app is no longer available on this device — {}.",
-            state.describe()
-        ),
-    )
-}
-
-fn error_response(status: hyper::StatusCode, msg: &str) -> hyper::Response<BoxedBody> {
-    let body: BoxedBody = Full::new(Bytes::copy_from_slice(msg.as_bytes()))
-        .map_err(|never: Infallible| match never {})
-        .boxed();
-    hyper::Response::builder()
-        .status(status)
-        .header("content-type", "text/plain; charset=utf-8")
-        .body(body)
-        .expect("static error response is always valid")
-}
-
-/// Whether a hyper connection error just means the other side stopped
-/// reading or writing - it closed mid-message, or the transport reported the
-/// stream reset or stopped underneath hyper.
-fn peer_went_away(e: &hyper::Error) -> bool {
-    if e.is_incomplete_message() || e.is_body_write_aborted() {
-        return true;
-    }
-    let mut source = std::error::Error::source(e);
-    while let Some(err) = source {
-        if let Some(io) = err.downcast_ref::<std::io::Error>() {
-            return matches!(
-                io.kind(),
-                std::io::ErrorKind::ConnectionReset
-                    | std::io::ErrorKind::BrokenPipe
-                    | std::io::ErrorKind::UnexpectedEof
-                    | std::io::ErrorKind::NotConnected
-            );
-        }
-        source = err.source();
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn a_port_taken_on_one_loopback_is_not_half_bound() {
-        // Occupy a port on ::1 only.
-        let Ok(occupant) = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await else {
-            eprintln!("no IPv6 loopback on this machine");
-            return;
-        };
-        let taken = occupant.local_addr().unwrap().port();
-        // Asking for that port fails rather than serving IPv4 alone.
-        assert!(bind_loopback_port(taken).await.is_err());
-        // Letting the SDK pick still yields a port bound on both.
-        let (port, listeners) = bind_loopback_port(0).await.unwrap();
-        assert_ne!(port, taken);
-        assert_eq!(listeners.len(), 2);
-    }
 
     #[test]
     fn the_required_cookie_is_found_among_others() {

@@ -8936,6 +8936,7 @@ version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
+ "data-encoding",
  "getrandom 0.3.4",
  "http-body-util",
  "hyper",

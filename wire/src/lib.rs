@@ -334,7 +334,7 @@ impl StreamType {
     }
 }
 
-/// Only activated guests may open data-plane streams. The control plane is
+/// Only activated guest nodes may open data-plane streams. The control plane is
 /// open to every authenticated peer, so that it can activate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Plane {
@@ -375,7 +375,7 @@ pub struct ReverseProxyPreamble {
 //-- FORWARD_PROXY streams -----------------------------------------------------
 
 /// Preamble of a FORWARD_PROXY stream, indicating where to connect. It names no
-/// app, because the guest's proxy serves a whole share and can't tell which app
+/// app, because the guest node's proxy serves a whole share and can't tell which app
 /// a browser connection belongs to. The host checks `(host, port)` against the
 /// union of the share's proxied origins.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -558,10 +558,10 @@ pub struct SharedApp {
     ///  client app needs to update.
     #[serde(default)]
     pub mode: AppProxyMode,
-    /// The URL guests open first in forward-proxy mode.
+    /// The URL guest nodes open first in forward-proxy mode.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_url: Option<String>,
-    /// In forward-proxy mode, the proxied origins guests send through the
+    /// In forward-proxy mode, the proxied origins guest nodes send through the
     /// share. Each should be parseable as an [`Origin`], failure indicates a
     /// need to update the client app.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -602,7 +602,7 @@ impl AppKind {
     }
 }
 
-/// How guests reach an app.
+/// How guest nodes reach an app.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum AppProxyMode {
@@ -843,7 +843,7 @@ pub async fn write_stream_type<W: AsyncWrite + Unpin>(
     w.write_all(&[t as u8]).await
 }
 
-/// Opens a REVERSE_PROXY stream on the guest side, writing the type byte and
+/// Opens a REVERSE_PROXY stream on the guest node's side, writing the type byte and
 /// the preamble naming the app.
 pub async fn open_reverse_proxy_stream<W: AsyncWrite + Unpin>(
     w: &mut W,
@@ -859,7 +859,7 @@ pub async fn open_reverse_proxy_stream<W: AsyncWrite + Unpin>(
     .await
 }
 
-/// Opens a FORWARD_PROXY stream on the guest side, writing the type byte and
+/// Opens a FORWARD_PROXY stream on the guest node's side, writing the type byte and
 /// the preamble naming the target. The host answers with a
 /// [`ForwardProxyReply`], to be read with [`read_message`].
 pub async fn open_forward_proxy_stream<W: AsyncWrite + Unpin>(
@@ -1228,7 +1228,7 @@ mod tests {
         assert_eq!(app.kind, AppKind::Web);
         // The kind on its own stays strict, for config files.
         assert!(serde_json::from_str::<AppKind>(r#""plex""#).is_err());
-        // An unknown mode is kept as unknown, for the guest to flag.
+        // An unknown mode is kept as unknown, for the guest node to flag.
         let app: SharedApp =
             serde_json::from_str(r#"{"id":"x","name":"X","mode":"teleport"}"#).unwrap();
         assert_eq!(app.mode, AppProxyMode::Unknown);

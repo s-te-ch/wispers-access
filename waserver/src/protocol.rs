@@ -123,7 +123,7 @@ async fn read_stream_type<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Option
 fn app_target(config: &ShareConfig, app_id: &str) -> Target {
     match config.find_app(app_id).map(|app| &app.mode) {
         Some(AppProxyMode::ReverseProxy { upstream }) => Target::Upstream(upstream.as_str().into()),
-        // Only a guest that predates forward-proxy mode opens one of its apps
+        // Only a guest node that predates forward-proxy mode opens one of its apps
         // this way.
         Some(AppProxyMode::ForwardProxy { .. }) => {
             warn!(

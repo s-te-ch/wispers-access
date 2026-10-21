@@ -1,6 +1,6 @@
 //! The guest side of Wispers Access, shared by every client app: joining and
 //! restoring shares over any transport, the local share store, the guest API
-//! calls, and the loopback HTTP proxy.
+//! calls, and the loopback HTTP proxies.
 //!
 //! The entry point is [`Client`], one per data directory. The wire types an
 //! integrator meets ([`SharedApp`], [`Transport`]) are re-exported from the wire
@@ -11,9 +11,11 @@
 
 uniffi::setup_scaffolding!();
 
+mod forward_proxy;
 mod guest_node;
 mod iroh_transport;
 mod logging;
+mod loopback;
 mod pairing;
 mod reverse_proxy;
 mod secrets;
@@ -376,7 +378,7 @@ impl Client {
         };
         let client = self.clone();
         self.on_runtime(async move {
-            let (port, listeners) = reverse_proxy::bind_loopback_port(port)
+            let (port, listeners) = loopback::bind_port(port)
                 .await
                 .map_err(SdkError::host_node)?;
             let accept_loops = listeners
@@ -409,6 +411,37 @@ impl Client {
             required_cookie,
             bound_ports: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Starts the loopback forward proxy for the shares' forward-proxy apps,
+    /// on one port for all shares; `0` picks a free one. A share's webview
+    /// uses it as its HTTP proxy for the share's proxied origins and answers
+    /// its 407 with the share's [`ForwardProxy::credential`]. For mobile client
+    /// apps, which can give each share's webview a credential of its own.
+    pub async fn start_forward_proxy(&self, port: u16) -> Result<Arc<ForwardProxy>> {
+        let credentials = Arc::new(forward_proxy::Credentials::default());
+        let client = self.clone();
+        self.on_runtime(async move {
+            let (port, listeners) = loopback::bind_port(port)
+                .await
+                .map_err(SdkError::host_node)?;
+            let accept_loops = listeners
+                .into_iter()
+                .map(|listener| {
+                    client.inner.runtime.spawn(forward_proxy::accept_loop(
+                        listener,
+                        client.clone(),
+                        credentials.clone(),
+                    ))
+                })
+                .collect();
+            Ok(Arc::new(ForwardProxy {
+                client,
+                credentials,
+                bound_port: BoundPort { port, accept_loops },
+            }))
+        })
+        .await
     }
 }
 
@@ -704,13 +737,12 @@ impl PerAppProxy {
                     .client
                     .on_runtime(async move {
                         if let Some(port) = row.read_app_port(&app).map_err(SdkError::storage)?
-                            && let Ok(bound) = reverse_proxy::bind_loopback_port(port).await
+                            && let Ok(bound) = loopback::bind_port(port).await
                         {
                             return Ok(bound);
                         }
-                        let (port, listeners) = reverse_proxy::bind_loopback_port(0)
-                            .await
-                            .map_err(SdkError::host_node)?;
+                        let (port, listeners) =
+                            loopback::bind_port(0).await.map_err(SdkError::host_node)?;
                         row.write_app_port(&app, port).map_err(SdkError::storage)?;
                         Ok((port, listeners))
                     })
@@ -746,6 +778,54 @@ impl Drop for PerAppProxy {
             }
         }
     }
+}
+
+/// A running loopback forward proxy, serving every share's forward-proxy
+/// apps on one port. Dropping it stops accepting connections, and the
+/// shares' credentials end with it.
+#[derive(uniffi::Object)]
+pub struct ForwardProxy {
+    client: Client,
+    credentials: Arc<forward_proxy::Credentials>,
+    bound_port: BoundPort,
+}
+
+#[uniffi::export]
+impl ForwardProxy {
+    pub fn port(&self) -> u16 {
+        self.bound_port.port
+    }
+
+    /// The realm of the proxy's 407s. The client app answers a challenge with
+    /// the share's credential only if it names this realm and the proxy's
+    /// host. (Android's callback gives no port, so the realm is what tells the
+    /// proxy apart from a shared app on `localhost`.)
+    pub fn realm(&self) -> String {
+        forward_proxy::REALM.to_owned()
+    }
+
+    /// What a share's webview answers the proxy's 407s with. Minted lazily,
+    /// valid as long as this proxy runs.
+    pub fn credential(&self, share: ShareId) -> Result<ProxyCredential> {
+        self.client.row(&share)?;
+        Ok(ProxyCredential {
+            username: share.to_string(),
+            password: self.credentials.password(&share),
+        })
+    }
+}
+
+impl Drop for ForwardProxy {
+    fn drop(&mut self) {
+        self.bound_port.release();
+    }
+}
+
+/// A share's Basic credential for the [`ForwardProxy`].
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ProxyCredential {
+    pub username: String,
+    pub password: String,
 }
 
 /// A port bound on each loopback address, with an accept loop per address.
