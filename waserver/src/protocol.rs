@@ -5,7 +5,7 @@
 
 use crate::config::ShareConfig;
 use crate::guest_api;
-use crate::http::{self, Target};
+use crate::reverse_proxy::{self, Target};
 use crate::storage;
 use anyhow::{Context, Result};
 use std::pin::Pin;
@@ -14,7 +14,7 @@ use std::task::{Context as TaskContext, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::broadcast;
 use tracing::warn;
-use wire::{FirstByte, HttpPreamble, StreamType};
+use wire::{FirstByte, ReverseProxyPreamble, StreamType};
 use wispers_access_wire as wire;
 
 /// Context needed to serve an incoming stream.
@@ -66,16 +66,16 @@ where
         Some(FirstByte::Typed(StreamType::Ctrl)) => {
             guest_api::serve(stream, ctx, peer).await?;
         }
-        Some(FirstByte::Typed(StreamType::Data)) => {
+        Some(FirstByte::Typed(StreamType::ReverseProxy)) => {
             if !peer.is_authorized() {
                 return Ok(StreamOutcome::Refused);
             };
             let user_id = peer.user_id.unwrap();
-            let preamble: HttpPreamble = wire::read_message(&mut stream)
+            let preamble: ReverseProxyPreamble = wire::read_message(&mut stream)
                 .await
-                .context("reading DATA preamble")?;
+                .context("reading REVERSE_PROXY preamble")?;
             let target = app_target(&ctx.config, &preamble.app_id);
-            http::serve(stream, target, user_id).await?;
+            reverse_proxy::serve(stream, target, user_id).await?;
         }
         Some(FirstByte::LegacyHttp(raw_byte)) => {
             if !peer.is_authorized() {
@@ -87,7 +87,7 @@ where
                 None => Target::NoDefaultApp,
             };
             // Prepend the first byte again, then serve the stream.
-            http::serve(Prefixed::new(vec![raw_byte], stream), target, user_id).await?;
+            reverse_proxy::serve(Prefixed::new(vec![raw_byte], stream), target, user_id).await?;
         }
         Some(FirstByte::Unknown(raw_byte)) => {
             warn!(raw_byte, "unknown stream type, closing");
@@ -229,7 +229,7 @@ upstream = ":1"
                     let service = hyper::service::service_fn(|req: hyper::Request<_>| async move {
                         let who = req
                             .headers()
-                            .get(http::IDENTITY_HEADER)
+                            .get(reverse_proxy::IDENTITY_HEADER)
                             .and_then(|v| v.to_str().ok())
                             .unwrap_or("-")
                             .to_owned();
@@ -265,12 +265,12 @@ upstream = ":1"
         response
     }
 
-    fn data_stream(app_id: &str, request: &[u8]) -> Vec<u8> {
-        let body = serde_json::to_vec(&HttpPreamble {
+    fn reverse_proxy_stream(app_id: &str, request: &[u8]) -> Vec<u8> {
+        let body = serde_json::to_vec(&ReverseProxyPreamble {
             app_id: app_id.to_owned(),
         })
         .unwrap();
-        let mut out = vec![StreamType::Data as u8];
+        let mut out = vec![StreamType::ReverseProxy as u8];
         out.extend_from_slice(&(body.len() as u32).to_be_bytes());
         out.extend_from_slice(&body);
         out.extend_from_slice(request);
@@ -307,12 +307,12 @@ upstream = ":1"
     }
 
     #[tokio::test]
-    async fn data_stream_is_routed_by_app_id() {
+    async fn reverse_proxy_stream_is_routed_by_app_id() {
         let upstream = echo_upstream().await;
         let response = exchange(
             context_with_upstream(&upstream),
             Some("bob"),
-            data_stream("jf", GET),
+            reverse_proxy_stream("jf", GET),
         )
         .await;
         let text = String::from_utf8_lossy(&response);
@@ -324,15 +324,19 @@ upstream = ":1"
     async fn unknown_app_gets_a_typed_404_with_the_config_hash() {
         let ctx = context_with_upstream("127.0.0.1:1");
         let hash = ctx.config.config_hash();
-        let response = exchange(ctx, Some("bob"), data_stream("gone", GET)).await;
+        let response = exchange(ctx, Some("bob"), reverse_proxy_stream("gone", GET)).await;
         let (head, _) = split_response(&response);
         assert!(head.starts_with("http/1.1 404"), "{head}");
         assert!(
-            head.contains(&format!("{}: app-not-found", http::ERROR_HEADER)),
+            head.contains(&format!("{}: app-not-found", reverse_proxy::ERROR_HEADER)),
             "{head}"
         );
         assert!(
-            head.contains(&format!("{}: {:016x}", http::CONFIG_HASH_HEADER, hash)),
+            head.contains(&format!(
+                "{}: {:016x}",
+                reverse_proxy::CONFIG_HASH_HEADER,
+                hash
+            )),
             "{head}"
         );
     }
@@ -343,24 +347,28 @@ upstream = ":1"
         let (head, _) = split_response(&response);
         assert!(head.starts_with("http/1.1 503"), "{head}");
         // A page for the person; legacy clients know no error header.
-        assert!(!head.contains(http::ERROR_HEADER), "{head}");
+        assert!(!head.contains(reverse_proxy::ERROR_HEADER), "{head}");
     }
 
     #[tokio::test]
-    async fn data_request_on_an_empty_share_is_an_unknown_app() {
+    async fn reverse_proxy_request_on_an_empty_share_is_an_unknown_app() {
         // The guest's list is stale (the last app was removed): same answer
         // as for any other app the share does not have, hash included.
         let ctx = context(EMPTY_SHARE);
         let hash = ctx.config.config_hash();
-        let response = exchange(ctx, Some("bob"), data_stream("gone", GET)).await;
+        let response = exchange(ctx, Some("bob"), reverse_proxy_stream("gone", GET)).await;
         let (head, _) = split_response(&response);
         assert!(head.starts_with("http/1.1 404"), "{head}");
         assert!(
-            head.contains(&format!("{}: app-not-found", http::ERROR_HEADER)),
+            head.contains(&format!("{}: app-not-found", reverse_proxy::ERROR_HEADER)),
             "{head}"
         );
         assert!(
-            head.contains(&format!("{}: {:016x}", http::CONFIG_HASH_HEADER, hash)),
+            head.contains(&format!(
+                "{}: {:016x}",
+                reverse_proxy::CONFIG_HASH_HEADER,
+                hash
+            )),
             "{head}"
         );
     }
@@ -608,10 +616,12 @@ upstream = ":1"
         let err: wire::ApiError = serde_json::from_slice(&body).unwrap();
         assert_eq!(err.error, "not-activated");
 
-        // A DATA stream is refused unread.
+        // A REVERSE_PROXY stream is refused unread.
         let (server, mut client) = tokio::io::duplex(1024);
         let task = tokio::spawn(handle(server, ctx.clone(), peer.clone()));
-        wire::open_data_stream(&mut client, "jf").await.unwrap();
+        wire::open_reverse_proxy_stream(&mut client, "jf")
+            .await
+            .unwrap();
         assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Refused);
 
         // So is a legacy raw request.

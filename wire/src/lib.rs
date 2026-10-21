@@ -3,9 +3,9 @@
 //!
 //! Every stream a guest opens starts with one [`StreamType`] byte:
 //!
-//! - [`StreamType::Data`] for the data plane. One length-prefixed
-//!   [`HttpPreamble`] naming the app, then a raw HTTP/1.1 request for that app,
-//!   answered in raw HTTP.
+//! - [`StreamType::ReverseProxy`] for apps in reverse-proxy mode, on the data
+//!   plane. One length-prefixed [`ReverseProxyPreamble`] naming the app, then a
+//!   raw HTTP/1.1 request for that app, answered in raw HTTP.
 //! - [`StreamType::Ctrl`] for the control plane. A raw HTTP/1.1 request to the
 //!   host node's guest API (the `/v1/...` routes below), answered in raw HTTP.
 //!
@@ -316,7 +316,7 @@ fn decode_url(field: &str) -> Option<String> {
 /// or the control plane.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamType {
-    Data = 0x00,
+    ReverseProxy = 0x00,
     Ctrl = 0x01,
 }
 
@@ -331,7 +331,7 @@ pub enum FirstByte {
 impl From<u8> for FirstByte {
     fn from(first: u8) -> Self {
         match first {
-            0x00 => FirstByte::Typed(StreamType::Data),
+            0x00 => FirstByte::Typed(StreamType::ReverseProxy),
             0x01 => FirstByte::Typed(StreamType::Ctrl),
             // Every HTTP method starts with an ASCII letter.
             b'A'..=b'Z' | b'a'..=b'z' => FirstByte::LegacyHttp(first),
@@ -340,12 +340,12 @@ impl From<u8> for FirstByte {
     }
 }
 
-//-- DATA streams --------------------------------------------------------------
+//-- REVERSE_PROXY streams -----------------------------------------------------
 
-/// Preamble of a DATA stream: which of the share's apps the request that
-/// follows is for.
+/// Preamble of a REVERSE_PROXY stream: which of the share's apps the request
+/// that follows is for.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HttpPreamble {
+pub struct ReverseProxyPreamble {
     pub app_id: String,
 }
 
@@ -647,16 +647,16 @@ pub async fn write_stream_type<W: AsyncWrite + Unpin>(
     w.write_all(&[t as u8]).await
 }
 
-/// Opens a DATA stream on the guest side, writing the type byte and the
-/// preamble naming the app.
-pub async fn open_data_stream<W: AsyncWrite + Unpin>(
+/// Opens a REVERSE_PROXY stream on the guest side, writing the type byte and
+/// the preamble naming the app.
+pub async fn open_reverse_proxy_stream<W: AsyncWrite + Unpin>(
     w: &mut W,
     app_id: &str,
 ) -> std::io::Result<()> {
-    write_stream_type(w, StreamType::Data).await?;
+    write_stream_type(w, StreamType::ReverseProxy).await?;
     write_message(
         w,
-        &HttpPreamble {
+        &ReverseProxyPreamble {
             app_id: app_id.to_owned(),
         },
     )
@@ -922,7 +922,10 @@ mod tests {
 
     #[test]
     fn first_byte_classes() {
-        assert_eq!(FirstByte::from(0x00), FirstByte::Typed(StreamType::Data));
+        assert_eq!(
+            FirstByte::from(0x00),
+            FirstByte::Typed(StreamType::ReverseProxy)
+        );
         assert_eq!(FirstByte::from(0x01), FirstByte::Typed(StreamType::Ctrl));
         for method in ["GET", "POST", "OPTIONS", "get"] {
             assert_eq!(
@@ -986,16 +989,16 @@ mod tests {
     #[tokio::test]
     async fn guest_side_openers_match_the_server_side_readers() {
         let (mut a, mut b) = tokio::io::duplex(1024);
-        open_data_stream(&mut a, "jf").await.unwrap();
+        open_reverse_proxy_stream(&mut a, "jf").await.unwrap();
         a.write_all(b"GET / HTTP/1.1\r\n").await.unwrap();
 
         let mut first = [0u8; 1];
         b.read_exact(&mut first).await.unwrap();
         assert_eq!(
             FirstByte::from(first[0]),
-            FirstByte::Typed(StreamType::Data)
+            FirstByte::Typed(StreamType::ReverseProxy)
         );
-        let back: HttpPreamble = read_message(&mut b).await.unwrap();
+        let back: ReverseProxyPreamble = read_message(&mut b).await.unwrap();
         assert_eq!(back.app_id, "jf");
         let mut rest = [0u8; 16];
         b.read_exact(&mut rest).await.unwrap();
@@ -1017,7 +1020,7 @@ mod tests {
             .await
             .unwrap();
         assert!(matches!(
-            read_message::<_, HttpPreamble>(&mut b).await,
+            read_message::<_, ReverseProxyPreamble>(&mut b).await,
             Err(FrameError::TooLong(_))
         ));
 
@@ -1026,7 +1029,7 @@ mod tests {
         a.write_all(&[1, 2, 3]).await.unwrap();
         drop(a);
         assert!(matches!(
-            read_message::<_, HttpPreamble>(&mut b).await,
+            read_message::<_, ReverseProxyPreamble>(&mut b).await,
             Err(FrameError::Io(_))
         ));
 
@@ -1034,7 +1037,7 @@ mod tests {
         a.write_all(&3u32.to_be_bytes()).await.unwrap();
         a.write_all(b"{{{").await.unwrap();
         assert!(matches!(
-            read_message::<_, HttpPreamble>(&mut b).await,
+            read_message::<_, ReverseProxyPreamble>(&mut b).await,
             Err(FrameError::Decode(_))
         ));
     }

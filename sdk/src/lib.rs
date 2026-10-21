@@ -12,17 +12,17 @@
 uniffi::setup_scaffolding!();
 
 mod guest_node;
-mod http;
 mod iroh_transport;
 mod logging;
 mod pairing;
+mod reverse_proxy;
 mod secrets;
 mod storage;
 mod transports;
 mod wispers_connect_transport;
 
-pub use http::RequiredCookie;
 pub use logging::{LogLevel, LogSink, install_log_sink};
+pub use reverse_proxy::RequiredCookie;
 pub use secrets::{FileSecretStore, SecretScope, SecretStore, SecretStoreError};
 pub use storage::ShareId;
 pub use wispers_access_wire::{AppKind, SharedApp, Transport};
@@ -359,23 +359,23 @@ impl Client {
         auth_mode: ProxyAuthMode,
     ) -> Result<Arc<HostRoutedProxy>> {
         let authenticator = match auth_mode {
-            ProxyAuthMode::AppCookie { cookie } => http::Authenticator::for_cookie(cookie),
-            ProxyAuthMode::Pairing { token_lifetime } => http::Authenticator::for_pairing(
+            ProxyAuthMode::AppCookie { cookie } => reverse_proxy::Authenticator::for_cookie(cookie),
+            ProxyAuthMode::Pairing { token_lifetime } => reverse_proxy::Authenticator::for_pairing(
                 pairing::CookieIssuer::restore_or_mint(&*self.inner.secrets, token_lifetime)?,
             ),
         };
         let client = self.clone();
         self.on_runtime(async move {
-            let (port, listeners) = http::bind_loopback_port(port)
+            let (port, listeners) = reverse_proxy::bind_loopback_port(port)
                 .await
                 .map_err(SdkError::host_node)?;
             let accept_loops = listeners
                 .into_iter()
                 .map(|listener| {
-                    client.inner.runtime.spawn(http::accept_loop(
+                    client.inner.runtime.spawn(reverse_proxy::accept_loop(
                         listener,
                         client.clone(),
-                        http::RouteSource::HostHeader,
+                        reverse_proxy::RouteSource::HostHeader,
                         Some(authenticator.clone()),
                     ))
                 })
@@ -593,7 +593,7 @@ pub enum ProxyAuthMode {
 #[derive(uniffi::Object)]
 pub struct HostRoutedProxy {
     client: Client,
-    authenticator: http::Authenticator,
+    authenticator: reverse_proxy::Authenticator,
     bound_port: BoundPort,
 }
 
@@ -609,7 +609,9 @@ impl HostRoutedProxy {
     pub fn browse_url(&self, share: ShareId, app_id: String) -> Result<String> {
         let label = self.share_label(&share)?;
         Ok(match self.authenticator.issuer() {
-            Some(issuer) => http::pair_url(self.port(), &issuer.mint_token(), &label, &app_id),
+            Some(issuer) => {
+                reverse_proxy::pair_url(self.port(), &issuer.mint_token(), &label, &app_id)
+            }
             None => self.app_origin(&label, &app_id),
         })
     }
@@ -627,7 +629,7 @@ impl HostRoutedProxy {
     fn app_origin(&self, label: &str, app_id: &str) -> String {
         format!(
             "http://{app_id}.{label}.{}:{}",
-            http::PROXY_DOMAIN,
+            reverse_proxy::PROXY_DOMAIN,
             self.port()
         )
     }
@@ -692,26 +694,26 @@ impl PerAppProxy {
                     .client
                     .on_runtime(async move {
                         if let Some(port) = row.read_app_port(&app).map_err(SdkError::storage)?
-                            && let Ok(bound) = http::bind_loopback_port(port).await
+                            && let Ok(bound) = reverse_proxy::bind_loopback_port(port).await
                         {
                             return Ok(bound);
                         }
-                        let (port, listeners) = http::bind_loopback_port(0)
+                        let (port, listeners) = reverse_proxy::bind_loopback_port(0)
                             .await
                             .map_err(SdkError::host_node)?;
                         row.write_app_port(&app, port).map_err(SdkError::storage)?;
                         Ok((port, listeners))
                     })
                     .await?;
-                let route_source = http::RouteSource::Fixed { share, app: app_id };
+                let route_source = reverse_proxy::RouteSource::Fixed { share, app: app_id };
                 let authenticator = self
                     .required_cookie
                     .clone()
-                    .map(http::Authenticator::for_cookie);
+                    .map(reverse_proxy::Authenticator::for_cookie);
                 let accept_loops = listeners
                     .into_iter()
                     .map(|listener| {
-                        self.client.inner.runtime.spawn(http::accept_loop(
+                        self.client.inner.runtime.spawn(reverse_proxy::accept_loop(
                             listener,
                             self.client.clone(),
                             route_source.clone(),

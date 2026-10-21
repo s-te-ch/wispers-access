@@ -1,8 +1,8 @@
-//! The loopback HTTP proxy.
+//! The loopback reverse proxy, the guest side of reverse-proxy mode.
 //!
 //! The user's browser talks to `http://<app>.<share>.wa.localhost:<port>`, and
-//! every request becomes one DATA stream to the share's host node. The bare
-//! `http://wa.localhost:<port>` is used for browser pairing (see
+//! every request becomes one REVERSE_PROXY stream to the share's host node. The
+//! bare `http://wa.localhost:<port>` is used for browser pairing (see
 //! [`crate::pairing`]).
 
 use crate::pairing::{self, CookieIssuer};
@@ -312,8 +312,8 @@ async fn forward(
         }
     };
 
-    // ... and open a DATA stream to it, naming the app.
-    let fwd_stream = match share.open_data_stream(&app).await {
+    // ... and open a REVERSE_PROXY stream to it, naming the app.
+    let fwd_stream = match share.open_reverse_proxy_stream(&app).await {
         Ok(s) => s,
         Err(TransportError::Terminal(state)) => return Ok(gone(state)),
         Err(TransportError::Transient(e)) => {

@@ -1,4 +1,5 @@
-//! HTTP forwarding with (optional) header rewriting.
+//! Reverse-proxy mode: HTTP forwarding to an app's upstream, with (optional)
+//! header rewriting.
 
 use anyhow::{Context, Result};
 use bytes::Bytes;

@@ -13,10 +13,10 @@
 //! The cookie's value is a secret the SDK mints once and keeps in the secret
 //! store next to the shares' key material, so paired browsers survive a
 //! restart. The tokens live in memory and die with the proxy. The `/pair`
-//! request itself is answered in [`crate::http`]; this module is the secret,
+//! request itself is answered in [`crate::reverse_proxy`]; this module is the secret,
 //! the cookie and the tokens.
 
-use crate::http::{PROXY_DOMAIN, RequiredCookie, constant_time_eq};
+use crate::reverse_proxy::{PROXY_DOMAIN, RequiredCookie, constant_time_eq};
 use crate::secrets::{SecretScope, SecretStore, SecretStoreError};
 use std::collections::HashMap;
 use std::sync::Mutex;
