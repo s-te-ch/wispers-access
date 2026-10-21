@@ -3,7 +3,7 @@
 //! get routed to the guest API. For backward compatibility, raw HTTP from
 //! legacy clients get proxied to the default app.
 
-use crate::config::ShareConfig;
+use crate::config::{AppConfig, AppProxyMode, ShareConfig};
 use crate::guest_api;
 use crate::reverse_proxy::{self, Target};
 use crate::storage;
@@ -14,7 +14,7 @@ use std::task::{Context as TaskContext, Poll};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
 use tokio::sync::broadcast;
 use tracing::warn;
-use wire::{FirstByte, ReverseProxyPreamble, StreamType};
+use wire::{FirstByte, Plane, ReverseProxyPreamble, StreamType};
 use wispers_access_wire as wire;
 
 /// Context needed to serve an incoming stream.
@@ -62,28 +62,36 @@ pub async fn handle<S>(mut stream: S, ctx: StreamContext, peer: Peer) -> Result<
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    match read_stream_type(&mut stream).await? {
+    let first = read_stream_type(&mut stream).await?;
+    let data_plane = match first {
+        Some(FirstByte::Typed(t)) => t.plane() == Plane::Data,
+        Some(FirstByte::LegacyHttp(_)) => true,
+        Some(FirstByte::Unknown(_)) | None => false,
+    };
+    if data_plane && !peer.is_authorized() {
+        return Ok(StreamOutcome::Refused);
+    }
+    match first {
         Some(FirstByte::Typed(StreamType::Ctrl)) => {
             guest_api::serve(stream, ctx, peer).await?;
         }
         Some(FirstByte::Typed(StreamType::ReverseProxy)) => {
-            if !peer.is_authorized() {
-                return Ok(StreamOutcome::Refused);
-            };
-            let user_id = peer.user_id.unwrap();
+            let user_id = peer.user_id.expect("data plane peers are authorized");
             let preamble: ReverseProxyPreamble = wire::read_message(&mut stream)
                 .await
                 .context("reading REVERSE_PROXY preamble")?;
             let target = app_target(&ctx.config, &preamble.app_id);
             reverse_proxy::serve(stream, target, user_id).await?;
         }
+        Some(FirstByte::Typed(StreamType::ForwardProxy)) => {
+            // TODO: Served by forward_proxy.rs, the next part of this change.
+            warn!("FORWARD_PROXY streams are not served yet, closing");
+            stream.shutdown().await.ok();
+        }
         Some(FirstByte::LegacyHttp(raw_byte)) => {
-            if !peer.is_authorized() {
-                return Ok(StreamOutcome::Refused);
-            };
-            let user_id = peer.user_id.unwrap();
-            let target = match ctx.config.default_app() {
-                Some(app) => Target::Upstream(app.upstream.as_str().into()),
+            let user_id = peer.user_id.expect("data plane peers are authorized");
+            let target = match ctx.config.default_app().and_then(AppConfig::upstream) {
+                Some(upstream) => Target::Upstream(upstream.into()),
                 None => Target::NoDefaultApp,
             };
             // Prepend the first byte again, then serve the stream.
@@ -112,8 +120,17 @@ async fn read_stream_type<S: AsyncRead + Unpin>(stream: &mut S) -> Result<Option
 }
 
 fn app_target(config: &ShareConfig, app_id: &str) -> Target {
-    match config.find_app(app_id) {
-        Some(app) => Target::Upstream(app.upstream.as_str().into()),
+    match config.find_app(app_id).map(|app| &app.mode) {
+        Some(AppProxyMode::ReverseProxy { upstream }) => Target::Upstream(upstream.as_str().into()),
+        // Only a guest that predates forward-proxy mode opens one of its apps
+        // this way.
+        Some(AppProxyMode::ForwardProxy { .. }) => {
+            warn!(
+                app = app_id,
+                "reverse-proxy request for a forward-proxy app"
+            );
+            Target::ClientTooOld
+        }
         None => {
             warn!(app = app_id, "request for an app this share does not have");
             Target::UnknownApp {
@@ -396,6 +413,54 @@ upstream = ":1"
         assert!(!String::from_utf8_lossy(&body).contains("127.0.0.1"));
     }
 
+    const FORWARD_PROXY_SHARE: &str = r#"
+name = "Dev"
+[[app]]
+id = "oss"
+mode = "forward-proxy"
+start_url = "http://localhost:4200/"
+proxied_origins = ["http://localhost:4200", "https://sso.internal"]
+"#;
+
+    #[tokio::test]
+    async fn forward_proxy_apps_reach_guests_with_their_origins() {
+        let request = format!("GET {} HTTP/1.1\r\nHost: w\r\n\r\n", wire::SHARE_PATH);
+        let response = exchange(
+            context(FORWARD_PROXY_SHARE),
+            Some("bob"),
+            ctrl_stream(&request),
+        )
+        .await;
+        let (_, body) = split_response(&response);
+        let info: ShareInfo = serde_json::from_slice(&body).unwrap();
+        let app = &info.apps[0];
+        assert_eq!(app.mode, wire::AppProxyMode::ForwardProxy);
+        assert_eq!(app.start_url.as_deref(), Some("http://localhost:4200/"));
+        assert_eq!(
+            app.proxied_origins,
+            ["http://localhost:4200", "https://sso.internal"]
+        );
+    }
+
+    #[tokio::test]
+    async fn old_clients_get_a_426_for_forward_proxy_apps() {
+        let response = exchange(
+            context(FORWARD_PROXY_SHARE),
+            Some("bob"),
+            reverse_proxy_stream("oss", GET),
+        )
+        .await;
+        let (head, _) = split_response(&response);
+        assert!(head.starts_with("http/1.1 426"), "{head}");
+        assert!(
+            head.contains(&format!("{}: client-too-old", reverse_proxy::ERROR_HEADER)),
+            "{head}"
+        );
+        // Legacy requests find no default app on a forward-proxy-only share.
+        let response = exchange(context(FORWARD_PROXY_SHARE), Some("bob"), GET.to_vec()).await;
+        assert!(split_response(&response).0.starts_with("http/1.1 503"));
+    }
+
     #[tokio::test]
     async fn get_share_is_conditional() {
         let ctx = context_with_upstream("127.0.0.1:1");
@@ -620,6 +685,14 @@ upstream = ":1"
         let (server, mut client) = tokio::io::duplex(1024);
         let task = tokio::spawn(handle(server, ctx.clone(), peer.clone()));
         wire::open_reverse_proxy_stream(&mut client, "jf")
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Refused);
+
+        // So is a FORWARD_PROXY stream.
+        let (server, mut client) = tokio::io::duplex(1024);
+        let task = tokio::spawn(handle(server, ctx.clone(), peer.clone()));
+        wire::open_forward_proxy_stream(&mut client, "localhost", 1)
             .await
             .unwrap();
         assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Refused);

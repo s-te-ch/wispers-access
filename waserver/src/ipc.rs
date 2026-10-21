@@ -218,7 +218,33 @@ pub struct AppData {
     pub name: String,
     #[serde(default)]
     pub kind: crate::config::AppKind,
-    pub upstream: String,
+    #[serde(default)]
+    pub mode: wispers_access_wire::AppProxyMode,
+    /// Reverse-proxy mode only.
+    #[serde(default)]
+    pub upstream: Option<String>,
+    /// Forward-proxy mode only.
+    #[serde(default)]
+    pub proxied_origins: Vec<String>,
+}
+
+impl From<&crate::config::AppConfig> for AppData {
+    fn from(app: &crate::config::AppConfig) -> Self {
+        let proxied_origins = match &app.mode {
+            crate::config::AppProxyMode::ReverseProxy { .. } => Vec::new(),
+            crate::config::AppProxyMode::ForwardProxy { origins, .. } => {
+                origins.iter().map(ToString::to_string).collect()
+            }
+        };
+        AppData {
+            id: app.id.clone(),
+            name: app.name.clone(),
+            kind: app.kind,
+            mode: app.mode.wire(),
+            upstream: app.upstream().map(str::to_owned),
+            proxied_origins,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -307,16 +333,7 @@ async fn handle_status(handle: &crate::serving::ServingHandle) -> Response {
 }
 
 fn app_data(config: &crate::config::ShareConfig) -> Vec<AppData> {
-    config
-        .apps
-        .iter()
-        .map(|s| AppData {
-            id: s.id.clone(),
-            name: s.name.clone(),
-            kind: s.kind,
-            upstream: s.upstream.clone(),
-        })
-        .collect()
+    config.apps.iter().map(AppData::from).collect()
 }
 
 fn fmt_rfc3339(t: chrono::DateTime<chrono::Utc>) -> String {

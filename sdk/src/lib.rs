@@ -25,7 +25,7 @@ pub use logging::{LogLevel, LogSink, install_log_sink};
 pub use reverse_proxy::RequiredCookie;
 pub use secrets::{FileSecretStore, SecretScope, SecretStore, SecretStoreError};
 pub use storage::ShareId;
-pub use wispers_access_wire::{AppKind, SharedApp, Transport};
+pub use wispers_access_wire::{AppKind, AppProxyMode, SharedApp, Transport};
 
 use guest_node::GuestNode;
 use std::collections::HashMap;
@@ -166,6 +166,9 @@ pub struct SharedApp {
     pub id: String,
     pub name: String,
     pub kind: AppKind,
+    pub mode: AppProxyMode,
+    pub start_url: Option<String>,
+    pub proxied_origins: Vec<String>,
 }
 
 #[uniffi::remote(Enum)]
@@ -173,6 +176,13 @@ pub enum AppKind {
     Web,
     Jellyfin,
     Immich,
+}
+
+#[uniffi::remote(Enum)]
+pub enum AppProxyMode {
+    ReverseProxy,
+    ForwardProxy,
+    Unknown,
 }
 
 #[uniffi::remote(Enum)]

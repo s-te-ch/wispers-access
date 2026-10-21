@@ -16,6 +16,7 @@ use serde::Serialize;
 use std::io::Write;
 use std::time::Duration;
 use tabwriter::TabWriter;
+use wispers_access_wire::AppProxyMode;
 
 const UPSTREAM_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 
@@ -150,9 +151,23 @@ struct AppStatus {
     id: String,
     name: String,
     kind: AppKind,
-    upstream: String,
-    /// A TCP connection to the upstream succeeded just now.
-    upstream_reachable: bool,
+    mode: AppProxyMode,
+    /// Reverse-proxy mode only.
+    upstream: Option<String>,
+    /// A TCP connection to the upstream succeeded just now. Reverse-proxy mode
+    /// only.
+    upstream_reachable: Option<bool>,
+    /// Forward-proxy mode only.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    proxied_origins: Vec<OriginStatus>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OriginStatus {
+    origin: String,
+    /// A TCP connection to the origin's host and port succeeded just now.
+    reachable: bool,
 }
 
 /// A recent invite. An invite showing `used` with no matching guest means the
@@ -309,16 +324,7 @@ async fn gather_share(name: &str, stored: Result<StoredShare, String>) -> ShareS
     // The running server's app list wins; a stopped server shows the file's.
     let apps = match (served_apps, config) {
         (Some(apps), _) => apps,
-        (None, Some(cfg)) => cfg
-            .apps
-            .iter()
-            .map(|s| ipc::AppData {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                kind: s.kind,
-                upstream: s.upstream.clone(),
-            })
-            .collect(),
+        (None, Some(cfg)) => cfg.apps.iter().map(ipc::AppData::from).collect(),
         (None, None) => Vec::new(),
     };
     let apps = probe_apps(apps).await;
@@ -476,27 +482,54 @@ impl ServerStatus {
     }
 }
 
-/// Probes every app's upstream concurrently.
+/// Probes every app's upstream, or its proxied origins, concurrently.
 async fn probe_apps(apps: Vec<ipc::AppData>) -> Vec<AppStatus> {
+    // One probe per upstream and per origin, by app and origin index.
     let mut probes = tokio::task::JoinSet::new();
     for (i, s) in apps.iter().enumerate() {
-        let upstream = s.upstream.clone();
-        probes.spawn(async move { (i, probe_upstream(&upstream).await) });
+        if let Some(upstream) = s.upstream.clone() {
+            probes.spawn(async move { (i, None, probe_upstream(&upstream).await) });
+        }
+        for (j, origin) in s.proxied_origins.iter().cloned().enumerate() {
+            probes.spawn(async move { (i, Some(j), probe_origin(&origin).await) });
+        }
     }
-    let mut reachable = vec![false; apps.len()];
-    while let Some(Ok((i, r))) = probes.join_next().await {
-        reachable[i] = r;
+    let mut upstream_reachable = vec![false; apps.len()];
+    let mut origin_reachable: Vec<Vec<bool>> = apps
+        .iter()
+        .map(|s| vec![false; s.proxied_origins.len()])
+        .collect();
+    while let Some(Ok((i, j, r))) = probes.join_next().await {
+        match j {
+            None => upstream_reachable[i] = r,
+            Some(j) => origin_reachable[i][j] = r,
+        }
     }
     apps.into_iter()
-        .zip(reachable)
-        .map(|(s, upstream_reachable)| AppStatus {
+        .zip(upstream_reachable.into_iter().zip(origin_reachable))
+        .map(|(s, (upstream_reachable, origin_reachable))| AppStatus {
+            upstream_reachable: s.upstream.is_some().then_some(upstream_reachable),
+            proxied_origins: s
+                .proxied_origins
+                .into_iter()
+                .zip(origin_reachable)
+                .map(|(origin, reachable)| OriginStatus { origin, reachable })
+                .collect(),
             id: s.id,
             name: s.name,
             kind: s.kind,
+            mode: s.mode,
             upstream: s.upstream,
-            upstream_reachable,
         })
         .collect()
+}
+
+/// True if a TCP connection to the origin's host and port succeeds.
+async fn probe_origin(origin: &str) -> bool {
+    let Ok(origin) = origin.parse::<wispers_access_wire::Origin>() else {
+        return false;
+    };
+    probe_upstream(&format!("{}:{}", origin.host(), origin.port())).await
 }
 
 /// True if a TCP connection to the upstream succeeds.
@@ -681,22 +714,27 @@ fn print_share_details(c: &ShareStatus) {
         writeln!(&mut tw, "  (none configured)").unwrap();
     } else {
         writeln!(&mut tw, "  ID\tNAME\tUPSTREAM\tKIND").unwrap();
+        let reachable = |r: bool| {
+            if r { " (reachable)" } else { " (unreachable!)" }
+        };
         for s in &c.apps {
-            let reachable = if s.upstream_reachable {
-                " (reachable)"
-            } else {
-                " (unreachable!)"
+            // A forward-proxy app gets a line per origin, below the app's.
+            let upstream = match (&s.upstream, s.upstream_reachable) {
+                (Some(upstream), Some(r)) => format!("{upstream}{}", reachable(r)),
+                _ => s.mode.as_str().replace('-', " "),
             };
             writeln!(
                 &mut tw,
-                "  {}\t{}\t{}{}\t{}",
+                "  {}\t{}\t{}\t{}",
                 s.id,
                 s.name,
-                s.upstream,
-                reachable,
+                upstream,
                 s.kind.as_str()
             )
             .unwrap();
+            for o in &s.proxied_origins {
+                writeln!(&mut tw, "  \t\t  {}{}", o.origin, reachable(o.reachable)).unwrap();
+            }
         }
     }
 
@@ -913,8 +951,10 @@ mod tests {
                     id: "jellyfin".to_owned(),
                     name: "Jellyfin".to_owned(),
                     kind: AppKind::Web,
-                    upstream: "localhost:8096".to_owned(),
-                    upstream_reachable: false,
+                    mode: AppProxyMode::ReverseProxy,
+                    upstream: Some("localhost:8096".to_owned()),
+                    upstream_reachable: Some(false),
+                    proxied_origins: Vec::new(),
                 }],
                 guests: None,
                 guests_error: None,
@@ -946,6 +986,8 @@ mod tests {
         assert_eq!(share["apps"][0]["upstream"], "localhost:8096");
         assert_eq!(share["apps"][0]["upstreamReachable"], false);
         assert_eq!(share["apps"][0]["kind"], "web");
+        assert_eq!(share["apps"][0]["mode"], "reverse-proxy");
+        assert!(share["apps"][0].get("proxiedOrigins").is_none());
         assert_eq!(share["guests"], serde_json::Value::Null);
         let invite = &share["invites"][0];
         assert_eq!(invite["nodeName"], "Nick's iPhone");

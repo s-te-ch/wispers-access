@@ -29,6 +29,10 @@ pub enum Target {
     UnknownApp {
         config_hash: u64,
     },
+    /// The client tried to use reverse-proxy mode for an app shared in
+    /// forward-proxy mode. This happens with old clients, which don't know and
+    /// ignore the `mode` field.
+    ClientTooOld,
 }
 
 /// Header carrying locally generated errors, so clients can tell them apart
@@ -97,6 +101,17 @@ async fn handle_request(
                 CONFIG_HASH_HEADER,
                 hyper::header::HeaderValue::from_str(&format!("{:016x}", config_hash))
                     .expect("hex is a valid header value"),
+            );
+            return Ok(resp);
+        }
+        Target::ClientTooOld => {
+            let mut resp = error_response(
+                hyper::StatusCode::UPGRADE_REQUIRED,
+                "This app needs a newer version of Wispers Access. Please update.",
+            );
+            resp.headers_mut().insert(
+                ERROR_HEADER,
+                hyper::header::HeaderValue::from_static(wispers_access_wire::CLIENT_TOO_OLD),
             );
             return Ok(resp);
         }

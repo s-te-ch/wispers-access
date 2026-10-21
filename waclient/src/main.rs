@@ -247,11 +247,17 @@ mod tests {
                 id: "echo".into(),
                 name: "echo".into(),
                 kind: sdk::AppKind::Web,
+                mode: sdk::AppProxyMode::ReverseProxy,
+                start_url: None,
+                proxied_origins: Vec::new(),
             },
             sdk::SharedApp {
                 id: "jf".into(),
                 name: "Jellyfin".into(),
                 kind: sdk::AppKind::Jellyfin,
+                mode: sdk::AppProxyMode::ReverseProxy,
+                start_url: None,
+                proxied_origins: Vec::new(),
             },
         ];
         assert_eq!(describe_apps(&apps), "echo, jf (Jellyfin)");

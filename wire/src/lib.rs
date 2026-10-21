@@ -6,6 +6,10 @@
 //! - [`StreamType::ReverseProxy`] for apps in reverse-proxy mode, on the data
 //!   plane. One length-prefixed [`ReverseProxyPreamble`] naming the app, then a
 //!   raw HTTP/1.1 request for that app, answered in raw HTTP.
+//! - [`StreamType::ForwardProxy`] for apps in forward-proxy mode, on the data
+//!   plane. One length-prefixed [`ForwardProxyPreamble`] naming a `host:port`
+//!   from the share's proxied origins, answered by one [`ForwardProxyReply`].
+//!   After a successful reply, raw bytes both ways: one tunnelled connection.
 //! - [`StreamType::Ctrl`] for the control plane. A raw HTTP/1.1 request to the
 //!   host node's guest API (the `/v1/...` routes below), answered in raw HTTP.
 //!
@@ -312,12 +316,30 @@ fn decode_url(field: &str) -> Option<String> {
 
 //-- Streams -------------------------------------------------------------------
 
-/// The first byte of a stream determines whether it belongs to the data plane
-/// or the control plane.
+/// The first byte of a stream says what the rest of it carries. Types are only
+/// ever added; a host closes a stream of a type it doesn't know.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StreamType {
     ReverseProxy = 0x00,
     Ctrl = 0x01,
+    ForwardProxy = 0x02,
+}
+
+impl StreamType {
+    pub fn plane(self) -> Plane {
+        match self {
+            StreamType::ReverseProxy | StreamType::ForwardProxy => Plane::Data,
+            StreamType::Ctrl => Plane::Control,
+        }
+    }
+}
+
+/// Only activated guests may open data-plane streams. The control plane is
+/// open to every authenticated peer, so that it can activate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Plane {
+    Data,
+    Control,
 }
 
 /// What the first byte of a stream says about the rest.
@@ -333,6 +355,7 @@ impl From<u8> for FirstByte {
         match first {
             0x00 => FirstByte::Typed(StreamType::ReverseProxy),
             0x01 => FirstByte::Typed(StreamType::Ctrl),
+            0x02 => FirstByte::Typed(StreamType::ForwardProxy),
             // Every HTTP method starts with an ASCII letter.
             b'A'..=b'Z' | b'a'..=b'z' => FirstByte::LegacyHttp(first),
             other => FirstByte::Unknown(other),
@@ -347,6 +370,41 @@ impl From<u8> for FirstByte {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReverseProxyPreamble {
     pub app_id: String,
+}
+
+//-- FORWARD_PROXY streams -----------------------------------------------------
+
+/// Preamble of a FORWARD_PROXY stream, indicating where to connect. It names no
+/// app, because the guest's proxy serves a whole share and can't tell which app
+/// a browser connection belongs to. The host checks `(host, port)` against the
+/// union of the share's proxied origins.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardProxyPreamble {
+    /// In the form of [`Origin::host`].
+    pub host: String,
+    pub port: u16,
+}
+
+/// The host's answer to a [`ForwardProxyPreamble`]. An error signals the end of
+/// the stream. Otherwise, the host is now connected to the target, and the
+/// stream carries raw bytes from here on.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ForwardProxyReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ForwardProxyError>,
+}
+
+/// Why a FORWARD_PROXY stream was refused. Values are only ever added.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ForwardProxyError {
+    /// The target is not one of the share's proxied origins.
+    NotAllowed,
+    /// The host node could not connect to the target.
+    Unreachable,
+    /// A value this build does not know.
+    #[serde(other)]
+    Unknown,
 }
 
 //-- The guest API, over CTRL streams ------------------------------------------
@@ -479,6 +537,10 @@ pub struct ShareInfo {
     pub name: String,
     pub transport: String,
     pub apps: Vec<SharedApp>,
+    /// CA certificates for the share's `https` origins, one PEM certificate
+    /// each. Guests trust them for those origins only.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ca_certificates: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -491,6 +553,19 @@ pub struct SharedApp {
     /// host may add kinds before its guests learn them.
     #[serde(default, deserialize_with = "AppKind::deserialize_or_web")]
     pub kind: AppKind,
+    /// The proxy mode used for this app, defaults to reverse-proxy. Unknown
+    /// values get read as [`AppProxyMode::Unknown`] and are a sign that the
+    ///  client app needs to update.
+    #[serde(default)]
+    pub mode: AppProxyMode,
+    /// The URL guests open first in forward-proxy mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_url: Option<String>,
+    /// In forward-proxy mode, the proxied origins guests send through the
+    /// share. Each should be parseable as an [`Origin`], failure indicates a
+    /// need to update the client app.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proxied_origins: Vec<String>,
 }
 
 /// What kind of app is being shared: a generic web app, or one of the apps that
@@ -524,6 +599,127 @@ impl AppKind {
     fn deserialize_or_web<'de, D: serde::Deserializer<'de>>(d: D) -> Result<AppKind, D::Error> {
         let s = String::deserialize(d)?;
         Ok(AppKind::parse_or_web(&s))
+    }
+}
+
+/// How guests reach an app.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AppProxyMode {
+    /// The client app reverse-proxies http://<app>.<share>.wa.localhost:11235
+    /// to the host node's upstream. The browser talks HTTP to the local proxy
+    /// and takes it for the app's server. Suitable for an app that lives on one
+    /// origin and works at a URL other than its own. Requires much less plumbin
+    /// to get working with the browser side.
+    #[default]
+    ReverseProxy,
+    /// The client offers a forward proxy to the browser, which uses `CONNECT`
+    /// requests to talk to the proxied app. This allows for multiple origins.
+    /// The browser opens the app's real URL (`start_url`) and can connect to
+    /// all allowlisted origins, with TLS support. Because internal servers
+    /// often use self-signed certs, the share's `ca_certificates` are used to
+    /// verify them. This is more work to get working with the browser side.
+    ForwardProxy,
+    /// A mode this build does not know.
+    #[serde(other)]
+    Unknown,
+}
+
+impl AppProxyMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AppProxyMode::ReverseProxy => "reverse-proxy",
+            AppProxyMode::ForwardProxy => "forward-proxy",
+            AppProxyMode::Unknown => "unknown",
+        }
+    }
+
+    /// The mode named by `s`, [`AppProxyMode::Unknown`] when this build does not
+    /// know it.
+    pub fn parse(s: &str) -> AppProxyMode {
+        serde_json::from_value(serde_json::Value::String(s.to_owned()))
+            .unwrap_or(AppProxyMode::Unknown)
+    }
+}
+
+/// A web origin, `scheme://host[:port]`, as listed in an app's proxied origins.
+/// The scheme is `http` or `https` and sets the default port. Parsing
+/// normalises the host to lowercase (punycode for international names) and
+/// drops default ports.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Origin {
+    https: bool,
+    host: String,
+    port: u16,
+}
+
+#[derive(thiserror::Error, Debug, PartialEq, Eq)]
+#[error("{0}")]
+pub struct OriginError(&'static str);
+
+impl Origin {
+    /// The origin of a URL, which must be `http` or `https`.
+    pub fn of(url: &url::Url) -> Result<Origin, OriginError> {
+        let https = match url.scheme() {
+            "http" => false,
+            "https" => true,
+            _ => return Err(OriginError("the scheme must be http or https")),
+        };
+        let host = url
+            .host_str()
+            .ok_or(OriginError("the host is missing"))?
+            .to_owned();
+        let port = url
+            .port_or_known_default()
+            .expect("http and https have default ports");
+        Ok(Origin { https, host, port })
+    }
+
+    pub fn is_https(&self) -> bool {
+        self.https
+    }
+
+    /// A lowercase DNS name, an IPv4 literal, or an IPv6 literal in brackets.
+    pub fn host(&self) -> &str {
+        &self.host
+    }
+
+    /// The port, the scheme's default if none was given.
+    pub fn port(&self) -> u16 {
+        self.port
+    }
+
+    fn default_port(&self) -> u16 {
+        if self.https { 443 } else { 80 }
+    }
+}
+
+impl std::str::FromStr for Origin {
+    type Err = OriginError;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let url =
+            url::Url::parse(s.trim()).map_err(|_| OriginError("expected scheme://host[:port]"))?;
+        if !url.username().is_empty() || url.password().is_some() {
+            return Err(OriginError("an origin has no user name or password"));
+        }
+        // The URL parser turns an empty path into "/", so a trailing slash is
+        // accepted.
+        if url.path() != "/" || url.query().is_some() || url.fragment().is_some() {
+            return Err(OriginError("an origin has no path, query or fragment"));
+        }
+        Origin::of(&url)
+    }
+}
+
+impl std::fmt::Display for Origin {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let scheme = if self.https { "https" } else { "http" };
+        write!(f, "{scheme}://{}", self.host)?;
+        if self.port != self.default_port() {
+            write!(f, ":{}", self.port)?;
+        }
+        Ok(())
     }
 }
 
@@ -658,6 +854,25 @@ pub async fn open_reverse_proxy_stream<W: AsyncWrite + Unpin>(
         w,
         &ReverseProxyPreamble {
             app_id: app_id.to_owned(),
+        },
+    )
+    .await
+}
+
+/// Opens a FORWARD_PROXY stream on the guest side, writing the type byte and
+/// the preamble naming the target. The host answers with a
+/// [`ForwardProxyReply`], to be read with [`read_message`].
+pub async fn open_forward_proxy_stream<W: AsyncWrite + Unpin>(
+    w: &mut W,
+    host: &str,
+    port: u16,
+) -> std::io::Result<()> {
+    write_stream_type(w, StreamType::ForwardProxy).await?;
+    write_message(
+        w,
+        &ForwardProxyPreamble {
+            host: host.to_owned(),
+            port,
         },
     )
     .await
@@ -927,15 +1142,26 @@ mod tests {
             FirstByte::Typed(StreamType::ReverseProxy)
         );
         assert_eq!(FirstByte::from(0x01), FirstByte::Typed(StreamType::Ctrl));
+        assert_eq!(
+            FirstByte::from(0x02),
+            FirstByte::Typed(StreamType::ForwardProxy)
+        );
         for method in ["GET", "POST", "OPTIONS", "get"] {
             assert_eq!(
                 FirstByte::from(method.as_bytes()[0]),
                 FirstByte::LegacyHttp(method.as_bytes()[0])
             );
         }
-        assert_eq!(FirstByte::from(0x02), FirstByte::Unknown(0x02));
+        assert_eq!(FirstByte::from(0x03), FirstByte::Unknown(0x03));
         assert_eq!(FirstByte::from(b' '), FirstByte::Unknown(b' '));
         assert_eq!(FirstByte::from(0xff), FirstByte::Unknown(0xff));
+    }
+
+    #[test]
+    fn both_proxy_types_are_data_plane() {
+        assert_eq!(StreamType::ReverseProxy.plane(), Plane::Data);
+        assert_eq!(StreamType::ForwardProxy.plane(), Plane::Data);
+        assert_eq!(StreamType::Ctrl.plane(), Plane::Control);
     }
 
     // The JSON shapes are the contract; this pins them.
@@ -945,15 +1171,44 @@ mod tests {
             config_hash: ConfigHash(0xdead_beef),
             name: "Family".into(),
             transport: "wispers-connect".into(),
-            apps: vec![SharedApp {
-                id: "jf".into(),
-                name: "Jellyfin".into(),
-                kind: AppKind::Jellyfin,
-            }],
+            apps: vec![
+                SharedApp {
+                    id: "jf".into(),
+                    name: "Jellyfin".into(),
+                    kind: AppKind::Jellyfin,
+                    mode: AppProxyMode::ReverseProxy,
+                    start_url: None,
+                    proxied_origins: Vec::new(),
+                },
+                SharedApp {
+                    id: "dev".into(),
+                    name: "Dev".into(),
+                    kind: AppKind::Web,
+                    mode: AppProxyMode::ForwardProxy,
+                    start_url: Some("http://localhost:4200/".into()),
+                    proxied_origins: vec!["http://localhost:4200".into()],
+                },
+            ],
+            ca_certificates: Vec::new(),
         };
         let json = serde_json::to_value(&info).unwrap();
         assert_eq!(json["config_hash"], "00000000deadbeef");
         assert_eq!(json["apps"][0]["kind"], "jellyfin");
+        // Reverse-proxy apps carry no forward-proxy fields, and a share
+        // without CA certificates no empty list.
+        assert_eq!(
+            json["apps"][0],
+            serde_json::json!({
+                "id": "jf", "name": "Jellyfin", "kind": "jellyfin", "mode": "reverse-proxy"
+            })
+        );
+        assert_eq!(json["apps"][1]["mode"], "forward-proxy");
+        assert_eq!(json["apps"][1]["start_url"], "http://localhost:4200/");
+        assert_eq!(
+            json["apps"][1]["proxied_origins"],
+            serde_json::json!(["http://localhost:4200"])
+        );
+        assert!(json.get("ca_certificates").is_none());
         assert_eq!(
             serde_json::to_value(ShareChanged {
                 config_hash: ConfigHash(1)
@@ -965,12 +1220,75 @@ mod tests {
         let app: SharedApp =
             serde_json::from_str(r#"{"id":"x","name":"X","future_field":1}"#).unwrap();
         assert_eq!(app.kind, AppKind::Web);
+        // Without a mode, as from hosts that predate modes, it's reverse-proxy.
+        assert_eq!(app.mode, AppProxyMode::ReverseProxy);
         // An unknown kind reads as web: a host may add kinds before its guests.
         let app: SharedApp =
             serde_json::from_str(r#"{"id":"x","name":"X","kind":"plex"}"#).unwrap();
         assert_eq!(app.kind, AppKind::Web);
         // The kind on its own stays strict, for config files.
         assert!(serde_json::from_str::<AppKind>(r#""plex""#).is_err());
+        // An unknown mode is kept as unknown, for the guest to flag.
+        let app: SharedApp =
+            serde_json::from_str(r#"{"id":"x","name":"X","mode":"teleport"}"#).unwrap();
+        assert_eq!(app.mode, AppProxyMode::Unknown);
+
+        // A successful reply is an empty object, an unknown error still an error.
+        assert_eq!(
+            serde_json::to_value(ForwardProxyReply::default()).unwrap(),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            serde_json::to_value(ForwardProxyReply {
+                error: Some(ForwardProxyError::NotAllowed)
+            })
+            .unwrap(),
+            serde_json::json!({ "error": "not-allowed" })
+        );
+        let reply: ForwardProxyReply = serde_json::from_str(r#"{"error":"later"}"#).unwrap();
+        assert_eq!(reply.error, Some(ForwardProxyError::Unknown));
+    }
+
+    #[test]
+    fn origins_parse_and_normalise() {
+        let origin = |s: &str| s.parse::<Origin>().unwrap();
+        let o = origin("http://localhost:1234");
+        assert_eq!(
+            (o.host(), o.port(), o.is_https()),
+            ("localhost", 1234, false)
+        );
+        assert_eq!(o.to_string(), "http://localhost:1234");
+        // Default ports are implied and dropped, case is folded, a trailing
+        // slash is tolerated.
+        let o = origin("HTTPS://SSO.Internal:443/");
+        assert_eq!(
+            (o.host(), o.port(), o.is_https()),
+            ("sso.internal", 443, true)
+        );
+        assert_eq!(o.to_string(), "https://sso.internal");
+        assert_eq!(origin("http://a.example").port(), 80);
+        assert_eq!(origin("http://a.example:80"), origin("http://a.example"));
+        // IP literals, IPv6 in brackets.
+        assert_eq!(origin("http://127.0.0.1:8080").host(), "127.0.0.1");
+        assert_eq!(origin("https://[::1]:8443").host(), "[::1]");
+        assert_eq!(
+            origin("https://[::1]:8443").to_string(),
+            "https://[::1]:8443"
+        );
+
+        for bad in [
+            "localhost:1234",
+            "ftp://a.example",
+            "ws://a.example",
+            "http://a.example/path",
+            "http://a.example/?q",
+            "http://a.example/#f",
+            "http://user@a.example",
+            "http://",
+            "",
+        ] {
+            assert!(bad.parse::<Origin>().is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -1003,6 +1321,18 @@ mod tests {
         let mut rest = [0u8; 16];
         b.read_exact(&mut rest).await.unwrap();
         assert_eq!(&rest, b"GET / HTTP/1.1\r\n");
+
+        let (mut a, mut b) = tokio::io::duplex(1024);
+        open_forward_proxy_stream(&mut a, "sso.internal", 443)
+            .await
+            .unwrap();
+        b.read_exact(&mut first).await.unwrap();
+        assert_eq!(
+            FirstByte::from(first[0]),
+            FirstByte::Typed(StreamType::ForwardProxy)
+        );
+        let back: ForwardProxyPreamble = read_message(&mut b).await.unwrap();
+        assert_eq!((back.host.as_str(), back.port), ("sso.internal", 443));
 
         let (mut a, mut b) = tokio::io::duplex(1024);
         open_ctrl_stream(&mut a).await.unwrap();

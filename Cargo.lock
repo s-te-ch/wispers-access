@@ -7998,6 +7998,7 @@ dependencies = [
  "chrono",
  "clap",
  "daemonize",
+ "data-encoding",
  "dirs 5.0.1",
  "http-body-util",
  "hyper",
@@ -8025,6 +8026,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "url",
  "windows-sys 0.61.2",
  "wispers-access-wire",
  "wispers-connect",
@@ -8965,6 +8967,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
+ "url",
 ]
 
 [[package]]

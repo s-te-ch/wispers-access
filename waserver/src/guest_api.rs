@@ -4,7 +4,7 @@
 //! exception: after the request, it stays open and streams server-sent events
 //! until the guest node goes away.
 
-use crate::config::ShareConfig;
+use crate::config::{AppProxyMode, ShareConfig};
 use crate::protocol::{Peer, StreamContext};
 use crate::storage::{self, Redemption, TransportKind};
 use anyhow::Result;
@@ -21,7 +21,7 @@ use tokio::sync::broadcast;
 use tokio_stream::StreamExt;
 use tokio_stream::wrappers::{BroadcastStream, IntervalStream};
 use tracing::{debug, error as log_error, info, warn};
-use wire::{ActivationError, ConfigHash, ShareChanged, ShareInfo, SharedApp};
+use wire::{ActivationError, ConfigHash, Origin, ShareChanged, ShareInfo, SharedApp};
 use wispers_access_wire as wire;
 
 type BoxedBody = BoxBody<Bytes, std::io::Error>;
@@ -160,12 +160,25 @@ fn share_info(config: &ShareConfig, transport: TransportKind) -> ShareInfo {
         apps: config
             .apps
             .iter()
-            .map(|s| SharedApp {
-                id: s.id.clone(),
-                name: s.name.clone(),
-                kind: s.kind,
+            .map(|s| {
+                let (start_url, proxied_origins) = match &s.mode {
+                    AppProxyMode::ReverseProxy { .. } => (None, Vec::new()),
+                    AppProxyMode::ForwardProxy { start_url, origins } => (
+                        Some(start_url.clone()),
+                        origins.iter().map(Origin::to_string).collect(),
+                    ),
+                };
+                SharedApp {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                    kind: s.kind,
+                    mode: s.mode.wire(),
+                    start_url,
+                    proxied_origins,
+                }
             })
             .collect(),
+        ca_certificates: config.ca_certificates.clone(),
     }
 }
 
