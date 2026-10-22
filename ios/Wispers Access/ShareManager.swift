@@ -35,7 +35,7 @@ final class ShareManager {
 
     /// The SDK's forward proxy for the shares' forward-proxy apps, started at
     /// launch. A task, since starting it is async; sessions await it.
-    @ObservationIgnored let forwardProxy: Task<ForwardProxy, Error>?
+    @ObservationIgnored let forwardProxy: Task<CredentialRoutedForwardProxy, Error>?
 
     /// The shares currently open for browsing, switchable in-app. Lazy so its
     /// icon callback can capture `self` (to feed `icons`).
@@ -54,7 +54,7 @@ final class ShareManager {
         self.client = client
         self.proxy = client?.startPerAppProxy(requiredCookie: proxyAuth.requiredCookie)
         self.forwardProxy = client.map { client in
-            Task { try await client.startForwardProxy(port: 0) }
+            Task { try await client.startCredentialRoutedForwardProxy(port: 0) }
         }
         self.icons = icons ?? ShareIconStore()
         self.activity = activity ?? ShareActivityStore()

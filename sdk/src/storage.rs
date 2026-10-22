@@ -418,6 +418,25 @@ impl Row {
         Ok(())
     }
 
+    pub fn read_forward_proxy_port(&self) -> Result<Option<u16>> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let port = conn.query_row(
+            "SELECT forward_proxy_port FROM shares WHERE id = ?1",
+            [self.id],
+            |r| r.get::<_, Option<u16>>(0),
+        )?;
+        Ok(port)
+    }
+
+    pub fn write_forward_proxy_port(&self, port: u16) -> Result<()> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        conn.execute(
+            "UPDATE shares SET forward_proxy_port = ?2 WHERE id = ?1",
+            rusqlite::params![self.id, port],
+        )?;
+        Ok(())
+    }
+
     /// Deletes the share and its apps outright. Its secrets are the secret
     /// store's to delete.
     pub fn delete_row(&self) -> Result<()> {
@@ -511,6 +530,9 @@ fn migrations() -> Migrations<'static> {
              ALTER TABLE apps ADD COLUMN proxied_origins TEXT NOT NULL DEFAULT '[]';
              UPDATE shares SET config_hash = NULL;",
         ),
+        // v4 — the share's port on the desktop's forward proxy, kept so that
+        // the share's running browser profile still finds it after a restart.
+        M::up("ALTER TABLE shares ADD COLUMN forward_proxy_port INTEGER;"),
     ])
 }
 

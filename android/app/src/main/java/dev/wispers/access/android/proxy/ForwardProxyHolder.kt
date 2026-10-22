@@ -7,7 +7,7 @@ import androidx.webkit.ProxyController
 import androidx.webkit.WebViewFeature
 import dev.wispers.access.android.SdkHolder
 import dev.wispers.access.android.ShareManager
-import dev.wispers.access.sdk.ForwardProxy
+import dev.wispers.access.sdk.CredentialRoutedForwardProxy
 import dev.wispers.access.sdk.ProxyCredential
 import dev.wispers.access.sdk.ShareId
 import dev.wispers.access.sdk.SharedApp
@@ -39,7 +39,7 @@ class ForwardProxyHolder @Inject constructor(
     private val manager: ShareManager,
 ) {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
-    private val proxy = CompletableDeferred<ForwardProxy>()
+    private val proxy = CompletableDeferred<CredentialRoutedForwardProxy>()
 
     /** The `host:port`s the override sends to the proxy, null until first set. */
     private val routed = MutableStateFlow<Set<String>?>(null)
@@ -49,7 +49,7 @@ class ForwardProxyHolder @Inject constructor(
         val client = sdk.client ?: return
         scope.launch {
             val started = try {
-                client.startForwardProxy(0u)
+                client.startCredentialRoutedForwardProxy(0u)
             } catch (e: Exception) {
                 Log.e(TAG, "could not start the forward proxy", e)
                 proxy.completeExceptionally(e)

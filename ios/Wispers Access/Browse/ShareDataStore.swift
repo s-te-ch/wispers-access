@@ -15,7 +15,7 @@ enum ShareDataStore {
     /// Points the share's data store at the forward proxy, with the share's
     /// credential, for the hosts of the share's named origins only. A share
     /// without any goes direct, its loopback origins included.
-    static func route(_ store: WKWebsiteDataStore, for share: Share, through proxy: ForwardProxy) throws {
+    static func route(_ store: WKWebsiteDataStore, for share: Share, through proxy: CredentialRoutedForwardProxy) throws {
         let hosts = Set(
             share.apps
                 .flatMap { proxiedTargets(app: $0) ?? [] }

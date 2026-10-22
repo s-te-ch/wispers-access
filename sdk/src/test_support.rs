@@ -4,7 +4,7 @@
 
 use crate::guest_node::GuestNode;
 use crate::transports::{BoxFuture, ConnectionCheck, Stream, Transport, TransportError};
-use crate::{Client, ClientConfig, ForwardProxy, NoObserver, ShareId, SharedApp};
+use crate::{Client, ClientConfig, CredentialRoutedForwardProxy, NoObserver, ShareId, SharedApp};
 use data_encoding::BASE64;
 use hyper::server::conn::http1 as http1_server;
 use hyper_util::rt::TokioIo;
@@ -22,7 +22,7 @@ use wispers_access_wire as wire;
 pub struct Setup {
     data_dir: std::path::PathBuf,
     pub client: Client,
-    pub proxy: Arc<ForwardProxy>,
+    pub proxy: Arc<CredentialRoutedForwardProxy>,
     pub share: ShareId,
     /// The port of the [`echo_app`] behind the host node.
     pub app_port: u16,
@@ -99,7 +99,10 @@ impl Setup {
             share.clone(),
             Arc::new(OnceCell::new_with(Some(Arc::new(node)))),
         );
-        let proxy = client.start_forward_proxy(0).await.unwrap();
+        let proxy = client
+            .start_credential_routed_forward_proxy(0)
+            .await
+            .unwrap();
         Setup {
             data_dir,
             client,
@@ -213,7 +216,7 @@ impl Transport for FakeHost {
 
 /// An app that answers every request with its request line, whether it saw a
 /// `Proxy-Authorization` header, and its `Cookie` header (`-` if none).
-async fn echo_app() -> u16 {
+pub async fn echo_app() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     tokio::spawn(async move {

@@ -30,3 +30,19 @@ uuid = { version = "1", features = ["v4"] }
 wispers-access-wire = { path = "../wire" }
 wispers-connect = "0.17.0"
 iroh = "1.2"
+
+# Used to tell who is at the other end of a loopback connection (socket_owner).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+libproc = "0.14"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_Networking_WinSock",
+    "Win32_Security",
+    "Win32_System_Threading",
+] }

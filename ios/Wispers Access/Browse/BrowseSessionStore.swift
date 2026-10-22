@@ -48,7 +48,7 @@ final class BrowseSessionStore {
         _ app: SharedApp,
         proxy: PerAppProxy,
         auth: ProxyAuth,
-        forwardProxy: Task<ForwardProxy, Error>?
+        forwardProxy: Task<CredentialRoutedForwardProxy, Error>?
     ) -> BrowseSession {
         let key = SharedAppId(shareID: share.id, appID: app.id)
         let session: BrowseSession

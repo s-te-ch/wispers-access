@@ -20,6 +20,7 @@ mod loopback_forwarding;
 mod pairing;
 mod reverse_proxy;
 mod secrets;
+mod socket_owner;
 mod storage;
 #[cfg(test)]
 mod test_support;
@@ -454,13 +455,26 @@ impl Client {
         })
     }
 
+    /// Starts the loopback forward proxy for desktop clients, with a port per
+    /// share that only processes of this OS user may connect to (see
+    /// `forward_proxy::ShareSource::Fixed`). macOS, Linux and Windows only.
+    pub fn start_per_share_forward_proxy(&self) -> Arc<PerShareForwardProxy> {
+        Arc::new(PerShareForwardProxy {
+            client: self.clone(),
+            bound_ports: Mutex::new(HashMap::new()),
+        })
+    }
+
     /// Starts the loopback forward proxy for the shares' forward-proxy apps,
     /// on one port for all shares; `0` picks a free one. A share's webview
     /// uses it as its HTTP proxy for the share's proxied origins and answers
-    /// its 407 with the share's [`ForwardProxy::credential`]. For mobile client
+    /// its 407 with the share's [`CredentialRoutedForwardProxy::credential`]. For mobile client
     /// apps, which can give each share's webview a credential of its own.
-    pub async fn start_forward_proxy(&self, port: u16) -> Result<Arc<ForwardProxy>> {
-        let credentials = Arc::new(forward_proxy::Credentials::default());
+    pub async fn start_credential_routed_forward_proxy(
+        &self,
+        port: u16,
+    ) -> Result<Arc<CredentialRoutedForwardProxy>> {
+        let credential_issuer = Arc::new(forward_proxy::CredentialIssuer::default());
         let client = self.clone();
         self.on_runtime(async move {
             let (port, listeners) = loopback::bind_port(port)
@@ -468,18 +482,18 @@ impl Client {
                 .map_err(SdkError::host_node)?;
             let serve = {
                 let client = client.clone();
-                let credentials = credentials.clone();
+                let credential_issuer = credential_issuer.clone();
                 move |listener| {
                     client.inner.runtime.spawn(forward_proxy::accept_loop(
                         listener,
                         client.clone(),
-                        credentials.clone(),
+                        forward_proxy::ShareSource::Credential(credential_issuer.clone()),
                     ))
                 }
             };
-            Ok(Arc::new(ForwardProxy {
+            Ok(Arc::new(CredentialRoutedForwardProxy {
                 client,
-                credentials,
+                credential_issuer,
                 bound_port: Arc::new(BoundPort::serve(port, listeners, serve)),
                 loopback_forwarders: Default::default(),
             }))
@@ -849,16 +863,16 @@ impl Drop for PerAppProxy {
 /// apps on one port. Dropping it stops accepting connections, and the
 /// shares' credentials end with it.
 #[derive(uniffi::Object)]
-pub struct ForwardProxy {
+pub struct CredentialRoutedForwardProxy {
     client: Client,
-    credentials: Arc<forward_proxy::Credentials>,
+    credential_issuer: Arc<forward_proxy::CredentialIssuer>,
     bound_port: Arc<BoundPort>,
     /// Each share's loopback forwarder while it lives.
     loopback_forwarders: Arc<tokio::sync::Mutex<HashMap<ShareId, Weak<LoopbackForwarder>>>>,
 }
 
 #[uniffi::export]
-impl ForwardProxy {
+impl CredentialRoutedForwardProxy {
     pub fn port(&self) -> u16 {
         self.bound_port.port
     }
@@ -877,7 +891,7 @@ impl ForwardProxy {
         self.client.row(&share)?;
         Ok(ProxyCredential {
             username: share.to_string(),
-            password: self.credentials.password(&share),
+            password: self.credential_issuer.mint_password(&share),
         })
     }
 
@@ -985,13 +999,81 @@ impl ForwardProxy {
     }
 }
 
-impl Drop for ForwardProxy {
+impl Drop for CredentialRoutedForwardProxy {
     fn drop(&mut self) {
         self.bound_port.release();
     }
 }
 
-/// A share's Basic credential for the [`ForwardProxy`].
+/// A running loopback forward proxy with a port per share, for desktop
+/// clients (see [`Client::start_per_share_forward_proxy`]). Dropping it stops
+/// accepting connections.
+#[derive(uniffi::Object)]
+pub struct PerShareForwardProxy {
+    client: Client,
+    /// Each share's port, bound by whoever asks for it first.
+    bound_ports: Mutex<HashMap<ShareId, Arc<OnceCell<BoundPort>>>>,
+}
+
+#[uniffi::export]
+impl PerShareForwardProxy {
+    /// The share's port on `127.0.0.1`, for its browser profile's proxy
+    /// setting. Binds it on the share's first use: the remembered port if it
+    /// is still free, else a new one, which is then remembered. A caller that
+    /// started the share's browser with a different port must restart it.
+    pub async fn share_port(&self, share: ShareId) -> Result<u16> {
+        let cell = self
+            .bound_ports
+            .lock()
+            .expect("unpoisoned")
+            .entry(share.clone())
+            .or_default()
+            .clone();
+        let bound = cell
+            .get_or_try_init(|| async {
+                let row = self.client.row(&share)?;
+                let (port, listeners) = self
+                    .client
+                    .on_runtime(async move {
+                        if let Some(port) =
+                            row.read_forward_proxy_port().map_err(SdkError::storage)?
+                            && let Ok(bound) = loopback::bind_port(port).await
+                        {
+                            return Ok(bound);
+                        }
+                        let (port, listeners) =
+                            loopback::bind_port(0).await.map_err(SdkError::host_node)?;
+                        row.write_forward_proxy_port(port)
+                            .map_err(SdkError::storage)?;
+                        Ok((port, listeners))
+                    })
+                    .await?;
+                let client = self.client.clone();
+                let serve = move |listener| {
+                    client.inner.runtime.spawn(forward_proxy::accept_loop(
+                        listener,
+                        client.clone(),
+                        forward_proxy::ShareSource::Fixed(share.clone()),
+                    ))
+                };
+                Ok::<_, SdkError>(BoundPort::serve(port, listeners, serve))
+            })
+            .await?;
+        Ok(bound.port)
+    }
+}
+
+impl Drop for PerShareForwardProxy {
+    fn drop(&mut self) {
+        for cell in self.bound_ports.lock().expect("unpoisoned").values() {
+            if let Some(bound) = cell.get() {
+                bound.release();
+            }
+        }
+    }
+}
+
+/// A share's Basic credential for the [`CredentialRoutedForwardProxy`].
 #[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
 pub struct ProxyCredential {
     pub username: String,
@@ -999,7 +1081,7 @@ pub struct ProxyCredential {
 }
 
 /// A share's `http` loopback origins, forwarded to its host node while this
-/// lives (see [`ForwardProxy::forward_loopback_origins`]). Dropping the last
+/// lives (see [`CredentialRoutedForwardProxy::forward_loopback_origins`]). Dropping the last
 /// reference releases the ports.
 #[derive(uniffi::Object)]
 pub struct LoopbackForwarder {

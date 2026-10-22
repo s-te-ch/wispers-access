@@ -4,14 +4,15 @@
 //! A share's webview uses it as its HTTP proxy for the share's proxied origins
 //! (see `AppProxyMode` in the wire crate). Every connection the browser tunnels
 //! with CONNECT, and every request for a plain `http` URL, becomes one
-//! FORWARD_PROXY stream to the share's host node. One port serves all shares
-//! and the browser indicates its share by the share's credential.
+//! FORWARD_PROXY stream to the share's host node. How a port tells its share
+//! apart, and who may connect to it, depends on its [`ShareSource`].
 
 use crate::loopback::{
     BoxedBody, empty_body, error_response, gone_response, is_protocol_upgrade_request,
     means_browser_went_away, relay_upgraded_connection, strip_hop_by_hop_headers,
 };
 use crate::secrets::constant_time_eq;
+use crate::socket_owner;
 use crate::transports::{Stream, TransportError};
 use crate::{Client, Lookup, ShareId, SharedApp};
 use anyhow::{Context, Result};
@@ -34,16 +35,17 @@ use wispers_access_wire as wire;
 /// the challenges of a shared app.
 pub const REALM: &str = "Wispers Access";
 
-/// The shares' credentials. They live in memory only, as long as the proxy.
+/// Mints the shares' credentials and matches requests against them. They
+/// live in memory only, as long as the proxy.
 #[derive(Default)]
-pub struct Credentials {
+pub struct CredentialIssuer {
     /// Each share's password. The username is the share's ID.
     passwords: Mutex<HashMap<ShareId, String>>,
 }
 
-impl Credentials {
-    /// The share's password, minted on first use.
-    pub fn password(&self, share: &ShareId) -> String {
+impl CredentialIssuer {
+    /// Mints the share's password, or returns the one minted before.
+    pub fn mint_password(&self, share: &ShareId) -> String {
         self.passwords
             .lock()
             .expect("unpoisoned")
@@ -53,8 +55,8 @@ impl Credentials {
     }
 
     /// The share whose credential the request's `Proxy-Authorization` header
-    /// carries, if any.
-    fn share_of(&self, headers: &HeaderMap) -> Option<ShareId> {
+    /// carries, if it's one minted here.
+    fn match_presented_credentials(&self, headers: &HeaderMap) -> Option<ShareId> {
         let value = headers
             .get(hyper::header::PROXY_AUTHORIZATION)?
             .to_str()
@@ -73,15 +75,32 @@ impl Credentials {
     }
 }
 
-/// Serves every connection against the client's shares, until cancelled.
-pub async fn accept_loop(listener: TcpListener, client: Client, credentials: Arc<Credentials>) {
+/// Where a forward-proxy port's requests get their share from.
+#[derive(Clone)]
+pub enum ShareSource {
+    /// Each request is for the share whose credential it carries, one of
+    /// these: one port serves every share.
+    Credential(Arc<CredentialIssuer>),
+    /// Every request on the port is for this share. With no credential to
+    /// tell the share's browser apart, only processes of this OS user may
+    /// connect, and targets the share doesn't proxy are reached directly.
+    Fixed(ShareId),
+}
+
+/// Serves every connection to the port, until cancelled.
+pub async fn accept_loop(listener: TcpListener, client: Client, share_source: ShareSource) {
     loop {
         match listener.accept().await {
             Ok((tcp_stream, _)) => {
                 let client = client.clone();
-                let credentials = credentials.clone();
+                let share_source = share_source.clone();
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(tcp_stream, client, credentials).await {
+                    if let ShareSource::Fixed(share) = &share_source
+                        && !connected_by_this_user(&tcp_stream, share).await
+                    {
+                        return;
+                    }
+                    if let Err(e) = handle_connection(tcp_stream, client, share_source).await {
                         warn!(error = format!("{e:#}"), "connection error");
                     }
                 });
@@ -95,14 +114,35 @@ pub async fn accept_loop(listener: TcpListener, client: Client, credentials: Arc
     }
 }
 
+/// Whether the connection comes from a process of this OS user. A connection
+/// whose owner can't be told is refused as well.
+async fn connected_by_this_user(tcp_stream: &TcpStream, share: &ShareId) -> bool {
+    let (Ok(local), Ok(peer)) = (tcp_stream.local_addr(), tcp_stream.peer_addr()) else {
+        return false;
+    };
+    let owner = tokio::task::spawn_blocking(move || socket_owner::is_same_user(local, peer)).await;
+    match owner {
+        Ok(Ok(true)) => true,
+        Ok(Ok(false)) => {
+            warn!(%share, %peer, "refused a connection from another user");
+            false
+        }
+        Ok(Err(e)) => {
+            warn!(%share, %peer, error = %e, "refused a connection whose owner is unknown");
+            false
+        }
+        Err(_) => false,
+    }
+}
+
 async fn handle_connection(
     tcp_stream: TcpStream,
     client: Client,
-    credentials: Arc<Credentials>,
+    share_source: ShareSource,
 ) -> Result<()> {
     let tcp_stream = TokioIo::new(tcp_stream);
     let service = hyper::service::service_fn(move |req| {
-        handle_request(req, client.clone(), credentials.clone())
+        handle_request(req, client.clone(), share_source.clone())
     });
     let served = http1_server::Builder::new()
         .serve_connection(tcp_stream, service)
@@ -120,12 +160,18 @@ async fn handle_connection(
 async fn handle_request(
     req: hyper::Request<Incoming>,
     client: Client,
-    credentials: Arc<Credentials>,
+    share_source: ShareSource,
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
-    // Neither WebView nor WebKit sends the credential before it's challenged,
-    // so every new connection starts here.
-    let Some(share) = credentials.share_of(req.headers()) else {
-        return Ok(challenge());
+    let share = match &share_source {
+        // Neither WebView nor WebKit sends the credential before it's
+        // challenged, so every new connection starts here.
+        ShareSource::Credential(credential_issuer) => {
+            match credential_issuer.match_presented_credentials(req.headers()) {
+                Some(share) => share,
+                None => return Ok(challenge()),
+            }
+        }
+        ShareSource::Fixed(share) => share.clone(),
     };
     let Some((host, port)) = target(&req) else {
         // Not a request for a proxy. Close, so that nothing in its body can
@@ -141,8 +187,9 @@ async fn handle_request(
         return Ok(resp);
     };
 
-    // Only the share's own origins, checked here so a webview of one share
-    // can't reach another's, and nothing is opened for the rest.
+    // Only the share's own origins go to its host node, checked here so a
+    // webview of one share can't reach another's, and nothing is opened for
+    // the rest.
     let apps = match client.row(&share).map(|row| row.read_apps()) {
         Ok(Ok(apps)) => apps,
         Ok(Err(e)) => {
@@ -155,10 +202,15 @@ async fn handle_request(
         }
     };
     if !lists_origin(&apps, &host, port) {
-        return Ok(error_response(
-            StatusCode::FORBIDDEN,
-            &format!("{host}:{port} is not proxied by this share"),
-        ));
+        return Ok(match share_source {
+            // The share's browser profile goes through this port for
+            // everything, as the command line can't name the origins.
+            ShareSource::Fixed(_) => go_direct(req, &host, port).await,
+            ShareSource::Credential(_) => error_response(
+                StatusCode::FORBIDDEN,
+                &format!("{host}:{port} is not proxied by this share"),
+            ),
+        });
     }
 
     let node = match client.restore_guest_node(share.as_str()).await {
@@ -181,6 +233,34 @@ async fn handle_request(
     } else {
         forward(req, stream, node.label()).await
     })
+}
+
+/// Connects to a target the share doesn't proxy from this machine itself,
+/// so the share's browser profile works like any other browser outside the
+/// share's origins. It doesn't use the machine's own proxy, if any.
+async fn go_direct(
+    req: hyper::Request<Incoming>,
+    host: &str,
+    port: u16,
+) -> hyper::Response<BoxedBody> {
+    // Hosts are as in `Origin::host`: IPv6 literals in brackets.
+    let name = host.trim_start_matches('[').trim_end_matches(']');
+    let tcp = match TcpStream::connect((name, port)).await {
+        Ok(tcp) => tcp,
+        Err(e) => {
+            debug!(host, port, error = %e, "direct connection failed");
+            return error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("could not reach {host}:{port}"),
+            );
+        }
+    };
+    let stream: Stream = Box::new(tcp);
+    if req.method() == Method::CONNECT {
+        tunnel(req, stream)
+    } else {
+        forward(req, stream, "direct").await
+    }
 }
 
 /// The 407 that makes a webview send its share's credential.
@@ -369,7 +449,7 @@ fn unavailable_response() -> hyper::Response<BoxedBody> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::Setup;
+    use crate::test_support::{Setup, echo_app, send_to};
     use crate::transports::TerminalState;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -488,6 +568,41 @@ mod tests {
             .await;
         assert!(head.starts_with("http/1.1 410"), "{head}");
         assert_eq!(setup.streams(), 0);
+    }
+
+    #[tokio::test]
+    async fn same_user_ports_need_no_credential_and_send_other_targets_direct() {
+        let setup = Setup::new().await;
+        let proxy = setup.client.start_per_share_forward_proxy();
+        let port = proxy.share_port(setup.share.clone()).await.unwrap();
+        let connect =
+            |target: String| format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n");
+        let through_the_share = |mut tcp: TcpStream| async move {
+            tcp.write_all(b"GET /x HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            let mut response = String::new();
+            tcp.read_to_string(&mut response).await.unwrap();
+            response
+        };
+
+        // The share's origin, through its host node.
+        let (tcp, head) = send_to(port, &connect(format!("127.0.0.1:{}", setup.app_port))).await;
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert!(through_the_share(tcp).await.contains("GET /x"));
+        assert_eq!(setup.streams(), 1);
+
+        // Anything else, straight from this machine.
+        let elsewhere = echo_app().await;
+        let (tcp, head) = send_to(port, &connect(format!("127.0.0.1:{elsewhere}"))).await;
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert!(through_the_share(tcp).await.contains("GET /x"));
+        assert_eq!(setup.streams(), 1);
+
+        // The port outlives the proxy.
+        drop(proxy);
+        let proxy = setup.client.start_per_share_forward_proxy();
+        assert_eq!(proxy.share_port(setup.share.clone()).await.unwrap(), port);
     }
 
     #[test]

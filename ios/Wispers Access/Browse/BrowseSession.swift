@@ -37,7 +37,7 @@ final class BrowseSession: Identifiable {
     @ObservationIgnored private let app: SharedApp
     @ObservationIgnored private let proxy: PerAppProxy
     @ObservationIgnored private let auth: ProxyAuth
-    @ObservationIgnored private let forwardProxy: Task<ForwardProxy, Error>?
+    @ObservationIgnored private let forwardProxy: Task<CredentialRoutedForwardProxy, Error>?
     /// Holds the share's loopback ports while a forward-proxy app is open.
     @ObservationIgnored private var loopbackForwarder: LoopbackForwarder?
     @ObservationIgnored private let loadObserver = WebViewLoadObserver()
@@ -48,7 +48,7 @@ final class BrowseSession: Identifiable {
         app: SharedApp,
         proxy: PerAppProxy,
         auth: ProxyAuth,
-        forwardProxy: Task<ForwardProxy, Error>?,
+        forwardProxy: Task<CredentialRoutedForwardProxy, Error>?,
         onIcon: @escaping (SharedAppId, Data, Int) -> Void = { _, _, _ in }
     ) {
         self.key = SharedAppId(shareID: share.id, appID: app.id)
