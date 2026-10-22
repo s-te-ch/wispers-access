@@ -2,8 +2,10 @@
 
 mod activity;
 mod autostart;
+mod browsers;
 #[cfg(target_os = "macos")]
 mod menu;
+mod profiles;
 mod secrets;
 mod shares;
 #[cfg(not(target_os = "macos"))]
@@ -184,6 +186,8 @@ fn show_window_minimized(app: &tauri::AppHandle) {
 pub struct Desktop {
     client: Arc<sdk::Client>,
     proxy: Arc<sdk::HostRoutedProxy>,
+    forward_proxy: Arc<sdk::PerShareForwardProxy>,
+    profile_manager: Arc<profiles::ProfileManager>,
     activity: activity::ActivityStore,
 }
 
@@ -197,8 +201,9 @@ const TOKEN_LIFETIME: Duration = Duration::from_secs(60);
 
 impl Desktop {
     /// Opens the client on the app's data directory with the platform's
-    /// credential store, and starts the proxy. Everything the app does needs
-    /// both, so failing here fails the start.
+    /// credential store, and starts the proxies. Everything the app does
+    /// needs the client and the reverse proxy, so failing here fails the
+    /// start.
     ///
     /// Synchronous on purpose: the client owns a tokio runtime, and dropping
     /// one inside another runtime's `block_on` is a panic, which a failed
@@ -209,7 +214,7 @@ impl Desktop {
         let client = sdk::Client::new(sdk::ClientConfig {
             data_dir: data_dir.join("sdk").to_string_lossy().into_owned(),
             secrets: secrets.map(|store| Arc::new(store) as Arc<dyn sdk::SecretStore>),
-            observer: Some(Arc::new(ShareChangeRelay { app })),
+            observer: Some(Arc::new(ShareChangeRelay { app: app.clone() })),
         })?;
         let auth_mode = sdk::ProxyAuthMode::Pairing {
             token_lifetime: TOKEN_LIFETIME,
@@ -227,11 +232,76 @@ impl Desktop {
             }
         })?;
         tracing::info!("serving shares on wa.localhost:{}", proxy.port());
+        let forward_proxy = client.start_per_share_forward_proxy();
+        let profile_manager = Arc::new(profiles::ProfileManager::new(data_dir.join("profiles")));
+        tauri::async_runtime::spawn(reclaim_share_ports(
+            client.clone(),
+            forward_proxy.clone(),
+            profile_manager.clone(),
+            app,
+        ));
         Ok(Self {
             client,
             proxy,
+            forward_proxy,
+            profile_manager,
             activity: activity::ActivityStore::open(data_dir.join("share-activity.json")),
         })
+    }
+}
+
+/// If a browser using the share's profile is still running from before this app
+/// started (again), it will still be using previous set of ports. This function
+/// tries to bind to the same ports again, so the browser keeps working. If a
+/// share's port was taken in the meantime, it gets a new one and we restart the
+/// browser to use it.
+async fn reclaim_share_ports(
+    client: Arc<sdk::Client>,
+    forward_proxy: Arc<sdk::PerShareForwardProxy>,
+    profile_manager: Arc<profiles::ProfileManager>,
+    app: tauri::AppHandle,
+) {
+    let shares = match client.shares() {
+        Ok(shares) => shares,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list the shares to bind their ports");
+            return;
+        }
+    };
+    for share in shares {
+        if !share
+            .apps
+            .iter()
+            .any(|app| app.mode == sdk::AppProxyMode::ForwardProxy)
+        {
+            continue;
+        }
+        let port = match forward_proxy.share_port(share.id.clone()).await {
+            Ok(port) => port,
+            Err(e) => {
+                tracing::warn!(share = %share.label, error = %e, "could not bind the share's port");
+                continue;
+            }
+        };
+        let restart = {
+            let profile_manager = profile_manager.clone();
+            let id = share.id.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                profile_manager.restart_if_port_moved(&id, port)
+            })
+        };
+        match restart.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(share = %share.label, error = %e, "could not restart the share's profile")
+            }
+            Err(e) => tracing::warn!(error = %e, "restarting the share's profile panicked"),
+        }
+        if profile_manager.was_restarted(&share.id)
+            && let Err(e) = app.emit(shares::SHARES_CHANGED, ())
+        {
+            tracing::warn!(error = %e, "could not tell the UI about a restarted profile");
+        }
     }
 }
 

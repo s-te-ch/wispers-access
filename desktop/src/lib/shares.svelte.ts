@@ -57,8 +57,10 @@ export class ShareManager {
     await this.reload();
   }
 
-  openApp(shareId: string, appId: string) {
-    return api.openApp(shareId, appId);
+  async openApp(shareId: string, appId: string) {
+    await api.openApp(shareId, appId);
+    // Opening one of the share's apps clears its note about a restarted browser.
+    await this.reload();
   }
 
   /**

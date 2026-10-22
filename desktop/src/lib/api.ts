@@ -12,8 +12,11 @@ export interface SharedApp {
   id: string;
   name: string;
   kind: AppKind;
-  /** Where the browser finds the app, `<app>.<share>.wa.localhost:<port>`. */
-  host: string;
+  /** Where the browser finds the app: `http://<app>.<share>.wa.localhost:<port>/`
+   * for a reverse-proxy app, the start URL for a forward-proxy app. */
+  url: string;
+  /** The problem description if this device can't open the app. */
+  unavailable: string | null;
 }
 
 export interface Share {
@@ -26,6 +29,10 @@ export interface Share {
   state: ShareState;
   joinedAtMs: number;
   lastConnectedMs: number | null;
+  /** Whether this app, as it started, had to quit and restart the browser
+   * running the share's profile, because the share's port changed. Cleared
+   * once one of the share's apps is opened. */
+  profileRestarted: boolean;
 }
 
 /** Share availability: reachable or not, or the host node turned us away for good. */
@@ -43,7 +50,8 @@ export const shares = () => invoke<Share[]>("shares");
  * the status dot. */
 export const checkShare = (shareId: string) => invoke<ShareStatus>("check_share", { shareId });
 
-/** Opens an app in the system browser, pairing the browser on the way. */
+/** Opens an app: a reverse-proxy app in the system browser, pairing the
+ * browser on the way, a forward-proxy app in the share's browser profile. */
 export const openApp = (shareId: string, appId: string) =>
   invoke<void>("open_app", { shareId, appId });
 
