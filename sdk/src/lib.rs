@@ -421,21 +421,22 @@ impl Client {
             let (port, listeners) = loopback::bind_port(port)
                 .await
                 .map_err(SdkError::host_node)?;
-            let accept_loops = listeners
-                .into_iter()
-                .map(|listener| {
+            let serve = {
+                let client = client.clone();
+                let authenticator = authenticator.clone();
+                move |listener| {
                     client.inner.runtime.spawn(reverse_proxy::accept_loop(
                         listener,
                         client.clone(),
                         reverse_proxy::RouteSource::HostHeader,
                         Some(authenticator.clone()),
                     ))
-                })
-                .collect();
+                }
+            };
             Ok(Arc::new(HostRoutedProxy {
                 client,
                 authenticator,
-                bound_port: BoundPort { port, accept_loops },
+                bound_port: BoundPort::serve(port, listeners, serve),
             }))
         })
         .await
@@ -465,20 +466,21 @@ impl Client {
             let (port, listeners) = loopback::bind_port(port)
                 .await
                 .map_err(SdkError::host_node)?;
-            let accept_loops = listeners
-                .into_iter()
-                .map(|listener| {
+            let serve = {
+                let client = client.clone();
+                let credentials = credentials.clone();
+                move |listener| {
                     client.inner.runtime.spawn(forward_proxy::accept_loop(
                         listener,
                         client.clone(),
                         credentials.clone(),
                     ))
-                })
-                .collect();
+                }
+            };
             Ok(Arc::new(ForwardProxy {
                 client,
                 credentials,
-                bound_port: BoundPort { port, accept_loops },
+                bound_port: Arc::new(BoundPort::serve(port, listeners, serve)),
                 loopback_forwarders: Default::default(),
             }))
         })
@@ -757,6 +759,30 @@ impl PerAppProxy {
         let port = self.app_port(share, app_id).await?;
         Ok(format!("http://127.0.0.1:{port}"))
     }
+
+    /// Binds every app's port again, on the same port numbers. iOS reclaims
+    /// the listening sockets of a suspended app, so call this whenever the
+    /// app comes back to the foreground.
+    pub async fn rebind(&self) {
+        let cells: Vec<_> = self
+            .bound_ports
+            .lock()
+            .expect("unpoisoned")
+            .values()
+            .cloned()
+            .collect();
+        let _ = self
+            .client
+            .on_runtime(async move {
+                for cell in cells {
+                    if let Some(bound) = cell.get() {
+                        bound.rebind().await;
+                    }
+                }
+                Ok(())
+            })
+            .await;
+    }
 }
 
 impl PerAppProxy {
@@ -793,18 +819,16 @@ impl PerAppProxy {
                     .required_cookie
                     .clone()
                     .map(reverse_proxy::Authenticator::for_cookie);
-                let accept_loops = listeners
-                    .into_iter()
-                    .map(|listener| {
-                        self.client.inner.runtime.spawn(reverse_proxy::accept_loop(
-                            listener,
-                            self.client.clone(),
-                            route_source.clone(),
-                            authenticator.clone(),
-                        ))
-                    })
-                    .collect();
-                Ok::<_, SdkError>(BoundPort { port, accept_loops })
+                let client = self.client.clone();
+                let serve = move |listener| {
+                    client.inner.runtime.spawn(reverse_proxy::accept_loop(
+                        listener,
+                        client.clone(),
+                        route_source.clone(),
+                        authenticator.clone(),
+                    ))
+                };
+                Ok::<_, SdkError>(BoundPort::serve(port, listeners, serve))
             })
             .await?;
         Ok(bound.port)
@@ -828,7 +852,7 @@ impl Drop for PerAppProxy {
 pub struct ForwardProxy {
     client: Client,
     credentials: Arc<forward_proxy::Credentials>,
-    bound_port: BoundPort,
+    bound_port: Arc<BoundPort>,
     /// Each share's loopback forwarder while it lives.
     loopback_forwarders: Arc<tokio::sync::Mutex<HashMap<ShareId, Weak<LoopbackForwarder>>>>,
 }
@@ -855,6 +879,33 @@ impl ForwardProxy {
             username: share.to_string(),
             password: self.credentials.password(&share),
         })
+    }
+
+    /// Binds the proxy's port, and those of every live loopback forwarder,
+    /// again, on the same port numbers. iOS reclaims the listening sockets of a
+    /// suspended app, so call this whenever the app comes back to the
+    /// foreground.
+    pub async fn rebind(&self) {
+        let own = self.bound_port.clone();
+        let forwarders = self.loopback_forwarders.clone();
+        let _ = self
+            .client
+            .on_runtime(async move {
+                own.rebind().await;
+                let live: Vec<_> = forwarders
+                    .lock()
+                    .await
+                    .values()
+                    .filter_map(Weak::upgrade)
+                    .collect();
+                for forwarder in live {
+                    for bound in &forwarder.bound_ports {
+                        bound.rebind().await;
+                    }
+                }
+                Ok(())
+            })
+            .await;
     }
 
     /// For WebViews that don't send loopback hosts to a proxy (iOS), which
@@ -913,17 +964,18 @@ impl ForwardProxy {
                         port,
                         hosts,
                         cookie: forwarder.cookie.clone(),
+                        share_origins: loopback_forwarding::share_origins(&apps),
                     });
-                    let accept_loops = listeners
-                        .into_iter()
-                        .map(|listener| {
-                            client.inner.runtime.spawn(loopback_forwarding::accept_loop(
-                                listener,
-                                forwarded.clone(),
-                            ))
-                        })
-                        .collect();
-                    forwarder.bound_ports.push(BoundPort { port, accept_loops });
+                    let runtime = client.inner.runtime.clone();
+                    let serve = move |listener| {
+                        runtime.spawn(loopback_forwarding::accept_loop(
+                            listener,
+                            forwarded.clone(),
+                        ))
+                    };
+                    forwarder
+                        .bound_ports
+                        .push(BoundPort::serve(port, listeners, serve));
                 }
                 let forwarder = Arc::new(forwarder);
                 forwarders.insert(share, Arc::downgrade(&forwarder));
@@ -979,15 +1031,55 @@ impl Drop for LoopbackForwarder {
 }
 
 /// A port bound on each loopback address, with an accept loop per address.
+/// It remembers how to serve the port, so that it can bind it again.
 struct BoundPort {
     port: u16,
-    accept_loops: Vec<tokio::task::JoinHandle<()>>,
+    /// Starts the accept loop for one of the port's listeners.
+    serve: Box<dyn Fn(tokio::net::TcpListener) -> tokio::task::JoinHandle<()> + Send + Sync>,
+    accept_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl BoundPort {
+    /// Serves listeners just bound to `port`, one accept loop each.
+    fn serve(
+        port: u16,
+        listeners: Vec<tokio::net::TcpListener>,
+        serve: impl Fn(tokio::net::TcpListener) -> tokio::task::JoinHandle<()> + Send + Sync + 'static,
+    ) -> Self {
+        let accept_loops = listeners.into_iter().map(&serve).collect();
+        BoundPort {
+            port,
+            serve: Box::new(serve),
+            accept_loops: Mutex::new(accept_loops),
+        }
+    }
+
+    /// Binds the port again and serves the new listeners. If it can't be bound
+    /// again, it stays unserved, with a warning.
+    async fn rebind(&self) {
+        let old = std::mem::take(&mut *self.accept_loops.lock().expect("unpoisoned"));
+        for accept_loop in &old {
+            accept_loop.abort();
+        }
+        for accept_loop in old {
+            let _ = accept_loop.await;
+        }
+        match loopback::bind_port(self.port).await {
+            Ok((_, listeners)) => {
+                let new = listeners.into_iter().map(&self.serve).collect();
+                *self.accept_loops.lock().expect("unpoisoned") = new;
+            }
+            Err(e) => tracing::warn!(
+                port = self.port,
+                error = format!("{e:#}"),
+                "could not bind a loopback port again"
+            ),
+        }
+    }
+
     /// Stops the accept loops, which closes the port.
     fn release(&self) {
-        for accept_loop in &self.accept_loops {
+        for accept_loop in self.accept_loops.lock().expect("unpoisoned").iter() {
             accept_loop.abort();
         }
     }
@@ -1090,6 +1182,30 @@ mod tests {
 
         let proxy = client.start_per_app_proxy(None);
         assert_eq!(proxy.base_url(share, "echo".into()).await.unwrap(), first);
+        drop(proxy);
+        drop(client);
+        std::fs::remove_dir_all(data_dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn per_app_ports_are_served_again_after_a_rebind() {
+        let data_dir = scratch_dir();
+        let client = client_in(&data_dir);
+        let row = client.inner.db.new_row().unwrap();
+        row.write_deduped_hostname("rt").unwrap();
+        row.mark_complete().unwrap();
+        let share = row.share_id().unwrap();
+        let cookie = RequiredCookie {
+            name: "__wispers_proxy_auth".into(),
+            value: "s3cret".into(),
+        };
+        let proxy = client.start_per_app_proxy(Some(cookie));
+        let base = proxy.base_url(share, "echo".into()).await.unwrap();
+        let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+        proxy.rebind().await;
+        // Any answer will do: the port is listening.
+        let req = hyper::Request::get("/").body(String::new()).unwrap();
+        assert_eq!(send(port, req).await.status(), hyper::StatusCode::FORBIDDEN);
         drop(proxy);
         drop(client);
         std::fs::remove_dir_all(data_dir).unwrap();

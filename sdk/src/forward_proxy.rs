@@ -88,6 +88,8 @@ pub async fn accept_loop(listener: TcpListener, client: Client, credentials: Arc
             }
             Err(e) => {
                 warn!(error = format!("{e:#}"), "accept error");
+                // A reclaimed socket (iOS) fails every accept; don't spin.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     }

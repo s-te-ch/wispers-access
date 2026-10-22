@@ -52,6 +52,15 @@ pub fn loopback_ports(apps: &[SharedApp]) -> BTreeMap<u16, Vec<String>> {
     ports
 }
 
+/// Every origin of the share's forward-proxy apps (except those that don't parse).
+pub fn share_origins(apps: &[SharedApp]) -> Vec<Origin> {
+    apps.iter()
+        .filter(|app| app.mode == AppProxyMode::ForwardProxy)
+        .flat_map(|app| &app.proxied_origins)
+        .filter_map(|origin| origin.parse::<Origin>().ok())
+        .collect()
+}
+
 /// Serves every connection to one forwarded port, until cancelled.
 pub async fn accept_loop(listener: TcpListener, port: Arc<ForwardedPort>) {
     loop {
@@ -66,6 +75,8 @@ pub async fn accept_loop(listener: TcpListener, port: Arc<ForwardedPort>) {
             }
             Err(e) => {
                 warn!(error = format!("{e:#}"), "accept error");
+                // A reclaimed socket (iOS) fails every accept; don't spin.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
         }
     }
@@ -80,6 +91,9 @@ pub struct ForwardedPort {
     /// The hosts the share's loopback origins on this port name.
     pub hosts: Vec<String>,
     pub cookie: RequiredCookie,
+    /// All the share's origins, loopback or not, which let a request in
+    /// without the cookie (see `is_from_the_share`).
+    pub share_origins: Vec<Origin>,
 }
 
 async fn handle_connection(tcp_stream: TcpStream, port: Arc<ForwardedPort>) -> Result<()> {
@@ -103,7 +117,8 @@ async fn handle_request(
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
     // Only the share's own WebViews get past here, and the app itself never
     // sees the cookie.
-    if !port.cookie.is_presented_in(req.headers()) {
+    if !port.cookie.is_presented_in(req.headers()) && !is_from_the_share(&req, &port.share_origins)
+    {
         return Ok(error_response(StatusCode::FORBIDDEN, "forbidden"));
     }
     strip_cookies(req.headers_mut(), |name| name == port.cookie.name);
@@ -128,6 +143,20 @@ async fn handle_request(
         Err(resp) => return Ok(*resp),
     };
     Ok(forward(req, stream, node.label()).await)
+}
+
+/// Whether the request's `Origin` header names one of the share's origins.
+/// Browsers send cookies on a cross-origin `fetch` or XHR only if the page
+/// asks for it, so a page on one loopback origin calling an API on another
+/// gets here without the cookie. They do always send `Origin` then, and a web
+/// page can't set it. Other apps on the device can, so this lets in what the
+/// cookie alone would refuse to browsers, nothing more.
+fn is_from_the_share(req: &hyper::Request<Incoming>, share_origins: &[Origin]) -> bool {
+    req.headers()
+        .get(hyper::header::ORIGIN)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<Origin>().ok())
+        .is_some_and(|origin| share_origins.contains(&origin))
 }
 
 /// Which of the port's hosts the request is for: the one its `Host` header
@@ -205,6 +234,61 @@ mod tests {
         .await;
         assert!(head.starts_with("http/1.1 403"), "{head}");
         assert_eq!(setup.streams(), 0);
+    }
+
+    #[tokio::test]
+    async fn cross_origin_requests_from_the_share_need_no_cookie() {
+        let (page, api) = (free_port().await, free_port().await);
+        let setup = Setup::with_origins_redirected(vec![
+            format!("http://localhost:{page}"),
+            format!("http://localhost:{api}"),
+        ])
+        .await;
+        let _forwarder = setup
+            .proxy
+            .forward_loopback_origins(setup.share.clone())
+            .await
+            .unwrap();
+        let from = |origin: &str| {
+            format!(
+                "GET /api HTTP/1.1\r\nHost: localhost:{api}\r\nOrigin: {origin}\r\n\
+                 Connection: close\r\n\r\n"
+            )
+        };
+        let (_, head) = send_to(api, &from(&format!("http://localhost:{page}"))).await;
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        let (_, head) = send_to(api, &from("http://evil.example")).await;
+        assert!(head.starts_with("http/1.1 403"), "{head}");
+    }
+
+    #[tokio::test]
+    async fn rebinding_keeps_the_ports_served() {
+        let port = free_port().await;
+        let setup = Setup::with_origins_redirected(vec![format!("http://localhost:{port}")]).await;
+        let forwarder = setup
+            .proxy
+            .forward_loopback_origins(setup.share.clone())
+            .await
+            .unwrap();
+        setup.proxy.rebind().await;
+        let cookie = forwarder.cookie();
+        let (_, head) = send_to(
+            port,
+            &format!(
+                "GET / HTTP/1.1\r\nHost: localhost:{port}\r\nCookie: {}={}\r\n\
+                 Connection: close\r\n\r\n",
+                cookie.name, cookie.value
+            ),
+        )
+        .await;
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        // The proxy's own port is served again too.
+        let (_, head) = setup
+            .send(&format!(
+                "CONNECT localhost:{port} HTTP/1.1\r\nHost: localhost:{port}\r\n\r\n"
+            ))
+            .await;
+        assert!(head.starts_with("http/1.1 407"), "{head}");
     }
 
     #[tokio::test]

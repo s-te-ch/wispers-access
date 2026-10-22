@@ -137,10 +137,19 @@ final class ShareManager {
         backgroundedAt = Date()
     }
 
-    /// Back in the foreground, check network connection health.
+    /// Back in the foreground: serve the proxies' ports again, and check
+    /// network connection health.
     func cameToForeground() {
         guard let since = backgroundedAt else { return }
         backgroundedAt = nil
+        // iOS may have reclaimed the listening sockets while the app was
+        // suspended, after which the ports refuse every connection.
+        Task {
+            await proxy?.rebind()
+            if let forwardProxy = try? await forwardProxy?.value {
+                await forwardProxy.rebind()
+            }
+        }
         guard Date().timeIntervalSince(since) >= Self.checkAfterBackground, let client else { return }
         Task { await client.checkConnections() }
     }
