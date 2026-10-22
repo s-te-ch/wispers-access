@@ -43,13 +43,21 @@ final class BrowseSessionStore {
     /// Called by the browser as it appears, so navigating to an app is all it
     /// takes to start or resume it.
     @discardableResult
-    func open(_ share: Share, _ app: SharedApp, proxy: PerAppProxy, auth: ProxyAuth) -> BrowseSession {
+    func open(
+        _ share: Share,
+        _ app: SharedApp,
+        proxy: PerAppProxy,
+        auth: ProxyAuth,
+        forwardProxy: Task<ForwardProxy, Error>?
+    ) -> BrowseSession {
         let key = SharedAppId(shareID: share.id, appID: app.id)
         let session: BrowseSession
         if let existing = self.session(for: key) {
             session = existing
         } else {
-            session = BrowseSession(share: share, app: app, proxy: proxy, auth: auth, onIcon: onIcon)
+            session = BrowseSession(
+                share: share, app: app, proxy: proxy, auth: auth, forwardProxy: forwardProxy,
+                onIcon: onIcon)
             sessions.append(session)
             session.start()
         }

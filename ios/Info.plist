@@ -2,12 +2,17 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- The browsing tunnel serves each share over a loopback HTTP proxy the
-	     WKWebView loads from (http://127.0.0.1:<port>/). Permit cleartext to the
-	     loopback/local interfaces; everything else stays ATS-protected. -->
+	<!-- Reverse-proxy apps are served over a loopback HTTP proxy the WKWebView
+	     loads from (http://127.0.0.1:<port>/), which local networking covers.
+	     Forward-proxy apps open at their real URLs, and since they're typically
+	     intranet apps, they're often plain http apps with an internal name. So
+	     we need to allow that. However, the Wispers Access client app's own
+	     requests stay ATS-protected. -->
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
+		<true/>
+		<key>NSAllowsArbitraryLoadsInWebContent</key>
 		<true/>
 	</dict>
 	<!-- On iPad each open app gets a window of its own (see AppWindow), so

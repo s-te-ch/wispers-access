@@ -91,13 +91,18 @@ struct ShareDetailScreen: View {
             }
             ForEach(share.apps, id: \.id) { app in
                 let key = SharedAppId(shareID: shareID, appID: app.id)
+                let unavailable = whyUnavailable(app)
                 let card = AppCard(
                     app: app,
                     isLive: manager.browser.isWarm(key),
                     iconData: icons.iconData(for: key),
-                    opensWindow: BrowseRouter.opensWindows
+                    opensWindow: BrowseRouter.opensWindows && unavailable == nil,
+                    note: unavailable
                 )
-                if BrowseRouter.opensWindows {
+                if unavailable != nil {
+                    // Nothing to open; the card says why.
+                    card.opacity(0.6)
+                } else if BrowseRouter.opensWindows {
                     Button { openWindow(value: key) } label: { card }
                         .buttonStyle(.plain)
                 } else {

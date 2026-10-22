@@ -2,7 +2,7 @@ import SwiftUI
 import WispersAccessSdk
 
 /// One app's card: its icon (harvested while browsing, else a letter tile)
-/// and name. The thing the user taps.
+/// and name, with an optional note under it. The thing the user taps.
 struct AppCard: View {
     let app: SharedApp
     let isLive: Bool
@@ -10,6 +10,8 @@ struct AppCard: View {
     /// Whether the tap opens a window of its own (iPad) rather than pushing a
     /// screen, which the trailing mark says.
     var opensWindow = false
+    /// Shown under the name, such as why this device can't open the app.
+    var note: String? = nil
 
     var body: some View {
         HStack(spacing: 16) {
@@ -17,11 +19,20 @@ struct AppCard: View {
                 .overlay(alignment: .topTrailing) {
                     if isLive { liveBadge }
                 }
-            Text(name)
-                .font(.system(.title3, design: .serif).weight(.bold))
-                .foregroundStyle(AccessColor.onSurface)
-                .fixedSize(horizontal: false, vertical: true)
-                .multilineTextAlignment(.leading)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(.system(.title3, design: .serif).weight(.bold))
+                    .foregroundStyle(AccessColor.onSurface)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .multilineTextAlignment(.leading)
+                if let note {
+                    Text(note)
+                        .font(.footnote)
+                        .foregroundStyle(AccessColor.onSurfaceVariant)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .multilineTextAlignment(.leading)
+                }
+            }
             Spacer(minLength: 8)
             if opensWindow {
                 openPill

@@ -41,7 +41,11 @@ enum DemoMode {
                     name: entry.name,
                     label: entry.slug,
                     transport: .iroh,
-                    apps: entry.apps.map { SharedApp(id: $0.slug, name: $0.name, kind: .web) },
+                    apps: entry.apps.map {
+                        SharedApp(
+                            id: $0.slug, name: $0.name, kind: .web, mode: .reverseProxy,
+                            startUrl: nil, proxiedOrigins: [])
+                    },
                     state: .live,
                     joinedAt: now.addingTimeInterval(-entry.joined)
                 )

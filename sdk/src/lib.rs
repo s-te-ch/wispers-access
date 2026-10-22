@@ -65,7 +65,8 @@ pub enum SdkError {
     #[error("{0}")]
     ClientTooOld(String),
     /// A port that one of the share's loopback origins needs is taken, by
-    /// another share's open app or by another process. The message says which.
+    /// another share's open app or by another process. The message, a
+    /// sentence to show the user, says which.
     #[error("{0}")]
     PortInUse(String),
     #[error("{0}")]
@@ -893,11 +894,18 @@ impl ForwardProxy {
                             .map_err(SdkError::storage)?
                             .1;
                         return Err(SdkError::PortInUse(format!(
-                            "port {port} is in use by an app of the share {name}"
+                            "Port {port} is in use by an app of the share {name}."
                         )));
                     }
                     let (_, listeners) = loopback::bind_port(port).await.map_err(|e| {
-                        SdkError::PortInUse(format!("port {port} is in use on this device: {e:#}"))
+                        tracing::warn!(
+                            port,
+                            error = format!("{e:#}"),
+                            "could not bind a loopback port"
+                        );
+                        SdkError::PortInUse(format!(
+                            "Port {port} is already in use on this device."
+                        ))
                     })?;
                     let forwarded = Arc::new(loopback_forwarding::ForwardedPort {
                         client: client.clone(),
