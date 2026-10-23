@@ -44,6 +44,16 @@ pub async fn bind(share: &str, state: storage::StateDb) -> Result<HostNode> {
     let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
         .secret_key(iroh::SecretKey::from_bytes(&secret))
         .alpns(vec![wire::ALPN.to_vec()])
+        .transport_config(
+            // UDP segmentation offload is off for the same reason as in the
+            // SDK's `Iroh::bind`: iroh keeps sending GSO batches after the
+            // kernel refused them, which stalls large responses from a Linux
+            // host whose network card lacks TX checksum offload.
+            // https://github.com/n0-computer/iroh/issues/4555
+            iroh::endpoint::QuicTransportConfig::builder()
+                .enable_segmentation_offload(false)
+                .build(),
+        )
         .bind()
         .await
         .context("binding the iroh endpoint")?;
