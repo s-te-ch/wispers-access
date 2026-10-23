@@ -146,6 +146,17 @@ impl Iroh {
     pub async fn bind(secret: [u8; 32], host: iroh::EndpointId) -> Result<Self> {
         let endpoint = iroh::Endpoint::builder(iroh::endpoint::presets::N0)
             .secret_key(iroh::SecretKey::from_bytes(&secret))
+            .transport_config(
+                // UDP segmentation offload is off because iroh 1.2 through 1.4
+                // keep sending GSO batches on an open connection after the
+                // kernel has refused them (EIO on devices without TX checksum
+                // offload, which includes Android Wi-Fi drivers and Linux
+                // before 6.11). Every multi-packet send then stalls until the
+                // connection is replaced. https://github.com/n0-computer/iroh/issues/4555
+                iroh::endpoint::QuicTransportConfig::builder()
+                    .enable_segmentation_offload(false)
+                    .build(),
+            )
             .bind()
             .await
             .context("binding the iroh endpoint")?;
