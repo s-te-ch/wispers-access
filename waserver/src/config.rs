@@ -309,10 +309,13 @@ fn parse_forward_proxy(start_url: &str, origins: &[String]) -> Result<AppProxyMo
     let origins = origins
         .iter()
         .map(|o| {
-            o.parse::<Origin>()
-                .map_err(|e| format!("invalid origin {o:?} in proxied_origins: {e}"))
+            let origin = o
+                .parse::<Origin>()
+                .map_err(|e| format!("invalid origin {o:?} in proxied_origins: {e}"))?;
+            check_scheme(&origin)?;
+            Ok(origin)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, String>>()?;
     let url = url::Url::parse(start_url.trim()).map_err(|e| format!("invalid start_url: {e}"))?;
     let start_origin = Origin::of(&url).map_err(|e| format!("invalid start_url: {e}"))?;
     if !origins.contains(&start_origin) {
@@ -326,12 +329,25 @@ fn parse_forward_proxy(start_url: &str, origins: &[String]) -> Result<AppProxyMo
     })
 }
 
-/// Parses a `ca_certificates` entry, which must hold one PEM certificate that
-/// parses as X.509, and re-encodes it. Re-encoding keeps anything else pasted
-/// into the entry from reaching guest nodes, such as a key under a label the PEM
-/// parser skips.
+/// Checks the scheme rule for proxied origins: a loopback name takes `http`,
+/// every other name `https`. Guest nodes on some platforms can't open an
+/// origin that breaks this rule.
+fn check_scheme(origin: &Origin) -> Result<(), String> {
+    match (origin.is_loopback(), origin.is_https()) {
+        (true, true) => Err(format!(
+            "{origin} in proxied_origins must be http: iOS guest nodes can't reach https on a loopback name"
+        )),
+        (false, false) => Err(format!(
+            "{origin} in proxied_origins must be https: Android guest nodes block plain http to hosts other than localhost"
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// Guests install it on their devices, where a server's own certificate, pasted
+/// by mistake, would be trusted for that server alone, and only on some
+/// platforms.
 fn parse_ca_certificate(pem: &str) -> Result<String, String> {
-    use rustls::pki_types::CertificateDer;
     use rustls::pki_types::pem::{PemObject, SectionKind};
     let sections = <(SectionKind, Vec<u8>)>::pem_slice_iter(pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
@@ -342,9 +358,20 @@ fn parse_ca_certificate(pem: &str) -> Result<String, String> {
         [(kind, _)] => return Err(format!("expected a certificate, found {kind:?}")),
         _ => return Err("more than one PEM section, use one entry per certificate".to_owned()),
     };
-    rustls::RootCertStore::empty()
-        .add(CertificateDer::from(der.as_slice()))
+    let (rest, certificate) = x509_parser::parse_x509_certificate(der)
         .map_err(|e| format!("not an X.509 certificate: {e}"))?;
+    if !rest.is_empty() {
+        return Err("not an X.509 certificate: trailing data".to_owned());
+    }
+    let is_ca = certificate
+        .basic_constraints()
+        .map_err(|e| format!("not an X.509 certificate: {e}"))?
+        .is_some_and(|constraints| constraints.value.ca);
+    if !is_ca {
+        return Err("not a CA certificate: its basic constraints don't say CA, \
+                    so this may be a server's own certificate rather than its CA's"
+            .to_owned());
+    }
     Ok(pem_certificate(der))
 }
 
@@ -372,6 +399,7 @@ pub fn render_template(name: &str) -> String {
          # An app made of several origins (single sign-on, an API on its own host,\n\
          # a dev setup) can use forward-proxy mode instead: guest nodes browse it at its\n\
          # real URL, and requests to the listed origins go through the share.\n\
+         # Origins on localhost take http, all others https.\n\
          #\n# [[app]]\n# id = \"dev\"\n# mode = \"forward-proxy\"\n\
          # start_url = \"http://localhost:4200/\"\n\
          # proxied_origins = [\"http://localhost:4200\", \"http://localhost:1337\"]\n",
@@ -568,6 +596,32 @@ upstream = ":3000"
         ));
     }
 
+    #[test]
+    fn loopback_origins_take_http_and_named_ones_https() {
+        let app = |origins: &str| {
+            ShareConfig::parse(&format!(
+                "name = \"x\"\n[[app]]\nid = \"a\"\nmode = \"forward-proxy\"\n\
+                 start_url = \"http://localhost:4200/\"\n\
+                 proxied_origins = [\"http://localhost:4200\", {origins}]\n"
+            ))
+        };
+        assert!(app("\"http://127.0.0.1:1337\", \"https://sso.example.org\"").is_ok());
+        let reason = |origins: &str| match app(origins) {
+            Err(Error::InvalidApp { reason, .. }) => reason,
+            other => panic!("{origins}: {other:?}"),
+        };
+        assert!(
+            reason("\"https://localhost:8443\"")
+                .contains("https://localhost:8443 in proxied_origins must be http")
+        );
+        assert!(reason("\"https://[::1]:8443\"").contains("must be http"));
+        assert!(
+            reason("\"http://intranet.example.org\"")
+                .contains("http://intranet.example.org in proxied_origins must be https")
+        );
+        assert!(reason("\"http://192.168.1.10:8080\"").contains("must be https"));
+    }
+
     const TEST_CA: &str = "-----BEGIN CERTIFICATE-----
 MIIBjDCCATGgAwIBAgIUUrDdcVlMx/ZhY/3RH5YdY3c7suswCgYIKoZIzj0EAwIw
 GjEYMBYGA1UEAwwPV2lzcGVycyBUZXN0IENBMCAXDTI2MTAyMTA3MTkwMloYDzIx
@@ -578,6 +632,20 @@ FgQUcdx/0yv8Ebwn+sk6vjsERVq00ZQwHwYDVR0jBBgwFoAUcdx/0yv8Ebwn+sk6
 vjsERVq00ZQwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNJADBGAiEA4zZs
 vc2iX9+shlPG22U1caCAIsYtnzW20taM+Le/5RECIQDlZ0JplVXedwTeX3Rx5an+
 kkFn94FcM4MSTZeO+pCqSw==
+-----END CERTIFICATE-----
+";
+
+    /// A server's own certificate, for `app.internal` (`CA:FALSE`).
+    const SERVER_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----
+MIIBmzCCAUGgAwIBAgIUNekUhbU6QaFLS2kkIv+Ozz/V36wwCgYIKoZIzj0EAwIw
+FzEVMBMGA1UEAwwMYXBwLmludGVybmFsMCAXDTI2MTAyMzA5MzM0MloYDzIxMjYw
+OTI5MDkzMzQyWjAXMRUwEwYDVQQDDAxhcHAuaW50ZXJuYWwwWTATBgcqhkjOPQIB
+BggqhkjOPQMBBwNCAATX+3iIAh6XDLmaHuXcA3IldmagVHfyqydnuwVkmmTMnqoq
+xqa9/PQrCSiGmIrxYCDzLP9f4na0DCLs9oEgQXRzo2kwZzAdBgNVHQ4EFgQUU3Jh
+ZkvPrXD6gsuCtLFjNSNGie4wHwYDVR0jBBgwFoAUU3JhZkvPrXD6gsuCtLFjNSNG
+ie4wFwYDVR0RBBAwDoIMYXBwLmludGVybmFsMAwGA1UdEwEB/wQCMAAwCgYIKoZI
+zj0EAwIDSAAwRQIgaMP9Btas0cwOZQJxNvAETcILKvq3ewa50vB39vZCKQgCIQCh
+LmgiKMekczkYKWj8heM50uEnUsNDYlCkP926zkjP5g==
 -----END CERTIFICATE-----
 ";
 
@@ -619,6 +687,8 @@ kkFn94FcM4MSTZeO+pCqSw==
         assert!(why.contains("expected a certificate"), "{why}");
         let (_, why) = reason(&["-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"]);
         assert!(why.contains("not an X.509 certificate"), "{why}");
+        let (_, why) = reason(&[SERVER_CERTIFICATE]);
+        assert!(why.contains("not a CA certificate"), "{why}");
     }
 
     #[test]

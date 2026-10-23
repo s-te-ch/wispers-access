@@ -143,6 +143,10 @@ pub struct Share {
     pub transport: Transport,
     /// The apps as last fetched from the host node, in its order.
     pub apps: Vec<SharedApp>,
+    /// CA certificates for the share's `https` origins, one PEM certificate
+    /// each, as last fetched from the host node, for the guest's user to
+    /// install on the device.
+    pub ca_certificates: Vec<String>,
     pub state: ShareState,
     /// When this device joined.
     pub joined_at: std::time::SystemTime,

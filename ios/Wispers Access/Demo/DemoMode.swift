@@ -46,6 +46,7 @@ enum DemoMode {
                             id: $0.slug, name: $0.name, kind: .web, mode: .reverseProxy,
                             startUrl: nil, proxiedOrigins: [])
                     },
+                    caCertificates: [],
                     state: .live,
                     joinedAt: now.addingTimeInterval(-entry.joined)
                 )

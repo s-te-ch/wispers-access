@@ -368,9 +368,21 @@ impl Row {
             label,
             transport: self.read_transport_kind()?,
             apps: self.read_apps()?,
+            ca_certificates: self.read_ca_certificates()?,
             state,
             joined_at: self.read_joined_at()?,
         })
+    }
+
+    /// The share's CA certificates, as PEM, as last fetched.
+    pub fn read_ca_certificates(&self) -> Result<Vec<String>> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let json: String = conn.query_row(
+            "SELECT ca_certificates FROM shares WHERE id = ?1",
+            [self.id],
+            |r| r.get(0),
+        )?;
+        Ok(serde_json::from_str(&json)?)
     }
 
     pub fn read_terminal_state(&self) -> Result<Option<String>> {

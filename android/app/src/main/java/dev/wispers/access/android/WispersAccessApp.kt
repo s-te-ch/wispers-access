@@ -33,6 +33,9 @@ class WispersAccessApp : Application() {
     lateinit var forwardProxy: ForwardProxyHolder
 
     @Inject
+    lateinit var manager: ShareManager
+
+    @Inject
     lateinit var networkMonitor: NetworkMonitor
 
     @Inject
@@ -58,6 +61,9 @@ class WispersAccessApp : Application() {
                 observer = sdk,
             )
         )
+        // The roster's first load. The manager can't start it itself: it is
+        // created while this app is injected, before the client exists.
+        manager.reload()
         registerActivityLifecycleCallbacks(foregroundTracker)
         proxy.start()
         forwardProxy.start()

@@ -112,6 +112,7 @@ object DemoMode {
                     proxiedOrigins = emptyList(),
                 )
             },
+            caCertificates = emptyList(),
             state = ShareState.LIVE,
             joinedAt = now - joined,
         )
