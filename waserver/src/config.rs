@@ -16,8 +16,9 @@ pub struct ShareConfig {
     pub name: String,
     /// The shared apps, in the order found in the config file.
     pub apps: Vec<AppConfig>,
-    /// CA certificates for the share's `https` origins, one PEM certificate
-    /// each, re-encoded from the file.
+    /// Certificates for guests to trust for the share's `https` origins, a
+    /// CA's or a self-signed server's, one PEM certificate each, re-encoded
+    /// from the file.
     pub ca_certificates: Vec<String>,
     /// Legacy transport selection, used up to waserver 0.4, since moved to the
     /// state DB. If present here and in the state DB, newer versions of
@@ -344,10 +345,12 @@ fn check_scheme(origin: &Origin) -> Result<(), String> {
     }
 }
 
-/// Guests install it on their devices, where a server's own certificate, pasted
-/// by mistake, would be trusted for that server alone, and only on some
-/// platforms.
+/// Parses a `ca_certificates` entry, which must hold one PEM certificate that
+/// parses as X.509, and re-encodes it. Re-encoding keeps anything else pasted
+/// into the entry from reaching guest nodes, such as a key under a label the PEM
+/// parser skips.
 fn parse_ca_certificate(pem: &str) -> Result<String, String> {
+    use rustls::pki_types::CertificateDer;
     use rustls::pki_types::pem::{PemObject, SectionKind};
     let sections = <(SectionKind, Vec<u8>)>::pem_slice_iter(pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
@@ -358,20 +361,9 @@ fn parse_ca_certificate(pem: &str) -> Result<String, String> {
         [(kind, _)] => return Err(format!("expected a certificate, found {kind:?}")),
         _ => return Err("more than one PEM section, use one entry per certificate".to_owned()),
     };
-    let (rest, certificate) = x509_parser::parse_x509_certificate(der)
+    rustls::RootCertStore::empty()
+        .add(CertificateDer::from(der.as_slice()))
         .map_err(|e| format!("not an X.509 certificate: {e}"))?;
-    if !rest.is_empty() {
-        return Err("not an X.509 certificate: trailing data".to_owned());
-    }
-    let is_ca = certificate
-        .basic_constraints()
-        .map_err(|e| format!("not an X.509 certificate: {e}"))?
-        .is_some_and(|constraints| constraints.value.ca);
-    if !is_ca {
-        return Err("not a CA certificate: its basic constraints don't say CA, \
-                    so this may be a server's own certificate rather than its CA's"
-            .to_owned());
-    }
     Ok(pem_certificate(der))
 }
 
@@ -635,8 +627,8 @@ kkFn94FcM4MSTZeO+pCqSw==
 -----END CERTIFICATE-----
 ";
 
-    /// A server's own certificate, for `app.internal` (`CA:FALSE`).
-    const SERVER_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----
+    /// A self-signed server's certificate, for `app.internal` (`CA:FALSE`).
+    const SELF_SIGNED_SERVER: &str = "-----BEGIN CERTIFICATE-----
 MIIBmzCCAUGgAwIBAgIUNekUhbU6QaFLS2kkIv+Ozz/V36wwCgYIKoZIzj0EAwIw
 FzEVMBMGA1UEAwwMYXBwLmludGVybmFsMCAXDTI2MTAyMzA5MzM0MloYDzIxMjYw
 OTI5MDkzMzQyWjAXMRUwEwYDVQQDDAxhcHAuaW50ZXJuYWwwWTATBgcqhkjOPQIB
@@ -659,8 +651,8 @@ LmgiKMekczkYKWj8heM50uEnUsNDYlCkP926zkjP5g==
 
     #[test]
     fn ca_certificates_are_checked_and_re_encoded() {
-        let cfg = with_certificates(&[TEST_CA]).unwrap();
-        assert_eq!(cfg.ca_certificates, [TEST_CA]);
+        let cfg = with_certificates(&[TEST_CA, SELF_SIGNED_SERVER]).unwrap();
+        assert_eq!(cfg.ca_certificates, [TEST_CA, SELF_SIGNED_SERVER]);
         assert_ne!(
             cfg.config_hash(),
             ShareConfig::parse("name = \"x\"\n").unwrap().config_hash()
@@ -687,8 +679,6 @@ LmgiKMekczkYKWj8heM50uEnUsNDYlCkP926zkjP5g==
         assert!(why.contains("expected a certificate"), "{why}");
         let (_, why) = reason(&["-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"]);
         assert!(why.contains("not an X.509 certificate"), "{why}");
-        let (_, why) = reason(&[SERVER_CERTIFICATE]);
-        assert!(why.contains("not a CA certificate"), "{why}");
     }
 
     #[test]
