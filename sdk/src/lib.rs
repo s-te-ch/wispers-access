@@ -11,6 +11,7 @@
 
 uniffi::setup_scaffolding!();
 
+mod certificates;
 mod forward_proxy;
 mod guest_node;
 mod iroh_transport;
@@ -27,6 +28,9 @@ mod test_support;
 mod transports;
 mod wispers_connect_transport;
 
+pub use certificates::{CertificateDescription, CertificateKind};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub use certificates::{OriginTrust, TrustVerdict};
 pub use logging::{LogLevel, LogSink, install_log_sink};
 pub use loopback::RequiredCookie;
 pub use secrets::{FileSecretStore, SecretScope, SecretStore, SecretStoreError};
@@ -246,6 +250,14 @@ pub struct ProxiedTarget {
     /// Whether the host names the loopback (`localhost`, `127.0.0.1`,
     /// `[::1]`), which some WebViews never send to a proxy.
     pub loopback: bool,
+}
+
+/// What one of a share's certificates ([`Share::ca_certificates`]) can vouch
+/// for, for the text that offers to install it. `None` if it isn't an X.509
+/// certificate in PEM.
+#[uniffi::export]
+pub fn describe_certificate(pem: String) -> Option<CertificateDescription> {
+    certificates::describe(&pem)
 }
 
 #[uniffi::export]
@@ -543,6 +555,39 @@ impl Client {
                 guest_nodes: Mutex::new(HashMap::new()),
             }),
         }))
+    }
+
+    /// Whether this device trusts each `https` origin of the share's
+    /// forward-proxy apps, as the platform's verifier decides, by a TLS
+    /// handshake through a tunnel to each. For the desktop app, whose
+    /// browsers never tell it about a certificate error; the mobile apps
+    /// learn it from their webviews. Origins that don't parse are left out.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub async fn check_origin_trust(&self, share: ShareId) -> Result<Vec<OriginTrust>> {
+        let mut origins: Vec<wire::Origin> = Vec::new();
+        let apps = self.row(&share)?.read_apps().map_err(SdkError::storage)?;
+        let https_origins = apps
+            .iter()
+            .filter(|app| app.mode == AppProxyMode::ForwardProxy)
+            .flat_map(|app| &app.proxied_origins)
+            .filter_map(|origin| origin.parse::<wire::Origin>().ok())
+            .filter(|origin| origin.is_https());
+        for origin in https_origins {
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        let node = match self.restore_guest_node(share.as_str()).await? {
+            Lookup::Live(node) => node,
+            Lookup::Dead(state) => {
+                return Err(SdkError::HostNode(format!(
+                    "the share is {}",
+                    state.as_str()
+                )));
+            }
+            Lookup::Unknown => return Err(SdkError::NoSuchShare(share.to_string())),
+        };
+        certificates::check_origins(&node, origins).await
     }
 
     /// The local bookkeeping of any join, once the host node has answered:

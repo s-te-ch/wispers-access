@@ -140,7 +140,7 @@ async fn handle_request(
     let host = tunnel_host(&req, &port.hosts);
     let stream = match open_tunnel(&node, host, port.port).await {
         Ok(stream) => stream,
-        Err(resp) => return Ok(*resp),
+        Err(refusal) => return Ok(refusal.into_response(host, port.port)),
     };
     Ok(forward(req, stream, node.label()).await)
 }

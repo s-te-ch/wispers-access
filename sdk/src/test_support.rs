@@ -1,5 +1,5 @@
-//! What the forward proxy's tests and the loopback forwarding's tests share: a
-//! client with one forward-proxy share, a host node that serves its
+//! What the tests of everything that tunnels through a forward-proxy share
+//! use: a client with one forward-proxy share, a host node that serves its
 //! FORWARD_PROXY streams, and an app behind it.
 
 use crate::guest_node::GuestNode;
@@ -36,19 +36,35 @@ impl Setup {
     pub async fn new() -> Self {
         Self::build(
             |app_port| vec![format!("http://127.0.0.1:{app_port}")],
-            false,
+            |_| None,
         )
         .await
+    }
+
+    /// The app lists `origins`, and the host node connects each tunnel to
+    /// where it's meant to go.
+    pub async fn with_origins(origins: Vec<String>) -> Self {
+        Self::build(move |_| origins.clone(), |_| None).await
     }
 
     /// The app lists `origins`, and the host node connects each tunnel to the
     /// echo app wherever it's meant to go. For loopback origins, whose ports
     /// the test binds on this same machine.
     pub async fn with_origins_redirected(origins: Vec<String>) -> Self {
-        Self::build(move |_| origins.clone(), true).await
+        Self::build(move |_| origins.clone(), Some).await
     }
 
-    async fn build(origins: impl Fn(u16) -> Vec<String>, redirect: bool) -> Self {
+    /// The app lists `origins`, and the host node connects each tunnel to
+    /// `port` on this machine.
+    pub async fn with_origins_redirected_to(origins: Vec<String>, port: u16) -> Self {
+        Self::build(move |_| origins.clone(), move |_| Some(port)).await
+    }
+
+    /// Both closures are called with the echo app's port.
+    async fn build(
+        origins: impl Fn(u16) -> Vec<String>,
+        redirect_to: impl Fn(u16) -> Option<u16>,
+    ) -> Self {
         let data_dir = std::env::temp_dir().join(format!(
             "wispers-access-forward-proxy-{}",
             uuid::Uuid::new_v4()
@@ -91,7 +107,7 @@ impl Setup {
             Box::new(FakeHost {
                 streams: streams.clone(),
                 targets: targets.clone(),
-                redirect_to: redirect.then_some(app_port),
+                redirect_to: redirect_to(app_port),
             }),
             Arc::new(NoObserver),
         );

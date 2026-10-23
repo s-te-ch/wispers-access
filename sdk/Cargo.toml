@@ -27,6 +27,7 @@ tracing-subscriber = "0.3"
 uniffi = "0.32"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 uuid = { version = "1", features = ["v4"] }
+x509-parser = "0.18"
 wispers-access-wire = { path = "../wire" }
 wispers-connect = "0.17.0"
 iroh = "1.2"
@@ -34,6 +35,12 @@ iroh = "1.2"
 # Used to tell who is at the other end of a loopback connection (socket_owner).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# Needed for the TLS handshakes with which the desktop app checks whether the
+# device trusts a share's https origins (the certificates module).
+[target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
+rustls-platform-verifier = "0.7"
+tokio-rustls = "0.26"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 libproc = "0.14"

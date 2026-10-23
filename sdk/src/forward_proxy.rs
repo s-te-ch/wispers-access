@@ -13,7 +13,7 @@ use crate::loopback::{
 };
 use crate::secrets::constant_time_eq;
 use crate::socket_owner;
-use crate::transports::{Stream, TransportError};
+use crate::transports::{Stream, TerminalState, TransportError};
 use crate::{Client, Lookup, ShareId, SharedApp};
 use anyhow::{Context, Result};
 use data_encoding::BASE64;
@@ -226,7 +226,7 @@ async fn handle_request(
     };
     let stream = match open_tunnel(&node, &host, port).await {
         Ok(stream) => stream,
-        Err(resp) => return Ok(*resp),
+        Err(refusal) => return Ok(refusal.into_response(&host, port)),
     };
     Ok(if req.method() == Method::CONNECT {
         tunnel(req, stream)
@@ -303,23 +303,65 @@ fn lists_origin(apps: &[SharedApp], host: &str, port: u16) -> bool {
         .any(|origin| origin.host() == host && origin.port() == port)
 }
 
-/// A FORWARD_PROXY stream to `host:port` that the host node has connected, or
-/// the response telling the browser why not.
+/// Why a FORWARD_PROXY stream to `host:port` didn't get connected.
+#[derive(Debug)]
+pub(crate) enum TunnelRefusal {
+    /// The share was removed, or this guest node revoked.
+    Gone(TerminalState),
+    /// Our app list is stale: the host node no longer proxies the origin.
+    NotAllowed,
+    /// The host node couldn't connect to the origin.
+    Unreachable,
+    /// No stream, no answer, or an answer this SDK doesn't know.
+    Unavailable,
+}
+
+impl TunnelRefusal {
+    /// The response that tells the browser why it can't reach `host:port`.
+    pub(crate) fn into_response(self, host: &str, port: u16) -> hyper::Response<BoxedBody> {
+        match self {
+            TunnelRefusal::Gone(state) => gone_response(state),
+            TunnelRefusal::NotAllowed => error_response(
+                StatusCode::FORBIDDEN,
+                &format!("{host}:{port} is not proxied by this share"),
+            ),
+            TunnelRefusal::Unreachable => error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("the share's host could not reach {host}:{port}"),
+            ),
+            TunnelRefusal::Unavailable => unavailable_response(),
+        }
+    }
+}
+
+/// A reason shown next to the origin, so the origin is "it".
+impl std::fmt::Display for TunnelRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            TunnelRefusal::Gone(_) => "the share is no longer available",
+            TunnelRefusal::NotAllowed => "the share no longer proxies it",
+            TunnelRefusal::Unreachable => "the share's host could not reach it",
+            TunnelRefusal::Unavailable => "the share's host is unavailable",
+        })
+    }
+}
+
+/// A FORWARD_PROXY stream to `host:port` that the host node has connected.
 pub(crate) async fn open_tunnel(
     node: &crate::guest_node::GuestNode,
     host: &str,
     port: u16,
-) -> Result<Stream, Box<hyper::Response<BoxedBody>>> {
+) -> Result<Stream, TunnelRefusal> {
     let mut stream = match node.open_forward_proxy_stream(host, port).await {
         Ok(stream) => stream,
-        Err(TransportError::Terminal(state)) => return Err(Box::new(gone_response(state))),
+        Err(TransportError::Terminal(state)) => return Err(TunnelRefusal::Gone(state)),
         Err(TransportError::Transient(e)) => {
             warn!(
                 share = node.label(),
                 error = format!("{e:#}"),
                 "could not open a stream"
             );
-            return Err(Box::new(unavailable_response()));
+            return Err(TunnelRefusal::Unavailable);
         }
     };
     let reply: ForwardProxyReply = match wire::read_message(&mut stream).await {
@@ -330,23 +372,15 @@ pub(crate) async fn open_tunnel(
                 error = format!("{e:#}"),
                 "no answer to a FORWARD_PROXY stream"
             );
-            return Err(Box::new(unavailable_response()));
+            return Err(TunnelRefusal::Unavailable);
         }
     };
-    let refusal = match reply.error {
-        None => return Ok(stream),
-        // Our app list is stale: the host node no longer proxies the origin.
-        Some(ForwardProxyError::NotAllowed) => error_response(
-            StatusCode::FORBIDDEN,
-            &format!("{host}:{port} is not proxied by this share"),
-        ),
-        Some(ForwardProxyError::Unreachable) => error_response(
-            StatusCode::BAD_GATEWAY,
-            &format!("the share's host could not reach {host}:{port}"),
-        ),
-        Some(ForwardProxyError::Unknown) => unavailable_response(),
-    };
-    Err(Box::new(refusal))
+    match reply.error {
+        None => Ok(stream),
+        Some(ForwardProxyError::NotAllowed) => Err(TunnelRefusal::NotAllowed),
+        Some(ForwardProxyError::Unreachable) => Err(TunnelRefusal::Unreachable),
+        Some(ForwardProxyError::Unknown) => Err(TunnelRefusal::Unavailable),
+    }
 }
 
 /// Answers a CONNECT with 200 and relays the browser's connection over the
@@ -450,7 +484,6 @@ fn unavailable_response() -> hyper::Response<BoxedBody> {
 mod tests {
     use super::*;
     use crate::test_support::{Setup, echo_app, send_to};
-    use crate::transports::TerminalState;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
