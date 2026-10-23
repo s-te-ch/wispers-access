@@ -70,9 +70,13 @@ final class BrowseSession: Identifiable {
         self.webView.allowsBackForwardNavigationGestures = true
         self.webView.navigationDelegate = loadObserver
         loadObserver.onLoading = { [weak self] loading in self?.isLoading = loading }
-        // A page that never arrived (unreachable, refused by policy) would
-        // leave the web view blank; say why instead.
-        loadObserver.onFailed = { [weak self] error in self?.startupError = .other(error.localizedDescription) }
+        // A page that never arrived (unreachable, refused by policy, its
+        // certificate untrusted) would leave the web view blank; say why
+        // instead.
+        loadObserver.onFailed = { [weak self] error in
+            guard let self else { return }
+            startupError = isUntrustedCertificate(error) ? .untrustedCertificate : .other(error.localizedDescription)
+        }
         // Re-harvest on each page-finish: the best icon can appear late (manifest
         // fetch) or change as the user navigates within the site.
         loadObserver.onFinished = { [weak self] in
@@ -146,6 +150,25 @@ final class BrowseSession: Identifiable {
     }
 
 
+    /// Whether the page was refused for its certificate on one of the app's
+    /// `https` origins, whose certificates the share may come with. Elsewhere,
+    /// on a site the app merely links to, it's an error like any other.
+    private func isUntrustedCertificate(_ error: Error) -> Bool {
+        let error = error as NSError
+        let certificateErrors = [
+            NSURLErrorServerCertificateUntrusted, NSURLErrorServerCertificateHasUnknownRoot,
+            NSURLErrorServerCertificateHasBadDate, NSURLErrorServerCertificateNotYetValid,
+        ]
+        guard error.domain == NSURLErrorDomain, certificateErrors.contains(error.code),
+            let url = error.userInfo[NSURLErrorFailingURLErrorKey] as? URL,
+            let host = url.host()?.lowercased()
+        else { return false }
+        let port = url.port ?? 443
+        return (proxiedTargets(app: app) ?? []).contains { target in
+            target.https && target.host.trimmingCharacters(in: ["[", "]"]) == host && Int(target.port) == port
+        }
+    }
+
     func reload() { webView.reload() }
 
     /// Tears the session down; the web view is released with it. The app's
@@ -164,6 +187,9 @@ enum StartupError: Equatable {
     /// A port the share's loopback origins need is taken. The SDK's message
     /// says by whom.
     case portInUse(String)
+    /// The page was refused for its certificate, on one of the share's
+    /// origins: the share's CA, if it has one, isn't installed yet.
+    case untrustedCertificate
     case other(String)
 
     init(_ error: Error) {
@@ -188,7 +214,8 @@ enum BrowseError: LocalizedError {
     }
 }
 
-/// Reports `WKWebView` load state back to its `BrowseSession`.
+/// Reports `WKWebView` load state back to its `BrowseSession`. Only the page's
+/// own failures arrive here, not its requests'.
 final class WebViewLoadObserver: NSObject, WKNavigationDelegate {
     var onLoading: (Bool) -> Void = { _ in }
     var onFinished: () -> Void = {}

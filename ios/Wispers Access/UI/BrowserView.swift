@@ -26,6 +26,10 @@ struct BrowserView: View {
                 switch session.startupError {
                 case .portInUse(let message):
                     PortInUseView(message: message) { session.start() }
+                case .untrustedCertificate:
+                    if let share = manager.share(key.shareID) {
+                        CertificateNoticeView(share: share) { session.start() }
+                    }
                 case .other(let message):
                     ProxyErrorView(message: message) { session.start() }
                 case nil where session.isLoading:
