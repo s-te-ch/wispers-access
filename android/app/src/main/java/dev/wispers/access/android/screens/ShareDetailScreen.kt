@@ -50,6 +50,7 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.wispers.access.android.BrowseKey
+import dev.wispers.access.android.ShareCertificates
 import dev.wispers.access.android.ShareManager
 import dev.wispers.access.android.addToHomescreen
 import dev.wispers.access.android.demo.DemoMode
@@ -200,7 +201,17 @@ fun ShareDetailScreen(
                 Text("Remove $name?")
             },
             text = {
-                Text("This device's access will be removed on the host. You'll need a new invitation code to rejoin.")
+                // Apps can't remove a CA either, so say where the user can.
+                val installed = remember(share) {
+                    share?.let { ShareCertificates.of(it).any { c -> c.isInstalled() } } ?: false
+                }
+                val certificate = if (installed) {
+                    "\n\nThe certificate you installed for it stays on this device. To remove " +
+                        "it, search Settings for “Trusted credentials” and open the User tab."
+                } else {
+                    ""
+                }
+                Text("This device's access will be removed on the host. You'll need a new invitation code to rejoin.$certificate")
             },
             confirmButton = {
                 TextButton(

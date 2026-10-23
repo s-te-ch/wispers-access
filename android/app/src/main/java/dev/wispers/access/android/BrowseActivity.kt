@@ -3,13 +3,18 @@ package dev.wispers.access.android
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
+import android.net.http.SslError
 import android.os.Bundle
 import android.util.Base64
 import android.util.Log
 import android.view.ViewGroup
 import android.webkit.HttpAuthHandler
 import android.webkit.JavascriptInterface
+import android.webkit.SslErrorHandler
+import android.webkit.WebResourceRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -60,6 +65,7 @@ import dev.wispers.access.sdk.AppProxyMode
 import dev.wispers.access.sdk.Share
 import dev.wispers.access.sdk.ShareState
 import dev.wispers.access.sdk.SharedApp
+import dev.wispers.access.sdk.proxiedTargets
 import javax.inject.Inject
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -123,6 +129,9 @@ class BrowseActivity : ComponentActivity() {
                     unavailable != null -> UnavailableAppNotice(reason = unavailable)
                     else -> {
                         var target by remember { mutableStateOf<BrowseTarget?>(null) }
+                        var untrusted by remember { mutableStateOf(false) }
+                        // Once retried, the app starts over at its start URL.
+                        var retried by remember { mutableStateOf(false) }
                         LaunchedEffect(key) {
                             target = if (app?.mode == AppProxyMode.FORWARD_PROXY) {
                                 BrowseTarget(
@@ -136,12 +145,30 @@ class BrowseActivity : ComponentActivity() {
                         val ready = target
                         if (ready == null) {
                             ConnectingOverlay(Modifier.fillMaxSize())
+                        } else if (untrusted) {
+                            CertificateNotice(
+                                share = share,
+                                onRetry = {
+                                    untrusted = false
+                                    retried = true
+                                },
+                            )
                         } else {
                             BrowseWebViewScreen(
                                 target = ready,
-                                savedState = savedInstanceState,
+                                savedState = if (retried) null else savedInstanceState,
                                 onWebViewReady = { webView = it },
                                 onIconJson = { json -> handleHarvestedIcon(share, key, json) },
+                                onCertificateError = { url, mainFrame ->
+                                    // A page whose request failed may still work;
+                                    // only a certificate to install is worth
+                                    // replacing it for.
+                                    if (app != null && isHttpsOriginOf(app, url) &&
+                                        (mainFrame || ShareCertificates.anyMissing(share))
+                                    ) {
+                                        untrusted = true
+                                    }
+                                },
                             )
                         }
                     }
@@ -233,6 +260,20 @@ private data class BrowseTarget(
     val proxyParams: ForwardProxyHolder.WebViewProxyParams?,
 )
 
+/**
+ * Whether `url` is on one of a forward-proxy app's `https` origins, whose
+ * certificates the share may come with. Certificate errors elsewhere, on a
+ * site the app merely links to, are the WebView's to show.
+ */
+private fun isHttpsOriginOf(app: SharedApp, url: String): Boolean {
+    val uri = Uri.parse(url)
+    val host = uri.host?.lowercase() ?: return false
+    val port = if (uri.port != -1) uri.port else 443
+    return proxiedTargets(app).orEmpty().any { target ->
+        target.https && target.host.trim('[', ']') == host && target.port.toInt() == port
+    }
+}
+
 /** Full-screen terminal-share explanation with a way back into the app. */
 @Composable
 private fun TerminalShareNotice(state: ShareState) {
@@ -247,7 +288,7 @@ private fun UnavailableAppNotice(reason: String) {
 
 /** A full-screen notice instead of the app, with a way back into the app. */
 @Composable
-private fun Notice(content: @Composable () -> Unit) {
+internal fun Notice(content: @Composable () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     Box(
         modifier = Modifier
@@ -446,6 +487,8 @@ private fun BrowseWebViewScreen(
     savedState: Bundle?,
     onWebViewReady: (WebView) -> Unit,
     onIconJson: (String) -> Unit,
+    /** `mainFrame` if it was the page itself that failed, not one of its requests. */
+    onCertificateError: (url: String, mainFrame: Boolean) -> Unit,
 ) {
     var loading by remember { mutableStateOf(true) }
 
@@ -492,6 +535,23 @@ private fun BrowseWebViewScreen(
                     addJavascriptInterface(IconBridge(onIconJson), "WAIcon")
                     webChromeClient = WebChromeClient()
                     webViewClient = object : WebViewClient() {
+                        // Where the page itself is being loaded from, redirects
+                        // included, to tell its certificate errors from those
+                        // of its requests.
+                        private var mainFrameUrl: String? = null
+
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                            mainFrameUrl = url
+                        }
+
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView?,
+                            request: WebResourceRequest,
+                        ): Boolean {
+                            if (request.isForMainFrame) mainFrameUrl = request.url.toString()
+                            return false
+                        }
+
                         override fun onPageCommitVisible(view: WebView?, url: String?) {
                             loading = false
                         }
@@ -518,6 +578,17 @@ private fun BrowseWebViewScreen(
                             } else {
                                 super.onReceivedHttpAuthRequest(view, handler, host, realm)
                             }
+                        }
+
+                        // Cancelled, as by default, for pages and their
+                        // requests alike.
+                        override fun onReceivedSslError(
+                            view: WebView?,
+                            handler: SslErrorHandler,
+                            error: SslError,
+                        ) {
+                            handler.cancel()
+                            onCertificateError(error.url, error.url == mainFrameUrl)
                         }
                     }
                     if (savedState != null) {
