@@ -31,6 +31,9 @@ pub struct ShareView {
     /// running the share's profile, because the share's port changed.
     /// Cleared once one of the share's apps is opened.
     profile_restarted: bool,
+    /// Whether this app installed one of the share's certificates, which
+    /// leaving takes out again unless another share lists it.
+    installed_certificates: bool,
 }
 
 #[derive(Serialize)]
@@ -86,6 +89,10 @@ impl ShareView {
             joined_at_ms: epoch_ms(share.joined_at),
             last_connected_ms: desktop.activity.last_connected(&share.id),
             profile_restarted: desktop.profile_manager.was_restarted(&share.id),
+            installed_certificates: share
+                .ca_certificates
+                .iter()
+                .any(|pem| desktop.installed_certificates.contains(pem)),
         }
     }
 }
@@ -234,7 +241,8 @@ pub async fn join(desktop: State<'_, Desktop>, invite_code: String) -> Result<Sh
     Ok(ShareView::of(&share, &desktop))
 }
 
-/// Removes a share from this device, with its browser profiles.
+/// Removes a share from this device, with its browser profiles and the
+/// certificates this app installed for it alone.
 #[tauri::command]
 pub async fn leave(desktop: State<'_, Desktop>, share_id: String) -> Result<(), String> {
     let share = find(&desktop, &share_id)?;
@@ -245,19 +253,23 @@ pub async fn leave(desktop: State<'_, Desktop>, share_id: String) -> Result<(), 
         .map_err(|e| e.to_string())?;
     desktop.activity.remove(&share.id);
     let profile_manager = desktop.profile_manager.clone();
-    let id = share.id.clone();
-    match tauri::async_runtime::spawn_blocking(move || profile_manager.remove(&id)).await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => {
-            tracing::warn!(share = %share.label, error = %e, "could not remove the share's profiles")
+    let client = desktop.client.clone();
+    let installed = desktop.installed_certificates.clone();
+    let removed = tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = profile_manager.remove(&share.id) {
+            tracing::warn!(share = %share.label, error = %e, "could not remove the share's profiles");
         }
-        Err(e) => tracing::warn!(error = %e, "removing the share's profiles panicked"),
+        crate::certificates::remove_for_left_share(&client, &installed, &share);
+    })
+    .await;
+    if let Err(e) = removed {
+        tracing::warn!(error = %e, "removing the share's profiles or certificates panicked");
     }
     Ok(())
 }
 
 /// The share an ID from the UI names, or the message for one that is gone.
-fn find(desktop: &Desktop, share_id: &str) -> Result<sdk::Share, String> {
+pub(crate) fn find(desktop: &Desktop, share_id: &str) -> Result<sdk::Share, String> {
     desktop
         .client
         .share(share_id.to_owned())

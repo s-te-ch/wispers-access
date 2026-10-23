@@ -8,6 +8,7 @@
     isoDate,
   } from "$lib/format";
   import AppIcon from "./AppIcon.svelte";
+  import CertificateNotice from "./CertificateNotice.svelte";
   import ConfirmRemoveDialog from "./ConfirmRemoveDialog.svelte";
   import StatusDot from "./StatusDot.svelte";
 
@@ -58,6 +59,7 @@
       </p>
     </div>
   {:else}
+    <CertificateNotice {share} />
     <h2 class="mt-9 mb-3 text-[11px] font-semibold tracking-[0.16em] text-on-surface-variant uppercase">
       Apps
     </h2>

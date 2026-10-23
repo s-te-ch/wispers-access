@@ -3,6 +3,8 @@
 mod activity;
 mod autostart;
 mod browsers;
+mod certificate_store;
+mod certificates;
 #[cfg(target_os = "macos")]
 mod menu;
 mod profiles;
@@ -61,6 +63,9 @@ pub fn run() {
             shares::clipboard_invite,
             shares::join,
             shares::leave,
+            certificates::check_certificates,
+            certificates::install_certificates,
+            certificates::save_certificates,
             autostart::restart,
             window_policy,
             autostart::autostart_enabled,
@@ -189,6 +194,7 @@ pub struct Desktop {
     forward_proxy: Arc<sdk::PerShareForwardProxy>,
     profile_manager: Arc<profiles::ProfileManager>,
     activity: activity::ActivityStore,
+    installed_certificates: Arc<certificates::InstalledCertificates>,
 }
 
 /// The port the proxy asks for. Fixed so bookmarks keep working across
@@ -246,6 +252,9 @@ impl Desktop {
             forward_proxy,
             profile_manager,
             activity: activity::ActivityStore::open(data_dir.join("share-activity.json")),
+            installed_certificates: certificates::InstalledCertificates::open(
+                data_dir.join("installed-certificates.json"),
+            ),
         })
     }
 }
@@ -324,7 +333,11 @@ impl sdk::Observer for ShareChangeRelay {
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn,wispers_access_sdk=info,wispers_access_desktop_lib=info")
+        // The platform verifier logs every certificate it refuses as an
+        // error, and the share's pane checks untrusted origins on purpose.
+        EnvFilter::new(
+            "warn,wispers_access_sdk=info,wispers_access_desktop_lib=info,rustls_platform_verifier=off",
+        )
     });
     tracing_subscriber::fmt()
         .with_env_filter(filter)

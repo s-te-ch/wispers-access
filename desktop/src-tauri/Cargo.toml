@@ -30,14 +30,22 @@ tauri-plugin-updater = "2"
 tokio = { version = "1", features = ["time"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# Reads a share's PEM certificates for the user's certificate store.
+rustls-pki-types = "1"
 wispers-access-sdk = { path = "../../sdk" }
 sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 apple-native-keyring-store = { version = "1", features = ["keychain"] }
+# Installs a share's certificates in the login keychain (certificate_store).
+core-foundation = "0.10"
+security-framework = "3"
+security-framework-sys = "2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-native-keyring-store = "1"
+# Installs a share's certificates in the user's root store (certificate_store).
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus = "5"

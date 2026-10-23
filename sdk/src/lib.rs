@@ -577,6 +577,9 @@ impl Client {
                 origins.push(origin);
             }
         }
+        if origins.is_empty() {
+            return Ok(Vec::new());
+        }
         let node = match self.restore_guest_node(share.as_str()).await? {
             Lookup::Live(node) => node,
             Lookup::Dead(state) => {

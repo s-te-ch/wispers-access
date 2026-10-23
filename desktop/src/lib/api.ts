@@ -33,6 +33,9 @@ export interface Share {
    * running the share's profile, because the share's port changed. Cleared
    * once one of the share's apps is opened. */
   profileRestarted: boolean;
+  /** Whether this app installed one of the share's certificates, which
+   * leaving takes out again unless another share lists it. */
+  installedCertificates: boolean;
 }
 
 /** Share availability: reachable or not, or the host node turned us away for good. */
@@ -61,6 +64,35 @@ export const clipboardInvite = () => invoke<string | null>("clipboard_invite");
 export const join = (inviteCode: string) => invoke<Share>("join", { inviteCode });
 
 export const leave = (shareId: string) => invoke<void>("leave", { shareId });
+
+export interface Certificate {
+  subject: string;
+  kind: "ca" | "selfSignedServer" | "caSignedServer";
+  /** A server certificate's names. */
+  names: string[];
+  /** Whether installing it can help: a CA's, or a self-signed server's. */
+  installable: boolean;
+}
+
+export interface CertificateStatus {
+  /** The share's `https` origins whose certificate this device doesn't trust. */
+  untrustedOrigins: string[];
+  certificates: Certificate[];
+  /** Whether this app can install certificates here, or only save them. */
+  canInstall: boolean;
+}
+
+/** Checks the share's `https` origins by a TLS handshake through the share. */
+export const checkCertificates = (shareId: string) =>
+  invoke<CertificateStatus>("check_certificates", { shareId });
+
+/** Installs the share's installable certificates; the system asks the user. */
+export const installCertificates = (shareId: string) =>
+  invoke<void>("install_certificates", { shareId });
+
+/** Saves them into a folder the user picks: the folder, or null if cancelled. */
+export const saveCertificates = (shareId: string) =>
+  invoke<string | null>("save_certificates", { shareId });
 
 /** What closing the window does: hide it, with the app running on in the
  * menu bar or tray, or quit, where nothing else holds the app. Then the window
