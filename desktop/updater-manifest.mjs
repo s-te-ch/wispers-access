@@ -19,7 +19,9 @@ const metadata = JSON.parse(
 const version = metadata.packages.find((p) => p.name === "wispers-access-desktop").version;
 const bundleDir = join(metadata.target_directory, "release", "bundle");
 const config = JSON.parse(readFileSync(join(here, "src-tauri", "tauri.conf.json"), "utf8"));
-const productName = config.productName;
+// The base config names the staging app; release.mjs builds with the
+// production overlay, whose product name the bundles carry.
+const productName = JSON.parse(readFileSync(join(here, "src-tauri", "tauri.prod.conf.json"), "utf8")).productName;
 
 /** The bundle in the bundle directory's `dir` whose name ends in `suffix`.
  * `tauri build` leaves older builds' bundles in the same directory, and

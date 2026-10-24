@@ -40,7 +40,7 @@ fun CertificateNotice(share: Share, onRetry: () -> Unit) {
         onPauseOrDispose {}
     }
     val install = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) {}
-    val shareName = share.name.ifBlank { "this share" }
+    val shareName = if (share.name.isBlank()) "This share" else "“${share.name}”"
 
     Notice {
         Text("This app's certificate isn't trusted", style = MaterialTheme.typography.titleLarge)
@@ -48,13 +48,13 @@ fun CertificateNotice(share: Share, onRetry: () -> Unit) {
         when {
             next != null -> {
                 Text(
-                    "$shareName comes with the certificate of “${next.description.subject}”, " +
-                        "which this device needs to trust the app's servers.",
+                    "$shareName comes with a certificate of “${next.description.subject}”, " +
+                        "which you'll have to install to make this device trust the app's servers.",
                     style = MaterialTheme.typography.bodyLarge,
                 )
                 Text(
-                    "Once it's installed, whoever holds it could vouch for any website on " +
-                        "this device. Only install it if you trust $shareName.",
+                    "Only install it if you trust this share. Once it's installed, the " +
+                        "certificate's owner can make any website show up as secure.",
                     style = MaterialTheme.typography.bodyMedium,
                 )
                 if (ShareCertificates.installsDirectly) {
@@ -84,8 +84,8 @@ fun CertificateNotice(share: Share, onRetry: () -> Unit) {
                 }
             }
             certificates.any { it.installable } -> Text(
-                "$shareName's certificate is installed, but the app's servers still aren't " +
-                    "trusted. Whoever runs the share has to fix this.",
+                "The certificate is installed, but the app's servers still aren't trusted. " +
+                    "Whoever runs the share has to fix this.",
                 style = MaterialTheme.typography.bodyLarge,
             )
             certificates.isNotEmpty() -> Text(
@@ -94,7 +94,7 @@ fun CertificateNotice(share: Share, onRetry: () -> Unit) {
             )
             else -> Text(
                 "This device doesn't trust the certificate of the app's servers, and " +
-                    "$shareName has none to install. Whoever runs the share has to fix this.",
+                    "the share has none to install. Whoever runs the share has to fix this.",
                 style = MaterialTheme.typography.bodyLarge,
             )
         }
@@ -107,10 +107,10 @@ private fun notInstallable(certificate: ShareCertificates.Certificate, shareName
     val names = certificate.description.names.joinToString(", ").ifEmpty { certificate.description.subject }
     return when (certificate.description.kind) {
         CertificateKind.SELF_SIGNED_SERVER ->
-            "$shareName comes with the certificate of $names, which Android can't install: " +
-                "it installs only CA certificates. Whoever runs the share can make one."
+            "$shareName comes with a certificate for $names, which Android can't install, " +
+                "as it installs only CA certificates. Whoever runs the share can make one."
         else ->
-            "$shareName comes with the certificate of $names instead of its CA's. Whoever " +
+            "$shareName comes with a certificate for $names instead of its CA's. Whoever " +
                 "runs the share has to add the CA's certificate."
     }
 }

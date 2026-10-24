@@ -33,9 +33,9 @@ export interface Share {
    * running the share's profile, because the share's port changed. Cleared
    * once one of the share's apps is opened. */
   profileRestarted: boolean;
-  /** Whether this app installed one of the share's certificates, which
-   * leaving takes out again unless another share lists it. */
-  installedCertificates: boolean;
+  /** Whether leaving the share takes out a certificate this app installed
+   * for it, which has the system ask the user. */
+  removesCertificates: boolean;
 }
 
 /** Share availability: reachable or not, or the host node turned us away for good. */
@@ -72,6 +72,8 @@ export interface Certificate {
   names: string[];
   /** Whether installing it can help: a CA's, or a self-signed server's. */
   installable: boolean;
+  /** Whether this app installed it. */
+  installed: boolean;
 }
 
 export interface CertificateStatus {

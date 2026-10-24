@@ -17,6 +17,13 @@ npm run check          # svelte-check
 npm run tauri build    # the bundle under src-tauri/target/release/bundle
 ```
 
+Dev runs and plain builds are "Wispers Access (staging)", identifier
+`dev.wispers.access.desktop.stg` (`src-tauri/tauri.conf.json`), with their own
+data directory, Keychain items, single-instance lock and login item, so they
+can run next to an installed Wispers Access without touching its shares.
+Releases come only from `npm run release`, which builds with
+`src-tauri/tauri.prod.conf.json` for the real name and identifier.
+
 The native side of the app keeps one SDK client and one loopback proxy on
 `wa.localhost:11235` (or any free port if that one is taken) during the app's
 lifetime. Closing the window does not stop the app, it keeps running the proxy

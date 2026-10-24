@@ -25,7 +25,7 @@ struct CertificateNoticeView: View {
                     Text(notInstallable(other.description))
                 } else {
                     Text(
-                        "This device doesn't trust the certificate of the app's servers, and \(shareName) has none to install. Whoever runs the share has to fix this."
+                        "This device doesn't trust the certificate of the app's servers, and the share has none to install. Whoever runs the share has to fix this."
                     )
                 }
                 if let failure {
@@ -50,11 +50,11 @@ struct CertificateNoticeView: View {
 
     private func offer(_ ca: CertificateDescription) -> some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("\(shareName) comes with the certificate of “\(ca.subject)”, which this device needs to trust the app's servers.")
-            Text("Once it's installed and trusted, whoever holds it could vouch for any website on this device. Only install it if you trust \(shareName).")
+            Text("\(shareName) comes with a certificate of “\(ca.subject)”, which you'll have to install to make this device trust the app's servers.")
+            Text("Only install it if you trust this share. Once it's installed and trusted, the certificate's owner can make any website show up as secure.")
                 .font(.callout)
             Text(
-                "Safari asks whether to allow a configuration profile: tap Allow. Then, in Settings, tap “Profile Downloaded” and install it. Last, under General › About › Certificate Trust Settings, turn on full trust for “\(ca.subject)”. Then come back here."
+                "Safari will ask whether to allow a configuration profile. Tap Allow. Then, in Settings, tap “Profile Downloaded” and install it. Last, under General › About › Certificate Trust Settings, turn on full trust for “\(ca.subject)”. Then come back here."
             )
             .font(.callout)
             Button("Download Profile") { Task { await handOver() } }
@@ -83,11 +83,11 @@ struct CertificateNoticeView: View {
         let names = certificate.names.isEmpty ? certificate.subject : certificate.names.joined(separator: ", ")
         return switch certificate.kind {
         case .selfSignedServer:
-            "\(shareName) comes with the certificate of \(names), which this device can't trust: it trusts only CA certificates. Whoever runs the share can make one."
+            "\(shareName) comes with a certificate for \(names), which this device can't trust, as it fully trusts only CA certificates. Whoever runs the share can make one."
         default:
-            "\(shareName) comes with the certificate of \(names) instead of its CA's. Whoever runs the share has to add the CA's certificate."
+            "\(shareName) comes with a certificate for \(names) instead of its CA's. Whoever runs the share has to add the CA's certificate."
         }
     }
 
-    private var shareName: String { share.name.isEmpty ? "This share" : share.name }
+    private var shareName: String { share.name.isEmpty ? "This share" : "“\(share.name)”" }
 }

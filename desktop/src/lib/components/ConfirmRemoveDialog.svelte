@@ -1,5 +1,6 @@
 <script lang="ts">
   import type { Share } from "$lib/api";
+  import { certificateStoreAsks } from "$lib/platform";
 
   let {
     share,
@@ -29,8 +30,8 @@
   <p class="mt-3 text-[14px] leading-relaxed text-on-surface-variant">
     This device's access will be removed on the host. You'll need a new invitation code to
     rejoin.
-    {#if share.installedCertificates}
-      The certificate Wispers Access installed for it is removed too, unless another share uses it.
+    {#if share.removesCertificates}
+      This will also remove the share's certificate. {certificateStoreAsks}
     {/if}
   </p>
   <div class="mt-6 flex justify-end gap-2">

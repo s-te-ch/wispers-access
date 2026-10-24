@@ -39,6 +39,8 @@ function run(command, args) {
   execFileSync(command, args, { cwd: here, stdio: "inherit", shell: platform === "win32" });
 }
 
-run("npm", ["run", "tauri", "build"]);
+// The base config names the staging app, so that dev runs keep their own
+// data and Keychain items; only this build gets the real identifier and name.
+run("npm", ["run", "tauri", "--", "build", "--config", "src-tauri/tauri.prod.conf.json"]);
 if (platform === "darwin") run("./notarize-dmg.sh", []);
 run("node", ["updater-manifest.mjs"]);

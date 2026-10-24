@@ -35,9 +35,11 @@ struct CertificateView {
     kind: &'static str,
     /// A server certificate's names.
     names: Vec<String>,
-    /// Whether installing it can help: a CA's, or a self-signed server's,
-    /// which every desktop browser takes as a root of its own.
+    /// Whether installing it can help (see `is_installable`).
     installable: bool,
+    /// Whether this app installed it. One installed some other way doesn't
+    /// count, and installing it again does no harm.
+    installed: bool,
 }
 
 /// Checks each of the share's `https` origins by a TLS handshake through the
@@ -63,27 +65,38 @@ pub async fn check_certificates(
         certificates: share
             .ca_certificates
             .iter()
-            .filter_map(|pem| sdk::describe_certificate(pem.clone()))
-            .map(CertificateView::of)
+            .filter_map(|pem| {
+                let description = sdk::describe_certificate(pem.clone())?;
+                Some(CertificateView::of(
+                    description,
+                    desktop.installed_certificates.contains(pem),
+                ))
+            })
             .collect(),
         can_install: certificate_store::CAN_INSTALL,
     })
 }
 
 impl CertificateView {
-    fn of(description: sdk::CertificateDescription) -> Self {
-        let (kind, installable) = match description.kind {
-            sdk::CertificateKind::Ca => ("ca", true),
-            sdk::CertificateKind::SelfSignedServer => ("selfSignedServer", true),
-            sdk::CertificateKind::CaSignedServer => ("caSignedServer", false),
-        };
+    fn of(description: sdk::CertificateDescription, installed: bool) -> Self {
         Self {
+            installable: is_installable(&description.kind),
+            kind: match description.kind {
+                sdk::CertificateKind::Ca => "ca",
+                sdk::CertificateKind::SelfSignedServer => "selfSignedServer",
+                sdk::CertificateKind::CaSignedServer => "caSignedServer",
+            },
             subject: description.subject,
-            kind,
             names: description.names,
-            installable,
+            installed,
         }
     }
+}
+
+/// A CA's certificate, or a self-signed server's, which every desktop browser
+/// takes as a root of its own.
+fn is_installable(kind: &sdk::CertificateKind) -> bool {
+    !matches!(kind, sdk::CertificateKind::CaSignedServer)
 }
 
 /// Installs the share's installable certificates in the user's store. The
@@ -138,20 +151,14 @@ pub fn remove_for_left_share(
     installed: &InstalledCertificates,
     left: &sdk::Share,
 ) {
-    let still_listed: BTreeSet<String> = match client.shares() {
-        Ok(shares) => shares
-            .into_iter()
-            .flat_map(|share| share.ca_certificates)
-            .collect(),
+    let shares = match client.shares() {
+        Ok(shares) => shares,
         Err(e) => {
             tracing::warn!(error = %e, "could not read the shares, keeping their certificates");
             return;
         }
     };
-    for pem in &left.ca_certificates {
-        if !installed.contains(pem) || still_listed.contains(pem) {
-            continue;
-        }
+    for pem in removed_on_leave(installed, left, &shares) {
         match der(pem).and_then(|der| certificate_store::remove(&der).map_err(|e| format!("{e:#}")))
         {
             Ok(()) => installed.remove(pem),
@@ -162,6 +169,26 @@ pub fn remove_for_left_share(
     }
 }
 
+/// The certificates leaving `share` takes out, which are those this app
+/// installed for it that none of the other `shares` lists. The remove dialog
+/// announces them, as removing has the system ask the user.
+pub fn removed_on_leave<'a>(
+    installed: &InstalledCertificates,
+    share: &'a sdk::Share,
+    shares: &[sdk::Share],
+) -> Vec<&'a String> {
+    share
+        .ca_certificates
+        .iter()
+        .filter(|pem| installed.contains(pem))
+        .filter(|pem| {
+            !shares
+                .iter()
+                .any(|other| other.id != share.id && other.ca_certificates.contains(pem))
+        })
+        .collect()
+}
+
 /// The share's certificates that installing can help with.
 fn installable(share: &sdk::Share) -> Vec<String> {
     share
@@ -169,7 +196,7 @@ fn installable(share: &sdk::Share) -> Vec<String> {
         .iter()
         .filter(|pem| {
             sdk::describe_certificate((*pem).clone())
-                .is_some_and(|description| CertificateView::of(description).installable)
+                .is_some_and(|description| is_installable(&description.kind))
         })
         .cloned()
         .collect()

@@ -5,6 +5,7 @@
   // shows the share.
   import * as api from "$lib/api";
   import type { CertificateStatus, Share } from "$lib/api";
+  import { certificateStoreAsks } from "$lib/platform";
 
   let { share }: { share: Share } = $props();
 
@@ -12,28 +13,35 @@
   let busy = $state(false);
   let error = $state<string | null>(null);
   let savedTo = $state<string | null>(null);
-  let installed = $state(false);
 
-  const name = $derived(share.name || "This share");
-  const installable = $derived(status?.certificates.find((c) => c.installable) ?? null);
+  const name = $derived(share.name ? `“${share.name}”` : "This share");
+  const installable = $derived(
+    status?.certificates.find((c) => c.installable && !c.installed) ?? null,
+  );
+  const installed = $derived(status?.certificates.some((c) => c.installed) ?? false);
   const other = $derived(status?.certificates.find((c) => !c.installable) ?? null);
-  const askedBy = navigator.userAgent.includes("Mac")
-    ? "macOS asks for your password."
-    : "Windows asks you to confirm.";
+  // Every origin listed is https, so the scheme says nothing.
+  const untrusted = $derived(
+    (status?.untrustedOrigins ?? []).map((origin) => origin.replace(/^https:\/\//, "")).join(", "),
+  );
+  const isOrAre = $derived(status?.untrustedOrigins.length === 1 ? "isn't" : "aren't");
+
+  // The list reloads hand over a new `share` object, for one whenever an app
+  // opens, so the check follows the id and not the object.
+  const shareId = $derived(share.id);
 
   $effect(() => {
-    const id = share.id;
+    const id = shareId;
     status = null;
     error = null;
     savedTo = null;
-    installed = false;
     void check(id);
   });
 
   async function check(id: string) {
     try {
       const checked = await api.checkCertificates(id);
-      if (id === share.id) status = checked;
+      if (id === shareId) status = checked;
     } catch (e) {
       console.warn(`checking share ${id}'s certificates failed`, e);
     }
@@ -44,7 +52,6 @@
     error = null;
     try {
       await api.installCertificates(share.id);
-      installed = true;
       await check(share.id);
     } catch (e) {
       error = String(e) === "cancelled" ? null : String(e);
@@ -67,26 +74,22 @@
   <div class="mt-8 rounded-2xl bg-info-card p-4">
     <h2 class="font-semibold">This share's apps need a certificate</h2>
     <div class="mt-1 flex flex-col gap-2 text-[14px] leading-relaxed text-on-surface-variant">
-      {#if installed}
-        <p>
-          The certificate is installed, but {status.untrustedOrigins.join(", ")} still isn't trusted.
-          Whoever runs the share has to fix this.
-        </p>
-      {:else if installable}
+      {#if installable}
         {#if installable.kind === "ca"}
           <p>
-            {name} comes with the certificate of “{installable.subject}”, which this device needs to
-            trust the apps' servers. Once it's installed, whoever holds it could vouch for any website
-            on this device. Only install it if you trust {name}.
+            {name} comes with a certificate of “{installable.subject}”, which you'll have to install
+            to make this device trust the apps' servers. Only install it if you trust this share. Once
+            it's installed, the certificate's owner can make any website show up as secure.
           </p>
         {:else}
           <p>
-            {name} comes with the certificate of {installable.names.join(", ") || installable.subject},
-            which this device needs to trust that server. It vouches for nothing else.
+            {name} comes with a certificate for {installable.names.join(", ") ||
+              installable.subject}, which you'll have to install to make this device trust that
+            server. It vouches for nothing else.
           </p>
         {/if}
         {#if status.canInstall}
-          <p>{askedBy} Browsers already open may need restarting to trust it.</p>
+          <p>{certificateStoreAsks} Browsers already open may need restarting.</p>
           <div>
             <button
               type="button"
@@ -115,14 +118,19 @@
             <p class="select-text">Saved to {savedTo}.</p>
           {/if}
         {/if}
+      {:else if installed}
+        <p>
+          The certificate is installed, but {untrusted} still {isOrAre} trusted. Whoever runs the
+          share has to fix this.
+        </p>
       {:else if other}
         <p>
-          {name} comes with the certificate of {other.names.join(", ") || other.subject} instead of its
+          {name} comes with a certificate for {other.names.join(", ") || other.subject} instead of its
           CA's. Whoever runs the share has to add the CA's certificate.
         </p>
       {:else}
         <p>
-          This device doesn't trust the certificate of {status.untrustedOrigins.join(", ")}, and {name}
+          This device doesn't trust the certificate of {untrusted}, and the share
           has none to install. Whoever runs the share has to fix this.
         </p>
       {/if}

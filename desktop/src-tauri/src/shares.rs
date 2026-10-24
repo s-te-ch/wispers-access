@@ -2,6 +2,7 @@
 
 use crate::Desktop;
 use crate::browsers::Browser;
+use crate::certificates::removed_on_leave;
 use serde::Serialize;
 use std::time::{Duration, SystemTime};
 use tauri::State;
@@ -31,9 +32,9 @@ pub struct ShareView {
     /// running the share's profile, because the share's port changed.
     /// Cleared once one of the share's apps is opened.
     profile_restarted: bool,
-    /// Whether this app installed one of the share's certificates, which
-    /// leaving takes out again unless another share lists it.
-    installed_certificates: bool,
+    /// Whether leaving the share takes out a certificate this app installed
+    /// for it, which has the system ask the user.
+    removes_certificates: bool,
 }
 
 #[derive(Serialize)]
@@ -57,12 +58,13 @@ pub fn shares(desktop: State<Desktop>) -> Result<Vec<ShareView>, String> {
     let shares = desktop.client.shares().map_err(|e| e.to_string())?;
     Ok(shares
         .iter()
-        .map(|share| ShareView::of(share, &desktop))
+        .map(|share| ShareView::of(share, &shares, &desktop))
         .collect())
 }
 
 impl ShareView {
-    fn of(share: &sdk::Share, desktop: &Desktop) -> Self {
+    /// `shares` are all joined shares, `share` among them.
+    fn of(share: &sdk::Share, shares: &[sdk::Share], desktop: &Desktop) -> Self {
         let port = desktop.proxy.port();
         Self {
             id: share.id.to_string(),
@@ -89,10 +91,8 @@ impl ShareView {
             joined_at_ms: epoch_ms(share.joined_at),
             last_connected_ms: desktop.activity.last_connected(&share.id),
             profile_restarted: desktop.profile_manager.was_restarted(&share.id),
-            installed_certificates: share
-                .ca_certificates
-                .iter()
-                .any(|pem| desktop.installed_certificates.contains(pem)),
+            removes_certificates: !removed_on_leave(&desktop.installed_certificates, share, shares)
+                .is_empty(),
         }
     }
 }
@@ -238,7 +238,11 @@ pub async fn join(desktop: State<'_, Desktop>, invite_code: String) -> Result<Sh
         .await
         .map_err(|e| e.to_string())?;
     desktop.activity.mark_connected(&share.id);
-    Ok(ShareView::of(&share, &desktop))
+    let shares = desktop.client.shares().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not read the shares after joining");
+        vec![share.clone()]
+    });
+    Ok(ShareView::of(&share, &shares, &desktop))
 }
 
 /// Removes a share from this device, with its browser profiles and the

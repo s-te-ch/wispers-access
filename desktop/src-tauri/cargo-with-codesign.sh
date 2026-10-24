@@ -43,7 +43,7 @@ fi
 
 identity="${WISPERS_ACCESS_DEV_SIGNING_IDENTITY:-Apple Development}"
 if security find-identity -v -p codesigning | grep -q "$identity"; then
-  codesign --force --sign "$identity" --identifier dev.wispers.access.desktop "$executable"
+  codesign --force --sign "$identity" --identifier dev.wispers.access.desktop.stg "$executable"
 else
   echo "cargo-with-codesign.sh: no '$identity' signing identity; running unsigned, expect Keychain prompts" >&2
 fi

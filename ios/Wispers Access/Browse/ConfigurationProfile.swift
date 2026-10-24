@@ -43,7 +43,7 @@ enum ConfigurationProfile {
             "PayloadUUID": UUID().uuidString,
             "PayloadDisplayName": "\(name) (Wispers Access)",
             "PayloadDescription":
-                "The certificate \(name)'s apps need. Installed and fully trusted, it can vouch for any website on this device.",
+                "The certificate \(name)'s apps need. Only install it if you trust this share. Once it's fully trusted, the certificate's owner can make any website show up as secure.",
             "PayloadContent": payloads,
         ]
         return try? PropertyListSerialization.data(fromPropertyList: profile, format: .xml, options: 0)
