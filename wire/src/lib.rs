@@ -537,8 +537,9 @@ pub struct ShareInfo {
     pub name: String,
     pub transport: String,
     pub apps: Vec<SharedApp>,
-    /// CA certificates for the share's `https` origins, one PEM certificate
-    /// each. Guests trust them for those origins only.
+    /// The certificates the guests' devices need to trust  the share's `https`
+    /// origins. Normally the organisation's CA, one PEM certificate each.
+    /// Guests install them on the device.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ca_certificates: Vec<String>,
 }
@@ -616,9 +617,10 @@ pub enum AppProxyMode {
     /// The client offers a forward proxy to the browser, which uses `CONNECT`
     /// requests to talk to the proxied app. This allows for multiple origins.
     /// The browser opens the app's real URL (`start_url`) and can connect to
-    /// all allowlisted origins, with TLS support. Because internal servers
-    /// often use self-signed certs, the share's `ca_certificates` are used to
-    /// verify them. This is more work to get working with the browser side.
+    /// all allowlisted origins, with TLS support. Internal servers often have
+    /// certificates from the organisation's own CA, which the share can list
+    /// in `ca_certificates` for guests to install. This is more work to get
+    /// working with the browser side.
     ForwardProxy,
     /// A mode this build does not know.
     #[serde(other)]

@@ -20,13 +20,14 @@ pub struct CertificateDescription {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, uniffi::Enum)]
 pub enum CertificateKind {
     /// A CA, which can vouch for any website. Name constraints aren't
-    /// described: an organisation's CA rarely has them, and Android WebView
-    /// ignores them. A self-signed server certificate marked CA is a CA too.
+    /// described, as an organisation's CA rarely has them, and Android
+    /// WebView ignores them. A self-signed server certificate marked CA is a
+    /// CA too.
     Ca,
     /// A server's own certificate, signed by itself.
     SelfSignedServer,
-    /// A server's certificate from a CA. Installed, it vouches for nothing,
-    /// so it was most likely pasted instead of its CA's.
+    /// A server's certificate from a CA. The device has to trust that CA, so
+    /// in a share's list it was most likely pasted instead of its CA's.
     CaSignedServer,
 }
 
