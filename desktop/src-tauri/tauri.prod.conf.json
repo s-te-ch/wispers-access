@@ -1,0 +1,5 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Wispers Access",
+  "identifier": "dev.wispers.access.desktop"
+}
