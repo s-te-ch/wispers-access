@@ -83,8 +83,9 @@ guide](docs/hosting.md) and the [FAQ](docs/faq.md).
 
 ### 2. Share your app
 
-Say the app you want to share is listening on port 3000 (apps that use several
-ports or origins aren't supported yet). Then,
+Say the app you want to share is listening on port 3000 (for apps that use
+several ports or origins, see [Apps on several
+origins](docs/hosting.md#apps-on-several-origins)). Then,
 
 ```sh
 waserver init team "Awesome Team"
