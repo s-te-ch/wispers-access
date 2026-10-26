@@ -107,6 +107,12 @@ pub trait Transport: Send + Sync {
 
     /// Drops the cached connection, if any.
     fn drop_connection(&self);
+
+    /// Shuts the transport down for good, for a share being left. Transports
+    /// with nothing to shut down keep the default.
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 /// What `Transport::check_connection` found.

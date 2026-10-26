@@ -372,12 +372,15 @@ impl Client {
             let row = client.row(&share)?;
             // Let the live guest node go first: the transport that says
             // goodbye must not compete with it for the same key.
-            client
+            let live = client
                 .inner
                 .guest_nodes
                 .lock()
                 .expect("unpoisoned")
                 .remove(&share);
+            if let Some(node) = live.as_ref().and_then(|cell| cell.get()) {
+                node.close().await;
+            }
             transports::leave(&row, &client.inner.secrets)
                 .await
                 .map_err(SdkError::host_node)?;
@@ -1070,9 +1073,10 @@ pub struct PerShareForwardProxy {
 #[uniffi::export]
 impl PerShareForwardProxy {
     /// The share's port on `127.0.0.1`, for its browser profile's proxy
-    /// setting. Binds it on the share's first use: the remembered port if it
-    /// is still free, else a new one, which is then remembered. A caller that
-    /// started the share's browser with a different port must restart it.
+    /// setting. Binds it when on first use, using the remembered port from the
+    /// last run if available (will try for a few seconds, as an earlier run of
+    /// the app may still be exiting), otherwise a new port. If the share's
+    /// browser got started using a a different port, it must be restarted.
     pub async fn share_port(&self, share: ShareId) -> Result<u16> {
         let cell = self
             .bound_ports
@@ -1089,7 +1093,7 @@ impl PerShareForwardProxy {
                     .on_runtime(async move {
                         if let Some(port) =
                             row.read_forward_proxy_port().map_err(SdkError::storage)?
-                            && let Ok(bound) = loopback::bind_port(port).await
+                            && let Ok(bound) = loopback::rebind_port(port).await
                         {
                             return Ok(bound);
                         }
@@ -1112,6 +1116,15 @@ impl PerShareForwardProxy {
             })
             .await?;
         Ok(bound.port)
+    }
+
+    /// Closes the share's port. Used when we leave a share. Already accepted
+    /// connections run until the browser closes them.
+    pub fn release(&self, share: ShareId) {
+        let cell = self.bound_ports.lock().expect("unpoisoned").remove(&share);
+        if let Some(bound) = cell.as_ref().and_then(|cell| cell.get()) {
+            bound.release();
+        }
     }
 }
 
@@ -1247,6 +1260,21 @@ mod tests {
         .unwrap()
     }
 
+    /// Deletes a client's data dir once it can. Windows doesn't delete open
+    /// files, and a dropped client's database closes only after its runtime
+    /// has dropped the tasks it aborted.
+    fn remove_scratch_dir(dir: &std::path::Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while let Err(e) = std::fs::remove_dir_all(dir) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "could not remove {}: {e}",
+                dir.display()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     #[test]
     fn a_client_starts_offline_with_its_own_runtime() {
         let data_dir = scratch_dir();
@@ -1258,7 +1286,7 @@ mod tests {
             Err(SdkError::InvalidInvite(_))
         ));
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
     }
 
     #[tokio::test]
@@ -1288,7 +1316,7 @@ mod tests {
         }
         drop(proxy);
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
     }
 
     #[tokio::test]
@@ -1318,7 +1346,7 @@ mod tests {
         assert_eq!(proxy.base_url(share, "echo".into()).await.unwrap(), first);
         drop(proxy);
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
     }
 
     #[tokio::test]
@@ -1342,7 +1370,7 @@ mod tests {
         assert_eq!(send(port, req).await.status(), hyper::StatusCode::FORBIDDEN);
         drop(proxy);
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
     }
 
     #[tokio::test]
@@ -1400,7 +1428,7 @@ mod tests {
         );
         drop(proxy);
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
     }
 
     #[tokio::test]
@@ -1478,7 +1506,7 @@ mod tests {
         assert_eq!(send(port, app).await.status(), hyper::StatusCode::NOT_FOUND);
         drop(proxy);
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
     }
 
     /// One HTTP/1.1 request to a proxy port.

@@ -25,13 +25,13 @@ Releases come only from `npm run release`, which builds with
 `src-tauri/tauri.prod.conf.json` for the real name and identifier.
 
 The native side of the app keeps one SDK client and one loopback proxy on
-`wa.localhost:11235` (or any free port if that one is taken) during the app's
-lifetime. Closing the window does not stop the app, it keeps running the proxy
-in the background. The dock icon (macOS) or the tray icon (Windows and Linux)
-bring the window back (Exception: Linux desktops without a tray icon. There,
-closing the window stop the app). The app also launches at login, by
-default. The "Launch at Login" item (in the app or tray menus) lets you turn
-this off. Secrets go to the platform credential store, or to files as a
+`wa.localhost:11235` (11236 for staging, or any free port if that one is taken)
+during the app's lifetime. Closing the window does not stop the app, it keeps
+running the proxy in the background. The dock icon (macOS) or the tray icon
+(Windows and Linux) bring the window back (Exception: Linux desktops without a
+tray icon. There, closing the window stop the app). The app also launches at
+login, by default. The "Launch at Login" item (in the app or tray menus) lets
+you turn this off. Secrets go to the platform credential store, or to files as a
 fallback.
 
 Linux builds need WebKitGTK 4.1 and libayatana-appindicator (on Debian and

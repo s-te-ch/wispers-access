@@ -256,6 +256,7 @@ pub async fn leave(desktop: State<'_, Desktop>, share_id: String) -> Result<(), 
         .await
         .map_err(|e| e.to_string())?;
     desktop.activity.remove(&share.id);
+    desktop.forward_proxy.release(share.id.clone());
     let profile_manager = desktop.profile_manager.clone();
     let client = desktop.client.clone();
     let installed = desktop.installed_certificates.clone();

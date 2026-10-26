@@ -22,6 +22,9 @@ pub struct CertificateStatus {
     /// The share's `https` origins whose certificate this device doesn't
     /// trust. Origins that couldn't be reached aren't among them.
     untrusted_origins: Vec<String>,
+    /// Whether the check couldn't tell for any origin whether this device
+    /// trusts it, as the share's host node or every origin was out of reach.
+    unchecked: bool,
     certificates: Vec<CertificateView>,
     /// Whether this app can install certificates here, or only save them.
     can_install: bool,
@@ -55,6 +58,10 @@ pub async fn check_certificates(
         .check_origin_trust(share.id.clone())
         .await
         .map_err(|e| e.to_string())?;
+    let unchecked = !checked.is_empty()
+        && checked
+            .iter()
+            .all(|checked| matches!(checked.verdict, sdk::TrustVerdict::Unreachable { .. }));
     let untrusted_origins = checked
         .into_iter()
         .filter(|checked| matches!(checked.verdict, sdk::TrustVerdict::Untrusted { .. }))
@@ -62,6 +69,7 @@ pub async fn check_certificates(
         .collect();
     Ok(CertificateStatus {
         untrusted_origins,
+        unchecked,
         certificates: share
             .ca_certificates
             .iter()
@@ -244,8 +252,29 @@ impl InstalledCertificates {
         })
     }
 
+    /// True if this app installed the certificate and it's still in the store.
     pub fn contains(&self, pem: &str) -> bool {
-        self.lock().contains(pem)
+        if !self.lock().contains(pem) {
+            return false;
+        }
+        match der(pem)
+            .map_err(anyhow::Error::msg)
+            .and_then(|der| certificate_store::is_installed(&der))
+        {
+            Ok(true) => true,
+            Ok(false) => {
+                self.remove(pem);
+                false
+            }
+            // Unknown, so as recorded.
+            Err(e) => {
+                tracing::warn!(
+                    error = format!("{e:#}"),
+                    "could not look a certificate up in the store"
+                );
+                true
+            }
+        }
     }
 
     fn add(&self, pem: String) {

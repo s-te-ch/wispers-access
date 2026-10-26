@@ -4,7 +4,7 @@
 //! store every browser reads, so there the app only saves the certificates.
 //! Each change asks the user: macOS for their password, Windows for a yes.
 
-pub use platform::{CAN_INSTALL, install, remove};
+pub use platform::{CAN_INSTALL, install, is_installed, remove};
 
 #[cfg(target_os = "macos")]
 mod platform {
@@ -18,6 +18,7 @@ mod platform {
     use security_framework::item::{ItemClass, ItemSearchOptions, Limit, Reference, SearchResult};
     use security_framework::policy::SecPolicy;
     use security_framework::secure_transport::SslProtocolSide;
+    use security_framework::trust_settings::{Domain, TrustSettings, TrustSettingsForCertificate};
     use security_framework_sys::base::SecCertificateRef;
     use security_framework_sys::trust_settings::{
         SecTrustSettingsDomain, SecTrustSettingsSetTrustSettings, kSecTrustSettingsDomainUser,
@@ -77,6 +78,21 @@ mod platform {
         }
     }
 
+    /// Whether the certificate is in a keychain and trusted as a root for SSL
+    /// by this user. The user may have taken it out since we installed it, or
+    /// only its trust.
+    pub fn is_installed(der: &[u8]) -> anyhow::Result<bool> {
+        let certificate = SecCertificate::from_der(der).context("not a certificate")?;
+        let trusted = match TrustSettings::new(Domain::User)
+            .tls_trust_settings_for_certificate(&certificate)
+        {
+            Ok(settings) => settings == Some(TrustSettingsForCertificate::TrustRoot),
+            Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => false,
+            Err(e) => return Err(e).context("could not read the certificate's trust settings"),
+        };
+        Ok(trusted && !keychain_items(&certificate, der)?.is_empty())
+    }
+
     /// Takes the trust away and the certificate out of the keychain. A
     /// certificate that is gone already is fine.
     pub fn remove(der: &[u8]) -> anyhow::Result<()> {
@@ -134,11 +150,11 @@ mod platform {
     use std::ptr;
     use windows_sys::Win32::Foundation::{ERROR_CANCELLED, GetLastError};
     use windows_sys::Win32::Security::Cryptography::{
-        CERT_FIND_EXISTING, CERT_STORE_ADD_REPLACE_EXISTING, CERT_STORE_PROV_SYSTEM_W,
-        CERT_SYSTEM_STORE_CURRENT_USER, CertAddEncodedCertificateToStore, CertCloseStore,
-        CertCreateCertificateContext, CertDeleteCertificateFromStore, CertFindCertificateInStore,
-        CertFreeCertificateContext, CertOpenStore, HCERTSTORE, PKCS_7_ASN_ENCODING,
-        X509_ASN_ENCODING,
+        CERT_CONTEXT, CERT_FIND_EXISTING, CERT_STORE_ADD_REPLACE_EXISTING,
+        CERT_STORE_PROV_SYSTEM_W, CERT_SYSTEM_STORE_CURRENT_USER, CertAddEncodedCertificateToStore,
+        CertCloseStore, CertCreateCertificateContext, CertDeleteCertificateFromStore,
+        CertFindCertificateInStore, CertFreeCertificateContext, CertOpenStore, HCERTSTORE,
+        PKCS_7_ASN_ENCODING, X509_ASN_ENCODING,
     };
 
     pub const CAN_INSTALL: bool = true;
@@ -165,10 +181,33 @@ mod platform {
         Ok(())
     }
 
+    /// Whether the certificate is in the user's root store. The user may have
+    /// taken it out since.
+    pub fn is_installed(der: &[u8]) -> anyhow::Result<bool> {
+        let store = RootStore::open()?;
+        let found = find(&store, der)?;
+        if found.is_null() {
+            return Ok(false);
+        }
+        unsafe { CertFreeCertificateContext(found) };
+        Ok(true)
+    }
+
     /// Takes the certificate out of the user's root store. Windows asks the
     /// user to confirm. A certificate that is gone already is fine.
     pub fn remove(der: &[u8]) -> anyhow::Result<()> {
         let store = RootStore::open()?;
+        let found = find(&store, der)?;
+        // Deleting frees the found context, whatever the outcome.
+        if !found.is_null() && unsafe { CertDeleteCertificateFromStore(found) } == 0 {
+            failure("could not remove the certificate from the root store")?;
+        }
+        Ok(())
+    }
+
+    /// The store's context for the certificate, or null if it isn't there.
+    /// The caller frees it.
+    fn find(store: &RootStore, der: &[u8]) -> anyhow::Result<*mut CERT_CONTEXT> {
         unsafe {
             let wanted = CertCreateCertificateContext(ENCODING, der.as_ptr(), der.len() as u32);
             if wanted.is_null() {
@@ -183,12 +222,8 @@ mod platform {
                 ptr::null(),
             );
             CertFreeCertificateContext(wanted);
-            // Deleting frees the found context, whatever the outcome.
-            if !found.is_null() && CertDeleteCertificateFromStore(found) == 0 {
-                failure("could not remove the certificate from the root store")?;
-            }
+            Ok(found)
         }
-        Ok(())
     }
 
     /// The last error, as an error saying what failed, or as cancelled.
@@ -234,6 +269,10 @@ mod platform {
 
     pub fn install(_der: &[u8]) -> anyhow::Result<()> {
         anyhow::bail!("this app can't install certificates on Linux")
+    }
+
+    pub fn is_installed(_der: &[u8]) -> anyhow::Result<bool> {
+        Ok(false)
     }
 
     pub fn remove(_der: &[u8]) -> anyhow::Result<()> {

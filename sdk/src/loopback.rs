@@ -9,8 +9,34 @@ use hyper::StatusCode;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::time::Duration;
 use tokio::net::{TcpListener, TcpSocket};
+use tokio::time::Instant;
 use tracing::warn;
+
+/// Like [`bind_port`], but waits up to [`REBIND_PATIENCE`] while the port is
+/// taken, for a port this app held before it restarted.
+pub async fn rebind_port(port: u16) -> Result<(u16, Vec<TcpListener>)> {
+    let deadline = Instant::now() + REBIND_PATIENCE;
+    loop {
+        match bind_port(port).await {
+            Err(e) if port_taken(&e) && Instant::now() < deadline => {
+                tokio::time::sleep(REBIND_INTERVAL).await;
+            }
+            bound => return bound,
+        }
+    }
+}
+
+/// How long [`rebind_port`] waits for a taken port, and how often it tries.
+const REBIND_PATIENCE: Duration = Duration::from_secs(5);
+const REBIND_INTERVAL: Duration = Duration::from_millis(250);
+
+fn port_taken(e: &anyhow::Error) -> bool {
+    e.chain()
+        .filter_map(|cause| cause.downcast_ref::<std::io::Error>())
+        .any(|e| e.kind() == std::io::ErrorKind::AddrInUse)
+}
 
 /// Bind a port on both loopback addresses, `127.0.0.1` and `::1`, since a
 /// browser may resolve `localhost` to either. Port `0` picks a free one.
@@ -277,6 +303,17 @@ mod tests {
         let (port, listeners) = bind_port(0).await.unwrap();
         assert_ne!(port, taken);
         assert_eq!(listeners.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn a_port_is_rebound_once_its_holder_lets_go() {
+        let (port, holder) = bind_port(0).await.unwrap();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+            drop(holder);
+        });
+        let (rebound, _listeners) = rebind_port(port).await.unwrap();
+        assert_eq!(rebound, port);
     }
 
     #[test]

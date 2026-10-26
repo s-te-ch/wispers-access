@@ -112,6 +112,11 @@ impl GuestNode {
         self.transport.drop_connection();
     }
 
+    /// Shut the transport down. Used when leaving a share.
+    pub async fn close(&self) {
+        self.transport.close().await;
+    }
+
     pub fn label(&self) -> &str {
         &self.label
     }

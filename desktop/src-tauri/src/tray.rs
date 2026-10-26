@@ -37,7 +37,9 @@ pub fn available() -> bool {
 /// Linux's don't, so there it is the menu's Open item). Its menu has the same, the
 /// one setting, and the app's only way to quit.
 pub fn add(app: &tauri::App) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, OPEN, "Open Wispers Access", true, None::<&str>)?;
+    // The product name, so that the staging app says it's the staging app.
+    let name = &app.package_info().name;
+    let open = MenuItem::with_id(app, OPEN, format!("Open {name}"), true, None::<&str>)?;
     let launch_at_login = autostart::menu_item(app.handle())?;
     let quit = MenuItem::with_id(app, QUIT, "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(
@@ -51,7 +53,7 @@ pub fn add(app: &tauri::App) -> tauri::Result<()> {
         ],
     )?;
     let mut tray = TrayIconBuilder::new()
-        .tooltip("Wispers Access")
+        .tooltip(name)
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id.as_ref() {

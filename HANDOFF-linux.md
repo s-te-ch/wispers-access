@@ -29,8 +29,10 @@ The host node runs on the user's Mac, with a share called "Trust test". It
 has one forward-proxy app, whose origins are test TLS servers on the Mac.
 Their host names (`*.localtest.me`, `*.lvh.me`) resolve to 127.0.0.1, and the
 host node resolves them, so they reach the Mac's servers through the tunnel.
-Nothing needs to run on this machine except the desktop app. The Mac has to
-stay awake for the whole session.
+Nothing needs to run on this machine except the desktop app. The Mac runs
+`caffeinate` during the session. If the connection to the host node still
+drops (`cached connection is dead; redialling`), ask the user to check the
+Mac before suspecting the app. On Windows, every drop was the Mac sleeping.
 
 The user gets the invite code from the Claude session on the Mac. Codes work
 once, for 24 hours.
@@ -84,9 +86,11 @@ throwaway profile directory. For Firefox, copy the share profile's `user.js`.
 
 1. **Join.** The user joins with the invite. The share's pane should show a
    card saying the share comes with a certificate of “WA Test CA (localtest.me
-   only)”, with a "Save certificate…" button, and list the origins the device
-   doesn't trust. Write down that list. It is the SDK's trust check
-   (`sdk/src/certificates.rs`, `rustls-platform-verifier`).
+   only)”, with a "Save certificate…" button. It only shows when the SDK's
+   trust check (`sdk/src/certificates.rs`, `rustls-platform-verifier`) finds
+   an untrusted origin. The card doesn't list the origins at this stage. If
+   the check fails (no connection to the host node), the card doesn't show
+   at all, and the only trace is a `console.warn` in the webview.
 2. **Save.** The user saves the certificate. Check the file
    (`openssl x509 -in <file> -noout -subject`) and that the card says where it
    went.
@@ -105,9 +109,11 @@ throwaway profile directory. For Firefox, copy the share profile's `user.js`.
 
    Then note the test page's table, per browser, and compare with the macOS
    column above.
-4. **Trust check vs browsers.** After the import, does the card still say the
-   origins are untrusted? It probably does, since `rustls-platform-verifier`
-   on Linux reads the system store (`/etc/ssl/certs`), not the browsers'.
+4. **Trust check vs browsers.** After the import, does the card still offer
+   to save the certificate? It probably does, since `rustls-platform-verifier`
+   on Linux reads the system store (`/etc/ssl/certs`), not the browsers', and
+   the app records nothing for a saved certificate. The card rechecks when
+   the share's pane is opened again.
    Then try the system store with the user's OK
    (`sudo cp <file> /usr/local/share/ca-certificates/wa-test-ca.crt && sudo
    update-ca-certificates`, or the distribution's equivalent). Note what the
@@ -130,11 +136,17 @@ throwaway profile directory. For Firefox, copy the share profile's `user.js`.
 7. **Port rebinding.** With the profile open and the test page loaded, quit
    the app from the tray (or by closing the window, on desktops without a
    tray) and start it again. The share's port should stay the same. Reload the
-   test page.
+   test page. Wait until the old process is gone (`ss -ltnp` no longer shows
+   it) before restarting, since a restart racing the old process's shutdown
+   moves the port. Also check that the port isn't left `LISTENING` while the
+   browser profile keeps running. On Windows the browser inherited the
+   listening socket, which `sdk/src/loopback.rs` now prevents there, and
+   Unix sockets are close-on-exec.
 8. **Leave.** The user removes the share. The dialog shouldn't mention a
    certificate, since the app installed none. The share's browser profile
    should quit and its directory be gone. A certificate the user imported
-   stays where they put it.
+   stays where they put it. The share's port stays `LISTENING` until the app
+   quits (known, found on Windows, answering 403).
 9. **Anything else** that looks broken on Linux (window, tray, fonts, wording,
    paths), in the Results.
 

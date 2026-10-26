@@ -79,6 +79,11 @@ export interface Certificate {
 export interface CertificateStatus {
   /** The share's `https` origins whose certificate this device doesn't trust. */
   untrustedOrigins: string[];
+  /**
+   * Whether the check couldn't tell for any origin whether this device trusts it, as the
+   * share's host node or every origin was out of reach.
+   */
+  unchecked: boolean;
   certificates: Certificate[];
   /** Whether this app can install certificates here, or only save them. */
   canInstall: boolean;

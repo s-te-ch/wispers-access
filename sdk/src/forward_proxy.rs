@@ -638,6 +638,21 @@ mod tests {
         assert_eq!(proxy.share_port(setup.share.clone()).await.unwrap(), port);
     }
 
+    #[tokio::test]
+    async fn a_released_share_port_stops_listening() {
+        let setup = Setup::new().await;
+        let proxy = setup.client.start_per_share_forward_proxy();
+        let port = proxy.share_port(setup.share.clone()).await.unwrap();
+        proxy.release(setup.share.clone());
+        // The listeners close once the client's runtime drops the aborted
+        // accept loops.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while TcpStream::connect(("127.0.0.1", port)).await.is_ok() {
+            assert!(std::time::Instant::now() < deadline, "{port} still listens");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
     #[test]
     fn origins_are_matched_by_host_and_port() {
         let app = |mode, origins: &[&str]| SharedApp {

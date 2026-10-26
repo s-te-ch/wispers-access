@@ -10,6 +10,7 @@
   let { share }: { share: Share } = $props();
 
   let status = $state<CertificateStatus | null>(null);
+  let checkFailed = $state(false);
   let busy = $state(false);
   let error = $state<string | null>(null);
   let savedTo = $state<string | null>(null);
@@ -33,6 +34,7 @@
   $effect(() => {
     const id = shareId;
     status = null;
+    checkFailed = false;
     error = null;
     savedTo = null;
     void check(id);
@@ -41,9 +43,13 @@
   async function check(id: string) {
     try {
       const checked = await api.checkCertificates(id);
-      if (id === shareId) status = checked;
+      if (id === shareId) {
+        status = checked;
+        checkFailed = checked.unchecked;
+      }
     } catch (e) {
       console.warn(`checking share ${id}'s certificates failed`, e);
+      if (id === shareId) checkFailed = true;
     }
   }
 
@@ -60,6 +66,15 @@
     }
   }
 
+  async function checkAgain() {
+    busy = true;
+    try {
+      await check(share.id);
+    } finally {
+      busy = false;
+    }
+  }
+
   async function save() {
     error = null;
     try {
@@ -70,7 +85,24 @@
   }
 </script>
 
-{#if status && status.untrustedOrigins.length > 0}
+{#if checkFailed}
+  <div class="mt-8 rounded-2xl bg-info-card p-4">
+    <h2 class="font-semibold">Wispers Access couldn't check the apps' certificates</h2>
+    <div class="mt-1 flex flex-col gap-2 text-[14px] leading-relaxed text-on-surface-variant">
+      <p>The share's host didn't answer, or couldn't reach the apps' servers.</p>
+      <div>
+        <button
+          type="button"
+          class="mt-1 h-10 rounded-full bg-primary px-5 text-sm font-semibold text-primary-dark hover:bg-[#95c877] disabled:opacity-60"
+          disabled={busy}
+          onclick={checkAgain}
+        >
+          Check again
+        </button>
+      </div>
+    </div>
+  </div>
+{:else if status && status.untrustedOrigins.length > 0}
   <div class="mt-8 rounded-2xl bg-info-card p-4">
     <h2 class="font-semibold">This share's apps need a certificate</h2>
     <div class="mt-1 flex flex-col gap-2 text-[14px] leading-relaxed text-on-surface-variant">

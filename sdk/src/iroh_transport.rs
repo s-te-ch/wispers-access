@@ -296,6 +296,11 @@ impl Transport for Iroh {
     fn drop_connection(&self) {
         *self.conn.lock().expect("unpoisoned") = Arc::new(OnceCell::new());
     }
+
+    /// Closes the endpoint.
+    fn close(&self) -> BoxFuture<'_, ()> {
+        Box::pin(self.endpoint.close())
+    }
 }
 
 /// The contract's close codes, as the host node they were dialled from sends

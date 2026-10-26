@@ -90,7 +90,7 @@ pub use trust::{OriginTrust, TrustVerdict};
 /// that the SDK, bound through JNA, doesn't have.
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 mod trust {
-    use crate::forward_proxy::open_tunnel;
+    use crate::forward_proxy::{TunnelRefusal, open_tunnel};
     use crate::guest_node::GuestNode;
     use crate::{Result, SdkError};
     use rustls::pki_types::ServerName;
@@ -108,7 +108,7 @@ mod trust {
         Untrusted {
             reason: String,
         },
-        /// No verdict, as there was no handshake: the host node couldn't
+        /// No verdict, as there was no handshake. The host node couldn't
         /// reach the origin, the tunnel failed, what answered doesn't speak
         /// TLS, or it took too long.
         Unreachable {
@@ -122,11 +122,12 @@ mod trust {
         pub verdict: TrustVerdict,
     }
 
-    /// How long one origin's tunnel and handshake may take together.
-    const CHECK_TIMEOUT: Duration = Duration::from_secs(10);
+    /// How long opening one origin's tunnel may take, incl. handshake.
+    const TUNNEL_TIMEOUT: Duration = Duration::from_secs(10);
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
-    /// Checks one origin at a time, each by a TLS handshake through a tunnel
-    /// to it.
+    /// Checks one origin at a time, each by a TLS handshake through a tunnel to
+    /// it. Gives up if a tunnel fails because we can't reach the host node.
     pub(crate) async fn check_origins(
         node: &GuestNode,
         origins: Vec<Origin>,
@@ -136,13 +137,20 @@ mod trust {
                 .map_err(|e| SdkError::Internal(format!("no certificate verifier: {e}")))?,
         );
         let mut checked = Vec::with_capacity(origins.len());
+        let mut host_down: Option<String> = None;
         for origin in origins {
-            let verdict =
-                tokio::time::timeout(CHECK_TIMEOUT, check_origin(node, &origin, config.clone()))
-                    .await
-                    .unwrap_or_else(|_| TrustVerdict::Unreachable {
-                        reason: "timed out".to_owned(),
-                    });
+            let verdict = match &host_down {
+                Some(reason) => TrustVerdict::Unreachable {
+                    reason: reason.clone(),
+                },
+                None => match check_origin(node, &origin, config.clone()).await {
+                    Ok(verdict) => verdict,
+                    Err(HostNodeDown { reason }) => {
+                        host_down = Some(reason.clone());
+                        TrustVerdict::Unreachable { reason }
+                    }
+                },
+            };
             checked.push(OriginTrust {
                 origin: origin.to_string(),
                 verdict,
@@ -151,32 +159,50 @@ mod trust {
         Ok(checked)
     }
 
+    /// The origin's verdict, or `HostNodeDown` if the tunnel failed because of
+    /// the host node rather than the origin.
     async fn check_origin(
         node: &GuestNode,
         origin: &Origin,
         config: Arc<rustls::ClientConfig>,
-    ) -> TrustVerdict {
-        let stream = match open_tunnel(node, origin.host(), origin.port()).await {
-            Ok(stream) => stream,
-            Err(refusal) => {
-                return TrustVerdict::Unreachable {
+    ) -> std::result::Result<TrustVerdict, HostNodeDown> {
+        let opened = tokio::time::timeout(
+            TUNNEL_TIMEOUT,
+            open_tunnel(node, origin.host(), origin.port()),
+        )
+        .await;
+        let stream = match opened {
+            Ok(Ok(stream)) => stream,
+            Ok(Err(refusal @ (TunnelRefusal::NotAllowed | TunnelRefusal::Unreachable))) => {
+                return Ok(TrustVerdict::Unreachable {
                     reason: refusal.to_string(),
-                };
+                });
+            }
+            Ok(Err(refusal)) => {
+                return Err(HostNodeDown {
+                    reason: refusal.to_string(),
+                });
+            }
+            Err(_) => {
+                return Err(HostNodeDown {
+                    reason: "the share's host didn't answer in time".to_owned(),
+                });
             }
         };
         // IPv6 literals come in brackets.
         let host = origin.host().trim_start_matches('[').trim_end_matches(']');
         let Ok(name) = ServerName::try_from(host.to_owned()) else {
-            return TrustVerdict::Unreachable {
+            return Ok(TrustVerdict::Unreachable {
                 reason: format!("{host} is not a server name"),
-            };
+            });
         };
-        match tokio_rustls::TlsConnector::from(config)
-            .connect(name, stream)
-            .await
-        {
-            Ok(_) => TrustVerdict::Trusted,
-            Err(e) => match e.get_ref().and_then(|e| e.downcast_ref::<rustls::Error>()) {
+        let handshake = tokio::time::timeout(
+            HANDSHAKE_TIMEOUT,
+            tokio_rustls::TlsConnector::from(config).connect(name, stream),
+        );
+        Ok(match handshake.await {
+            Ok(Ok(_)) => TrustVerdict::Trusted,
+            Ok(Err(e)) => match e.get_ref().and_then(|e| e.downcast_ref::<rustls::Error>()) {
                 Some(e @ rustls::Error::InvalidCertificate(_)) => TrustVerdict::Untrusted {
                     reason: e.to_string(),
                 },
@@ -184,7 +210,15 @@ mod trust {
                     reason: e.to_string(),
                 },
             },
-        }
+            Err(_) => TrustVerdict::Unreachable {
+                reason: "the handshake timed out".to_owned(),
+            },
+        })
+    }
+
+    /// Why the host node couldn't open a tunnel.
+    struct HostNodeDown {
+        reason: String,
     }
 
     #[cfg(test)]
@@ -262,7 +296,10 @@ mod trust {
                 "../testdata/certificates/self-signed.key"
             ))
             .unwrap();
-            let config = rustls::ServerConfig::builder()
+            let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+            let config = rustls::ServerConfig::builder_with_provider(provider)
+                .with_safe_default_protocol_versions()
+                .unwrap()
                 .with_no_client_auth()
                 .with_single_cert(vec![certificate], key)
                 .unwrap();

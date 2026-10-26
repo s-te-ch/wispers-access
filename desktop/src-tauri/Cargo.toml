@@ -3,6 +3,8 @@ name = "wispers-access-desktop"
 version = "1.0.0"
 description = "The Wispers Access desktop app — browse web apps without having to publish them to the internet"
 edition = "2024"
+# sysinfo's.
+rust-version = "1.95"
 
 [lib]
 # The `_lib` suffix may seem redundant but it is necessary

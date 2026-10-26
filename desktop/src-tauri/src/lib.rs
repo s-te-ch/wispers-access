@@ -202,6 +202,10 @@ pub struct Desktop {
 /// sequence it's still quite memorable :)
 const PROXY_PORT: u16 = 11235;
 
+/// The staging app's port is different, so it doesn't compete with an installed
+/// Wispers Access app.
+const STAGING_PROXY_PORT: u16 = 11236;
+
 /// A pairing link is followed the moment it is minted, by a click in the UI.
 const TOKEN_LIFETIME: Duration = Duration::from_secs(60);
 
@@ -225,14 +229,12 @@ impl Desktop {
         let auth_mode = sdk::ProxyAuthMode::Pairing {
             token_lifetime: TOKEN_LIFETIME,
         };
+        let port = proxy_port(&app);
         let proxy = tauri::async_runtime::block_on(async {
-            match client
-                .start_host_routed_proxy(PROXY_PORT, auth_mode.clone())
-                .await
-            {
+            match start_proxy_patiently(&client, port, auth_mode.clone()).await {
                 Ok(proxy) => Ok(proxy),
                 Err(e) => {
-                    tracing::warn!(error = %e, "port {PROXY_PORT} is taken, using any free one");
+                    tracing::warn!(error = %e, "port {port} is taken, using any free one");
                     client.start_host_routed_proxy(0, auth_mode).await
                 }
             }
@@ -258,6 +260,37 @@ impl Desktop {
         })
     }
 }
+
+fn proxy_port(app: &tauri::AppHandle) -> u16 {
+    if app.config().identifier.ends_with(".stg") {
+        STAGING_PROXY_PORT
+    } else {
+        PROXY_PORT
+    }
+}
+
+/// Starts the proxy on `port`, trying again for a few seconds while it fails. A
+/// restart (e.g. after an update) starts this process before the old one exits.
+async fn start_proxy_patiently(
+    client: &sdk::Client,
+    port: u16,
+    auth_mode: sdk::ProxyAuthMode,
+) -> Result<Arc<sdk::HostRoutedProxy>, sdk::SdkError> {
+    let deadline = std::time::Instant::now() + PROXY_PORT_PATIENCE;
+    loop {
+        match client
+            .start_host_routed_proxy(port, auth_mode.clone())
+            .await
+        {
+            Err(_) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            started => return started,
+        }
+    }
+}
+
+const PROXY_PORT_PATIENCE: Duration = Duration::from_secs(5);
 
 /// If a browser using the share's profile is still running from before this app
 /// started (again), it will still be using previous set of ports. This function
