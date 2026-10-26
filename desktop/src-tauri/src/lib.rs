@@ -195,6 +195,9 @@ pub struct Desktop {
     profile_manager: Arc<profiles::ProfileManager>,
     activity: activity::ActivityStore,
     installed_certificates: Arc<certificates::InstalledCertificates>,
+    /// The shares whose certificates the user saved, by ID (see
+    /// `certificates::save_certificates`).
+    saved_certificates: certificates::RecordFile,
 }
 
 /// The port the proxy asks for. Fixed so bookmarks keep working across
@@ -241,7 +244,10 @@ impl Desktop {
         })?;
         tracing::info!("serving shares on wa.localhost:{}", proxy.port());
         let forward_proxy = client.start_per_share_forward_proxy();
-        let profile_manager = Arc::new(profiles::ProfileManager::new(data_dir.join("profiles")));
+        let profile_manager = Arc::new(profiles::ProfileManager::new(
+            data_dir.join("profiles"),
+            app.config().identifier.clone(),
+        ));
         tauri::async_runtime::spawn(reclaim_share_ports(
             client.clone(),
             forward_proxy.clone(),
@@ -256,6 +262,9 @@ impl Desktop {
             activity: activity::ActivityStore::open(data_dir.join("share-activity.json")),
             installed_certificates: certificates::InstalledCertificates::open(
                 data_dir.join("installed-certificates.json"),
+            ),
+            saved_certificates: certificates::RecordFile::open(
+                data_dir.join("saved-certificates.json"),
             ),
         })
     }
@@ -368,8 +377,10 @@ fn init_logging() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
         // The platform verifier logs every certificate it refuses as an
         // error, and the share's pane checks untrusted origins on purpose.
+        // zbus warns on Linux when the folder picker's portal request is gone
+        // before it reads its properties, which is harmless.
         EnvFilter::new(
-            "warn,wispers_access_sdk=info,wispers_access_desktop_lib=info,rustls_platform_verifier=off",
+            "warn,wispers_access_sdk=info,wispers_access_desktop_lib=info,rustls_platform_verifier=off,zbus=error",
         )
     });
     tracing_subscriber::fmt()

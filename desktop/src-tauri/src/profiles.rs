@@ -12,19 +12,23 @@ use std::time::{Duration, Instant};
 use sysinfo::{Process, ProcessRefreshKind, ProcessesToUpdate, Signal, System, UpdateKind};
 use wispers_access_sdk::ShareId;
 
-/// Manages every share's profiles, in `<root>/<share>/<browser>`. Each browser gets a
-/// directory of its own, as none can safely open another's.
+/// Manages every share's profiles, in `<root>/<share>/<browser>`, or for a
+/// browser installed as a Snap in `<its Snap's directory>/<identifier>/<share>/<browser>`.
+/// Each browser gets a directory of its own, as none can safely open another's.
 pub struct ProfileManager {
     root: PathBuf,
+    /// The app's identifier, which names its directory in a Snap's.
+    identifier: String,
     /// Shares whose profile was restarted since one of their apps was last
     /// opened, for the share's pane to say why.
     restarted: Mutex<HashSet<ShareId>>,
 }
 
 impl ProfileManager {
-    pub fn new(root: PathBuf) -> Self {
+    pub fn new(root: PathBuf, identifier: String) -> Self {
         Self {
             root,
+            identifier,
             restarted: Mutex::new(HashSet::new()),
         }
     }
@@ -83,19 +87,35 @@ impl ProfileManager {
                 profile.quit()?;
             }
         }
-        match std::fs::remove_dir_all(self.root.join(share.as_str())) {
-            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
-            result => result,
+        let share_dirs: HashSet<PathBuf> = Browser::ALL
+            .into_iter()
+            .map(|browser| self.share_dir(share, browser))
+            .collect();
+        for dir in share_dirs {
+            match std::fs::remove_dir_all(dir) {
+                Err(e) if e.kind() != io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
         }
+        Ok(())
     }
 
     fn profile(&self, share: &ShareId, browser: Browser) -> Profile {
         Profile {
             browser,
             dir: self
-                .root
-                .join(share.as_str())
+                .share_dir(share, browser)
                 .join(browser.profile_dir_name()),
+        }
+    }
+
+    /// The directory holding the share's profile in `browser`. A Snap can't
+    /// read hidden directories in the user's home, such as the app's data
+    /// directory, so a Snap browser's profile goes in the Snap's directory.
+    fn share_dir(&self, share: &ShareId, browser: Browser) -> PathBuf {
+        match browser.snap_dir() {
+            Some(snap_dir) => snap_dir.join(&self.identifier).join(share.as_str()),
+            None => self.root.join(share.as_str()),
         }
     }
 }

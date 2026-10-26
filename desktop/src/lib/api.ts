@@ -87,6 +87,11 @@ export interface CertificateStatus {
   certificates: Certificate[];
   /** Whether this app can install certificates here, or only save them. */
   canInstall: boolean;
+  /**
+   * Whether the user saved the share's certificates. Whether they imported them in a browser
+   * afterwards is out of the app's sight.
+   */
+  saved: boolean;
 }
 
 /** Checks the share's `https` origins by a TLS handshake through the share. */

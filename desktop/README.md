@@ -34,7 +34,8 @@ login, by default. The "Launch at Login" item (in the app or tray menus) lets
 you turn this off. Secrets go to the platform credential store, or to files as a
 fallback.
 
-Linux builds need WebKitGTK 4.1 and libayatana-appindicator (on Debian and
-Ubuntu, `libwebkit2gtk-4.1-dev` and `libayatana-appindicator3-dev`).
+The native side needs Rust 1.95 or later. Linux builds also need WebKitGTK 4.1
+and libayatana-appindicator (on Debian and Ubuntu, `libwebkit2gtk-4.1-dev` and
+`libayatana-appindicator3-dev`).
 
 Release instructions are in the Wispers monorepo, at docs/access/releases.md.

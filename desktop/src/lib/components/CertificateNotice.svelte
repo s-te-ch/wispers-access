@@ -79,6 +79,7 @@
     error = null;
     try {
       savedTo = await api.saveCertificates(share.id);
+      if (savedTo && status) status.saved = true;
     } catch (e) {
       error = String(e);
     }
@@ -106,7 +107,7 @@
   <div class="mt-8 rounded-2xl bg-info-card p-4">
     <h2 class="font-semibold">This share's apps need a certificate</h2>
     <div class="mt-1 flex flex-col gap-2 text-[14px] leading-relaxed text-on-surface-variant">
-      {#if installable}
+      {#if installable && status.canInstall}
         {#if installable.kind === "ca"}
           <p>
             {name} comes with a certificate of “{installable.subject}”, which you'll have to install
@@ -120,36 +121,62 @@
             server. It vouches for nothing else.
           </p>
         {/if}
-        {#if status.canInstall}
-          <p>{certificateStoreAsks} Browsers already open may need restarting.</p>
-          <div>
-            <button
-              type="button"
-              class="mt-1 h-10 rounded-full bg-primary px-5 text-sm font-semibold text-primary-dark hover:bg-[#95c877] disabled:opacity-60"
-              disabled={busy}
-              onclick={install}
-            >
-              Install certificate
-            </button>
-          </div>
+        <p>{certificateStoreAsks} Browsers already open may need restarting.</p>
+        <div>
+          <button
+            type="button"
+            class="mt-1 h-10 rounded-full bg-primary px-5 text-sm font-semibold text-primary-dark hover:bg-[#95c877] disabled:opacity-60"
+            disabled={busy}
+            onclick={install}
+          >
+            Install certificate
+          </button>
+        </div>
+      {:else if installable && status.saved}
+        <!-- The app can't see a browser import, so after a save the card
+             stays up as a hint. -->
+        <p>
+          {savedTo ? `Saved to ${savedTo}.` : "You saved the share's certificate."} If the apps still
+          show a certificate warning, import it in the certificate settings of the share's browser
+          window, as an authority it trusts for websites.
+        </p>
+        <div>
+          <button
+            type="button"
+            class="mt-1 h-10 rounded-full border border-outline px-5 text-sm font-semibold hover:bg-black/[0.06]"
+            onclick={save}
+          >
+            Save it again…
+          </button>
+        </div>
+      {:else if installable}
+        {#if installable.kind === "ca"}
+          <p>
+            {name} comes with a certificate of “{installable.subject}”, which the share's browser
+            window has to trust. Only import it if you trust this share. Once it's imported, the
+            certificate's owner can make any website show up as secure in that window.
+          </p>
         {:else}
           <p>
-            Save it, then import it in your browser's certificate settings as an authority it trusts
-            for websites.
+            {name} comes with a certificate for {installable.names.join(", ") ||
+              installable.subject}, which the share's browser window has to trust. It vouches for
+            nothing else.
           </p>
-          <div>
-            <button
-              type="button"
-              class="mt-1 h-10 rounded-full bg-primary px-5 text-sm font-semibold text-primary-dark hover:bg-[#95c877]"
-              onclick={save}
-            >
-              Save certificate…
-            </button>
-          </div>
-          {#if savedTo}
-            <p class="select-text">Saved to {savedTo}.</p>
-          {/if}
         {/if}
+        <p>
+          Save it, open one of the share's apps, and import it in that window's certificate settings,
+          as an authority it trusts for websites. The apps open in a browser profile of their own, so
+          your other browser windows won't trust it, and leaving the share takes it out again.
+        </p>
+        <div>
+          <button
+            type="button"
+            class="mt-1 h-10 rounded-full bg-primary px-5 text-sm font-semibold text-primary-dark hover:bg-[#95c877]"
+            onclick={save}
+          >
+            Save certificate…
+          </button>
+        </div>
       {:else if installed}
         <p>
           The certificate is installed, but {untrusted} still {isOrAre} trusted. Whoever runs the

@@ -2,6 +2,8 @@
 //! share's `https` origins, and installing the share's certificates in the
 //! user's certificate store (see `certificate_store`). The app records what
 //! it installed, to take it out again when the last share listing it is left.
+//! Where it can't install them, it saves them for the user to import, and
+//! records for which shares they were saved.
 
 use crate::Desktop;
 use crate::certificate_store;
@@ -28,6 +30,9 @@ pub struct CertificateStatus {
     certificates: Vec<CertificateView>,
     /// Whether this app can install certificates here, or only save them.
     can_install: bool,
+    /// Whether the user saved the share's certificates. Whether they imported
+    /// them in a browser afterwards is out of the app's sight.
+    saved: bool,
 }
 
 #[derive(Serialize)]
@@ -83,6 +88,7 @@ pub async fn check_certificates(
             })
             .collect(),
         can_install: certificate_store::CAN_INSTALL,
+        saved: desktop.saved_certificates.contains(share.id.as_str()),
     })
 }
 
@@ -130,8 +136,8 @@ pub async fn install_certificates(
 }
 
 /// Saves the share's installable certificates into a folder the user picks,
-/// for where the app can't install them. The folder, or `None` if the user
-/// cancelled.
+/// for where the app can't install them, and records the share as saved. The
+/// folder, or `None` if the user cancelled.
 #[tauri::command]
 pub async fn save_certificates(
     desktop: State<'_, Desktop>,
@@ -150,6 +156,7 @@ pub async fn save_certificates(
         std::fs::write(&file, &pem)
             .map_err(|e| format!("could not save {}: {e}", file.display()))?;
     }
+    desktop.saved_certificates.add(share.id.as_str().to_owned());
     Ok(Some(folder.display().to_string()))
 }
 
@@ -235,27 +242,21 @@ fn file_name(subject: &str) -> String {
 
 /// The certificates this app installed, by their PEM as the shares list them.
 pub struct InstalledCertificates {
-    path: PathBuf,
-    pems: Mutex<BTreeSet<String>>,
+    pems: RecordFile,
 }
 
 impl InstalledCertificates {
     /// Reads the file at `path`, or starts empty: an unreadable file costs
     /// removing the certificates on leave, not the app.
     pub fn open(path: PathBuf) -> Arc<Self> {
-        let pems = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default();
         Arc::new(Self {
-            path,
-            pems: Mutex::new(pems),
+            pems: RecordFile::open(path),
         })
     }
 
     /// True if this app installed the certificate and it's still in the store.
     pub fn contains(&self, pem: &str) -> bool {
-        if !self.lock().contains(pem) {
+        if !self.pems.contains(pem) {
             return false;
         }
         match der(pem)
@@ -264,7 +265,7 @@ impl InstalledCertificates {
         {
             Ok(true) => true,
             Ok(false) => {
-                self.remove(pem);
+                self.pems.remove(pem);
                 false
             }
             // Unknown, so as recorded.
@@ -279,27 +280,59 @@ impl InstalledCertificates {
     }
 
     fn add(&self, pem: String) {
-        let mut pems = self.lock();
-        pems.insert(pem);
-        self.persist(&pems);
+        self.pems.add(pem);
     }
 
     fn remove(&self, pem: &str) {
-        let mut pems = self.lock();
-        pems.remove(pem);
-        self.persist(&pems);
+        self.pems.remove(pem);
+    }
+}
+
+/// A set of strings, kept in a JSON file.
+pub struct RecordFile {
+    path: PathBuf,
+    entries: Mutex<BTreeSet<String>>,
+}
+
+impl RecordFile {
+    /// Reads the file at `path`, or starts empty.
+    pub fn open(path: PathBuf) -> Self {
+        let entries = std::fs::read(&path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default();
+        Self {
+            path,
+            entries: Mutex::new(entries),
+        }
     }
 
-    fn persist(&self, pems: &BTreeSet<String>) {
-        let written = serde_json::to_vec(pems)
+    pub fn contains(&self, entry: &str) -> bool {
+        self.lock().contains(entry)
+    }
+
+    pub fn add(&self, entry: String) {
+        let mut entries = self.lock();
+        entries.insert(entry);
+        self.persist(&entries);
+    }
+
+    pub fn remove(&self, entry: &str) {
+        let mut entries = self.lock();
+        entries.remove(entry);
+        self.persist(&entries);
+    }
+
+    fn persist(&self, entries: &BTreeSet<String>) {
+        let written = serde_json::to_vec(entries)
             .map_err(std::io::Error::other)
             .and_then(|bytes| std::fs::write(&self.path, bytes));
         if let Err(e) = written {
-            tracing::warn!(error = %e, path = %self.path.display(), "could not save the installed certificates");
+            tracing::warn!(error = %e, path = %self.path.display(), "could not save a record file");
         }
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
-        self.pems.lock().expect("unpoisoned")
+        self.entries.lock().expect("unpoisoned")
     }
 }

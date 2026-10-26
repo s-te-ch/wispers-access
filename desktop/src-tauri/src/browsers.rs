@@ -106,4 +106,28 @@ impl Browser {
                 .find(|candidate| candidate.is_file())
         })
     }
+
+    /// The directory the browser's Snap can write to, if it's installed as
+    /// one. A copy of the browser installed some other way can use it too, so
+    /// this doesn't say which copy runs.
+    #[cfg(target_os = "linux")]
+    pub fn snap_dir(self) -> Option<PathBuf> {
+        let name = match self {
+            Browser::Brave => "brave",
+            Browser::Chromium => "chromium",
+            Browser::Firefox => "firefox",
+            Browser::Chrome | Browser::Edge => return None,
+        };
+        if !std::path::Path::new("/snap").join(name).is_dir() {
+            return None;
+        }
+        let home = std::env::var_os("HOME")?;
+        Some(PathBuf::from(home).join("snap").join(name).join("common"))
+    }
+
+    /// Snaps are Linux only.
+    #[cfg(not(target_os = "linux"))]
+    pub fn snap_dir(self) -> Option<PathBuf> {
+        None
+    }
 }

@@ -257,6 +257,9 @@ pub async fn leave(desktop: State<'_, Desktop>, share_id: String) -> Result<(), 
         .map_err(|e| e.to_string())?;
     desktop.activity.remove(&share.id);
     desktop.forward_proxy.release(share.id.clone());
+    // The user imported the saved certificates in the share's profiles, if
+    // anywhere, which go now.
+    desktop.saved_certificates.remove(share.id.as_str());
     let profile_manager = desktop.profile_manager.clone();
     let client = desktop.client.clone();
     let installed = desktop.installed_certificates.clone();
