@@ -3,7 +3,7 @@
 
 use crate::browsers::Browser;
 use std::collections::HashSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -194,14 +194,16 @@ impl Profile {
     /// quit with their browser.
     fn main_processes<'a>(&'a self, system: &'a System) -> impl Iterator<Item = &'a Process> {
         let profile_arg = self.chromium_profile_arg();
+        let mut firefox_args = OsString::from("-profile ");
+        firefox_args.push(&self.dir);
         system.processes().values().filter(move |process| {
             let cmd = process.cmd();
             if self.browser.is_firefox() {
-                cmd.windows(2)
-                    .any(|pair| pair[0] == "-profile" && Path::new(&pair[1]) == self.dir)
-                    && !cmd.iter().any(|arg| arg == "-contentproc")
+                has_arguments(cmd, firefox_args.as_encoded_bytes())
+                    && !has_arguments(cmd, b"-contentproc")
             } else {
-                cmd.contains(&profile_arg) && !cmd.iter().any(|arg| starts_with(arg, "--type="))
+                has_arguments(cmd, profile_arg.as_encoded_bytes())
+                    && !has_argument_prefix(cmd, b"--type=")
             }
         })
     }
@@ -224,8 +226,35 @@ fn processes() -> System {
     system
 }
 
-fn starts_with(arg: &OsStr, prefix: &str) -> bool {
-    arg.as_encoded_bytes().starts_with(prefix.as_bytes())
+/// Whether the command line holds `wanted` as a whole argument, or as a run
+/// of whole arguments like `-profile <dir>`. The arguments are joined with
+/// spaces and matched at space boundaries rather than one by one, because
+/// Chromium on Linux rewrites its argv into one space-separated string (its
+/// process title), so `/proc/<pid>/cmdline` holds a single argument. A
+/// profile directory with a space in its name can't be told apart there.
+fn has_arguments(cmd: &[OsString], wanted: &[u8]) -> bool {
+    let joined = join(cmd);
+    argument_starts(&joined, wanted)
+        .any(|start| joined.get(start + wanted.len()).is_none_or(|b| *b == b' '))
+}
+
+/// Whether an argument of the command line starts with `prefix`.
+fn has_argument_prefix(cmd: &[OsString], prefix: &[u8]) -> bool {
+    let joined = join(cmd);
+    argument_starts(&joined, prefix).next().is_some()
+}
+
+fn join(cmd: &[OsString]) -> Vec<u8> {
+    cmd.iter()
+        .map(|arg| arg.as_encoded_bytes())
+        .collect::<Vec<_>>()
+        .join(&b' ')
+}
+
+/// The offsets in `joined` at which an argument starting with `wanted` begins.
+fn argument_starts<'a>(joined: &'a [u8], wanted: &'a [u8]) -> impl Iterator<Item = usize> + 'a {
+    (0..=joined.len().saturating_sub(wanted.len()))
+        .filter(move |&i| (i == 0 || joined[i - 1] == b' ') && joined[i..].starts_with(wanted))
 }
 
 /// The Firefox profile's preferences, written before each start. Firefox
@@ -250,4 +279,50 @@ user_pref("browser.startup.homepage_override.mstone", "ignore");
 user_pref("datareporting.policy.dataSubmissionPolicyBypassNotification", true);
 "#
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<OsString> {
+        list.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn arguments_are_found_one_by_one_and_in_chromiums_single_string() {
+        let dir = "--user-data-dir=/home/u/.local/share/app/profiles/s/chrome";
+        let separate = args(&[
+            "/opt/chrome",
+            dir,
+            "--proxy-server=127.0.0.1:1",
+            "https://x/",
+        ]);
+        let single = args(&[&format!(
+            "/opt/chrome {dir} --proxy-server=127.0.0.1:1 https://x/"
+        )]);
+        let helper = args(&[&format!("/opt/chrome --type=renderer {dir} --lang=en")]);
+        let other_profile = args(&[&format!("/opt/chrome {dir}2 https://x/")]);
+        for cmd in [&separate, &single] {
+            assert!(has_arguments(cmd, dir.as_bytes()));
+            assert!(!has_argument_prefix(cmd, b"--type="));
+        }
+        assert!(has_arguments(&helper, dir.as_bytes()));
+        assert!(has_argument_prefix(&helper, b"--type="));
+        assert!(!has_arguments(&other_profile, dir.as_bytes()));
+        assert!(!has_arguments(&separate, b"user-data-dir=/home/u"));
+    }
+
+    #[test]
+    fn firefox_profile_pair_is_found() {
+        let cmd = args(&[
+            "/usr/lib/firefox/firefox",
+            "-profile",
+            "/home/u/p",
+            "https://x/",
+        ]);
+        assert!(has_arguments(&cmd, b"-profile /home/u/p"));
+        assert!(!has_arguments(&cmd, b"-profile /home/u"));
+        assert!(!has_arguments(&cmd, b"-contentproc"));
+    }
 }
