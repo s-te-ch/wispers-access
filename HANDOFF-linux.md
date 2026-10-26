@@ -462,3 +462,55 @@ toolchain stays at 1.99.1. Wispers Files (production) is running again.
 - Snap Firefox can't open a profile under `~/.local/share`; detect or relocate.
 - Dev and production tray icons are hard to tell apart.
 - `ashpd` portal warning in the log after the folder picker, cosmetic.
+
+## Round 2: the fixes from the main session (commits ea2ee1d…5786702)
+
+Pulled, built (`rustc 1.99.1`), run. Chrome 151 (deb), Firefox 157 (Snap), as
+before.
+
+**Snap Firefox location.** Started by hand with a profile under
+`~/snap/firefox/common/dev.wispers.access.desktop.stg/<share>/firefox`, the
+Snap starts, populates the profile and can even write a screenshot there. So
+`Browser::snap_dir` points at a directory the Snap can use. (Tried by hand
+again, since the app picks Chrome on this machine.)
+
+**Card before saving**, verbatim as shown after joining with a fresh invite:
+
+> This share's apps need a certificate
+> “Trust test” comes with a certificate of “WA Test CA (localtest.me only)”,
+> which the share's browser window has to trust. Only import it if you trust
+> this share. Once it's imported, the certificate's owner can make any
+> website show up as secure in that window.
+> Save it, open one of the share's apps, and import it in that window's
+> certificate settings, as an authority it trusts for websites. The apps open
+> in a browser profile of their own, so your other browser windows won't
+> trust it, and leaving the share takes it out again.
+
+**Save, saved state, log.** Saving to `~/Downloads` wrote the same 700-byte
+file as before and recorded the share's ID in `saved-certificates.json`. The
+card switched to the saved variant with "Save it again…"; after a pane reload
+(right-click menu) it still shows it. The pane reload re-runs the trust check
+(a second "checked the share's origins" line). No `Failed to populate
+properties cache` warning this time: the `zbus=error` filter works. Opening
+the app bound port 44505 and started Chrome, certificate warning as expected
+(no import done this round).
+
+**Restart.** Quit by signal with Chrome open, port freed at once (Chrome kept
+running), restarted: port 44505 bound again on both addresses.
+
+**Card after the restart**: still the saved variant, "You saved the share's
+certificate. If the apps still show a certificate warning, import it in the
+certificate settings of the share's browser window, as an authority it trusts
+for websites." The test page in the share's Chrome still gets its (expected)
+certificate warning through the rebound port.
+
+**Leave.** Dialog: "Remove Trust test? This device's access will be removed on
+the host. You'll need a new invitation code to rejoin." Chrome's window closed
+by itself, the profiles directory is empty, `saved-certificates.json` is `[]`,
+the share's port is closed, log `told the host node we are leaving`.
+
+All of round 2 passes. No code changes this round.
+
+**Cleanup**: app stopped, `~/.local/share/dev.wispers.access.desktop.stg`, the
+staging Secret Service item and the saved `.crt` in `~/Downloads` deleted
+again.
