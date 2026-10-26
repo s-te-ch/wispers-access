@@ -62,11 +62,12 @@ pub async fn check_certificates(
         && checked
             .iter()
             .all(|checked| matches!(checked.verdict, sdk::TrustVerdict::Unreachable { .. }));
-    let untrusted_origins = checked
+    let untrusted_origins: Vec<String> = checked
         .into_iter()
         .filter(|checked| matches!(checked.verdict, sdk::TrustVerdict::Untrusted { .. }))
         .map(|checked| checked.origin)
         .collect();
+    tracing::info!(share = %share.label, untrusted = ?untrusted_origins, unchecked, "checked the share's origins");
     Ok(CertificateStatus {
         untrusted_origins,
         unchecked,
