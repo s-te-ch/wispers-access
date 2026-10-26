@@ -9,7 +9,7 @@ use hyper::StatusCode;
 use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpSocket};
 use tracing::warn;
 
 /// Bind a port on both loopback addresses, `127.0.0.1` and `::1`, since a
@@ -21,12 +21,11 @@ use tracing::warn;
 pub async fn bind_port(port: u16) -> Result<(u16, Vec<TcpListener>)> {
     for _ in 0..PORT_TRIES {
         let ipv4_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
-        let v4_listener = TcpListener::bind(ipv4_addr)
-            .await
-            .with_context(|| format!("failed to bind to {ipv4_addr}"))?;
+        let v4_listener =
+            listen_on(ipv4_addr).with_context(|| format!("failed to bind to {ipv4_addr}"))?;
         let bound_port = v4_listener.local_addr()?.port();
         let ipv6_addr = SocketAddr::new(Ipv6Addr::LOCALHOST.into(), bound_port);
-        match TcpListener::bind(ipv6_addr).await {
+        match listen_on(ipv6_addr) {
             Ok(v6_listener) => return Ok((bound_port, vec![v4_listener, v6_listener])),
             Err(e) if no_ipv6_loopback(&e) => {
                 warn!(error = format!("{e:#}"), "no IPv6 loopback");
@@ -44,6 +43,27 @@ pub async fn bind_port(port: u16) -> Result<(u16, Vec<TcpListener>)> {
 
 /// How often port `0` is retried when the IPv4 pick is taken on `::1`.
 const PORT_TRIES: usize = 8;
+
+/// Binds and listens like `TcpListener::bind`, but through `TcpSocket`, since
+/// its sockets aren't inheritable on Windows. `TcpListener::bind`'s are, so a
+/// browser the app starts would keep the port bound after the app quits, and
+/// the app couldn't bind it again.
+fn listen_on(addr: SocketAddr) -> std::io::Result<TcpListener> {
+    let socket = match addr {
+        SocketAddr::V4(_) => TcpSocket::new_v4()?,
+        SocketAddr::V6(_) => TcpSocket::new_v6()?,
+    };
+    // Sets `SO_REUSEADDR` like `TcpListener::bind`, to rebind while an earlier
+    // run's connections linger. Not on Windows, where it would let another
+    // process take over the port.
+    #[cfg(not(windows))]
+    socket.set_reuseaddr(true)?;
+    socket.bind(addr)?;
+    socket.listen(LISTEN_BACKLOG)
+}
+
+/// The backlog `TcpListener::bind` uses.
+const LISTEN_BACKLOG: u32 = 128;
 
 /// Whether binding `::1` failed because the machine has no IPv6 loopback,
 /// rather than because the port is taken.
