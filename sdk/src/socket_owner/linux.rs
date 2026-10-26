@@ -1,11 +1,14 @@
 //! Linux: `/proc/net/tcp` and `/proc/net/tcp6` list every TCP socket with the
 //! user ID of its owner.
 
-use std::io;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
-pub fn is_same_user(local: SocketAddr, peer: SocketAddr) -> io::Result<bool> {
+/// Only on Linux, since the other platforms compile this module just for the
+/// parser's tests, and Windows has no `libc`.
+#[cfg(target_os = "linux")]
+pub fn is_same_user(local: SocketAddr, peer: SocketAddr) -> std::io::Result<bool> {
+    use std::io;
+
     let table = match peer {
         SocketAddr::V4(_) => "/proc/net/tcp",
         SocketAddr::V6(_) => "/proc/net/tcp6",
