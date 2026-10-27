@@ -61,7 +61,7 @@ jobs:
 
   # waserver and the desktop app ship for Windows, and several crates carry
   # cfg(windows) branches that Linux never compiles, so all of them get their
-  # lint here. Tests run for waserver only: the SDK's don't pass on Windows yet.
+  # lint here. Tests run for waserver and the SDK.
   windows:
     runs-on: windows-2025
     timeout-minutes: 30
@@ -89,7 +89,7 @@ jobs:
       # This includes the desktop crate, whose lint lives here rather than on
       # Linux, where it would need WebKitGTK; it has no tests to run.
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - run: cargo test -p waserver --locked
+      - run: cargo test -p waserver -p wispers-access-sdk --locked
 
   android:
     runs-on: ubuntu-24.04

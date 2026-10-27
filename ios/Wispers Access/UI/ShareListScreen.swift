@@ -98,17 +98,25 @@ struct ShareListScreen: View {
             }
             ForEach(share.apps, id: \.id) { app in
                 let key = SharedAppId(shareID: share.id, appID: app.id)
-                NavigationLink(
-                    value: share.state == .live ? ShareRoute.browse(key) : ShareRoute.detail(share.id)
-                ) {
-                    AppCard(
-                        app: app,
-                        isLive: manager.browser.isWarm(key),
-                        iconData: icons.iconData(for: key)
-                    )
-                    .opacity(share.state == .live ? 1 : 0.6)
+                let unavailable = whyUnavailable(app)
+                let card = AppCard(
+                    app: app,
+                    isLive: manager.browser.isWarm(key),
+                    iconData: icons.iconData(for: key),
+                    note: unavailable
+                )
+                if share.state == .live, unavailable != nil {
+                    // Nothing to open; the card says why.
+                    card.opacity(0.6)
+                } else {
+                    // A terminal share's apps lead to its explanation instead.
+                    NavigationLink(
+                        value: share.state == .live ? ShareRoute.browse(key) : ShareRoute.detail(share.id)
+                    ) {
+                        card.opacity(share.state == .live ? 1 : 0.6)
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
             }
         }
     }

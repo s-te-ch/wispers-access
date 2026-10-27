@@ -2,12 +2,11 @@
 
 ### My shared app is broken, but waserver logs the requests
 
-Wispers Access doesn't currently work with multi-origin web apps, that is, web
-apps that send requests to more than one domain. If a page partially loads but
-then runs into errors, this is often the cause.
-
-Make your app single-origin if possible. For example, if you use foo.com for the
-app and api.foo.com for the backend API, put your API behind foo.com/api instead.
+If a page partly loads, then runs into errors, the app probably uses more than
+one origin, such as an API on a host name of its own (api.foo.com next to
+foo.com), or maybe a sign-in through your organisation's identity provider.
+Share such apps in forward-proxy mode, see [Apps on several
+origins](hosting.md#apps-on-several-origins).
 
 ### The QR code looks ragged or does not scan
 

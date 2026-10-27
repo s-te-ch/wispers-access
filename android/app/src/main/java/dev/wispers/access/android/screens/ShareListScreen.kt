@@ -54,6 +54,7 @@ import dev.wispers.access.android.proxy.ShareStatusTracker
 import dev.wispers.access.android.proxy.toAvailability
 import dev.wispers.access.android.storage.ShareExtras
 import dev.wispers.access.android.ui.theme.AccessOnSurfaceMedium
+import dev.wispers.access.android.whyUnavailable
 import dev.wispers.access.sdk.Share
 import dev.wispers.access.sdk.ShareId
 import dev.wispers.access.sdk.ShareState
@@ -228,12 +229,21 @@ private fun ShareSections(
                 is RosterRow.AppRow -> {
                     val key = BrowseKey(row.share.id, row.app.id)
                     val live = row.share.state == ShareState.LIVE
+                    val unavailable = whyUnavailable(row.app)
                     AppCard(
                         app = row.app,
                         iconPng = icons[key],
-                        enabled = live,
-                        // A terminal share's apps lead to the explanation instead.
-                        onClick = { if (live) onAppClick(key) else onShareClick(row.share) },
+                        enabled = live && unavailable == null,
+                        note = unavailable,
+                        // Tapping an app of a terminal share opens the share's
+                        // explanation instead. Tapping an app this device can't
+                        // open does nothing; its card says why.
+                        onClick = {
+                            when {
+                                !live -> onShareClick(row.share)
+                                unavailable == null -> onAppClick(key)
+                            }
+                        },
                     )
                 }
                 is RosterRow.NoApps -> Text(
@@ -291,9 +301,9 @@ private fun ShareHeader(
 
 /**
  * One app's card: its icon (harvested while browsing, else a letter tile) and
- * name; tapping the row opens the app. An optional [footer] sits inside the
- * card under a divider, for actions that belong to this app, and is not part
- * of the tap target.
+ * name, with an optional [note] under it; tapping the row opens the app. An
+ * optional [footer] sits inside the card under a divider, for actions that
+ * belong to this app, and is not part of the tap target.
  */
 @Composable
 fun AppCard(
@@ -301,6 +311,7 @@ fun AppCard(
     iconPng: ByteArray?,
     enabled: Boolean,
     onClick: () -> Unit,
+    note: String? = null,
     footer: (@Composable () -> Unit)? = null,
 ) {
     val name = app.name.ifBlank { app.id }
@@ -320,12 +331,20 @@ fun AppCard(
         ) {
             Avatar(nickname = name, iconPng = iconPng)
             Spacer(Modifier.width(16.dp))
-            Text(
-                text = name,
-                style = MaterialTheme.typography.headlineSmall,
-                color = AccessOnSurfaceMedium,
-                modifier = Modifier.weight(1f),
-            )
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = name,
+                    style = MaterialTheme.typography.headlineSmall,
+                    color = AccessOnSurfaceMedium,
+                )
+                if (note != null) {
+                    Text(
+                        text = note,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
             Icon(
                 imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
                 contentDescription = null,

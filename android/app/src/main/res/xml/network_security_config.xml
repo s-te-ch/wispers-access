@@ -1,6 +1,17 @@
 <?xml version="1.0" encoding="utf-8"?>
 <network-security-config>
     <!--
+        Trust the CAs the user or the device's management installed, as Chrome
+        does. This allows reaching internal HTTPS services through Wispers
+        Access shares, even if their certificates aren't publicly trusted.
+    -->
+    <base-config>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="user" />
+        </trust-anchors>
+    </base-config>
+    <!--
         Permit cleartext HTTP only to the local proxy and its share subdomains.
         Everything else stays under the platform default (cleartext blocked on API 28+).
     -->

@@ -3,12 +3,18 @@ package dev.wispers.access.android
 import android.app.ActivityManager
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.net.Uri
+import android.net.http.SslError
 import android.os.Bundle
 import android.util.Base64
 import android.util.Log
 import android.view.ViewGroup
+import android.webkit.HttpAuthHandler
 import android.webkit.JavascriptInterface
+import android.webkit.SslErrorHandler
+import android.webkit.WebResourceRequest
 import android.webkit.WebChromeClient
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -47,20 +53,27 @@ import androidx.core.content.pm.ShortcutManagerCompat
 import androidx.core.net.toUri
 import androidx.lifecycle.lifecycleScope
 import androidx.swiperefreshlayout.widget.SwipeRefreshLayout
+import androidx.webkit.ProfileStore
+import androidx.webkit.WebViewCompat
 import dagger.hilt.android.AndroidEntryPoint
+import dev.wispers.access.android.proxy.ForwardProxyHolder
 import dev.wispers.access.android.proxy.ProxyHolder
 import dev.wispers.access.android.screens.TerminalShareExplanation
 import dev.wispers.access.android.storage.ShareExtras
 import dev.wispers.access.android.ui.theme.WispersAccessTheme
+import dev.wispers.access.sdk.AppProxyMode
 import dev.wispers.access.sdk.Share
 import dev.wispers.access.sdk.ShareState
 import dev.wispers.access.sdk.SharedApp
+import dev.wispers.access.sdk.proxiedTargets
 import javax.inject.Inject
 import kotlinx.coroutines.launch
 import org.json.JSONObject
 
 /**
- * Hosts a single WebView pointed at the SDK's proxy for one app of one share.
+ * Hosts a single WebView for one app of one share. For a reverse-proxy app,
+ * the WebView is pointed at the SDK's reverse proxy. For a forward-proxy app,
+ * it opens the app's start URL and goes through the SDK's forward proxy.
  *
  * Launched via [launch] with `Intent.FLAG_ACTIVITY_NEW_DOCUMENT` + a unique data
  * URI per app, which combined with `documentLaunchMode="intoExisting"` in the
@@ -72,6 +85,7 @@ class BrowseActivity : ComponentActivity() {
 
     @Inject lateinit var manager: ShareManager
     @Inject lateinit var proxy: ProxyHolder
+    @Inject lateinit var forwardProxy: ForwardProxyHolder
     @Inject lateinit var extras: ShareExtras
 
     private var webView: WebView? = null
@@ -103,22 +117,58 @@ class BrowseActivity : ComponentActivity() {
                 // the explanation instead of a WebView that can only error.
                 val shares by manager.shares.collectAsState()
                 val share = shares?.firstOrNull { it.id == key.shareId }
+                // Null if the share no longer has the app, e.g. when a pinned
+                // shortcut outlived it. In that case, the WebView goes to the
+                // reverse proxy, which answers with an "app not found" page.
+                val app = share?.apps?.firstOrNull { it.id == key.appId }
+                val unavailable = app?.let(::whyUnavailable)
                 when {
                     shares == null -> ConnectingOverlay(Modifier.fillMaxSize())
                     share == null -> TerminalShareNotice(state = ShareState.REMOVED)
                     share.state != ShareState.LIVE -> TerminalShareNotice(state = share.state)
+                    unavailable != null -> UnavailableAppNotice(reason = unavailable)
                     else -> {
-                        var url by remember { mutableStateOf<String?>(null) }
-                        LaunchedEffect(key) { url = proxy.baseUrl(key) + "/" }
-                        val ready = url
+                        var target by remember { mutableStateOf<BrowseTarget?>(null) }
+                        var untrusted by remember { mutableStateOf(false) }
+                        // Once retried, the app starts over at its start URL.
+                        var retried by remember { mutableStateOf(false) }
+                        LaunchedEffect(key) {
+                            target = if (app?.mode == AppProxyMode.FORWARD_PROXY) {
+                                BrowseTarget(
+                                    url = app.startUrl!!,
+                                    proxyParams = forwardProxy.webViewProxyParams(share.id, app),
+                                )
+                            } else {
+                                BrowseTarget(url = proxy.baseUrl(key) + "/", proxyParams = null)
+                            }
+                        }
+                        val ready = target
                         if (ready == null) {
                             ConnectingOverlay(Modifier.fillMaxSize())
+                        } else if (untrusted) {
+                            CertificateNotice(
+                                share = share,
+                                onRetry = {
+                                    untrusted = false
+                                    retried = true
+                                },
+                            )
                         } else {
                             BrowseWebViewScreen(
-                                url = ready,
-                                savedState = savedInstanceState,
+                                target = ready,
+                                savedState = if (retried) null else savedInstanceState,
                                 onWebViewReady = { webView = it },
                                 onIconJson = { json -> handleHarvestedIcon(share, key, json) },
+                                onCertificateError = { url, mainFrame ->
+                                    // A page whose request failed may still work;
+                                    // only a certificate to install is worth
+                                    // replacing it for.
+                                    if (app != null && isHttpsOriginOf(app, url) &&
+                                        (mainFrame || ShareCertificates.anyMissing(share))
+                                    ) {
+                                        untrusted = true
+                                    }
+                                },
                             )
                         }
                     }
@@ -202,9 +252,43 @@ class BrowseActivity : ComponentActivity() {
     }
 }
 
+/** What the WebView needs to open an app. */
+private data class BrowseTarget(
+    /** The URL to load first. */
+    val url: String,
+    /** How to go through the forward proxy, for a forward-proxy app. */
+    val proxyParams: ForwardProxyHolder.WebViewProxyParams?,
+)
+
+/**
+ * Whether `url` is on one of a forward-proxy app's `https` origins, whose
+ * certificates the share may come with. Certificate errors elsewhere, on a
+ * site the app merely links to, are the WebView's to show.
+ */
+private fun isHttpsOriginOf(app: SharedApp, url: String): Boolean {
+    val uri = Uri.parse(url)
+    val host = uri.host?.lowercase() ?: return false
+    val port = if (uri.port != -1) uri.port else 443
+    return proxiedTargets(app).orEmpty().any { target ->
+        target.https && target.host.trim('[', ']') == host && target.port.toInt() == port
+    }
+}
+
 /** Full-screen terminal-share explanation with a way back into the app. */
 @Composable
 private fun TerminalShareNotice(state: ShareState) {
+    Notice { TerminalShareExplanation(state = state) }
+}
+
+/** Full-screen note on why this device can't open the app. */
+@Composable
+private fun UnavailableAppNotice(reason: String) {
+    Notice { Text(reason, style = MaterialTheme.typography.bodyLarge) }
+}
+
+/** A full-screen notice instead of the app, with a way back into the app. */
+@Composable
+internal fun Notice(content: @Composable () -> Unit) {
     val context = androidx.compose.ui.platform.LocalContext.current
     Box(
         modifier = Modifier
@@ -217,7 +301,7 @@ private fun TerminalShareNotice(state: ShareState) {
             modifier = Modifier.padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
-            TerminalShareExplanation(state = state)
+            content()
             androidx.compose.material3.OutlinedButton(
                 onClick = {
                     context.startActivity(Intent(context, MainActivity::class.java))
@@ -399,10 +483,12 @@ private const val HARVEST_JS = """
 
 @Composable
 private fun BrowseWebViewScreen(
-    url: String,
+    target: BrowseTarget,
     savedState: Bundle?,
     onWebViewReady: (WebView) -> Unit,
     onIconJson: (String) -> Unit,
+    /** `mainFrame` if it was the page itself that failed, not one of its requests. */
+    onCertificateError: (url: String, mainFrame: Boolean) -> Unit,
 ) {
     var loading by remember { mutableStateOf(true) }
 
@@ -425,6 +511,13 @@ private fun BrowseWebViewScreen(
                 // scrolled to the top, so it doesn't fight the page's own scroll.
                 val swipeRefresh = SwipeRefreshLayout(context)
                 val webView = WebView(context).apply {
+                    // A forward-proxy app's WebView runs in its share's profile
+                    // (see WebViewProxyParams.profile), which WebView wants set
+                    // before anything else.
+                    target.proxyParams?.let { params ->
+                        ProfileStore.getInstance().getOrCreateProfile(params.profile)
+                        WebViewCompat.setProfile(this, params.profile)
+                    }
                     // Explicit match-parent layout params: without them Chromium
                     // treats the view as wrap-content and resolves CSS viewport
                     // units (vh/dvh/...) against a zero-height viewport.
@@ -442,6 +535,23 @@ private fun BrowseWebViewScreen(
                     addJavascriptInterface(IconBridge(onIconJson), "WAIcon")
                     webChromeClient = WebChromeClient()
                     webViewClient = object : WebViewClient() {
+                        // Where the page itself is being loaded from, redirects
+                        // included, to tell its certificate errors from those
+                        // of its requests.
+                        private var mainFrameUrl: String? = null
+
+                        override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
+                            mainFrameUrl = url
+                        }
+
+                        override fun shouldOverrideUrlLoading(
+                            view: WebView?,
+                            request: WebResourceRequest,
+                        ): Boolean {
+                            if (request.isForMainFrame) mainFrameUrl = request.url.toString()
+                            return false
+                        }
+
                         override fun onPageCommitVisible(view: WebView?, url: String?) {
                             loading = false
                         }
@@ -450,11 +560,41 @@ private fun BrowseWebViewScreen(
                             swipeRefresh.isRefreshing = false
                             view?.evaluateJavascript(HARVEST_JS, null)
                         }
+
+                        // Called for every HTTP auth challenge. If it's the
+                        // forward proxy sending a 407 Proxy Authentication
+                        // Required with the realm, return the credentials.
+                        // Every other challenge, such as a shared app's own
+                        // 401, gets the default handling.
+                        override fun onReceivedHttpAuthRequest(
+                            view: WebView?,
+                            handler: HttpAuthHandler,
+                            host: String?,
+                            realm: String?,
+                        ) {
+                            val params = target.proxyParams
+                            if (params != null && params.isProxyChallenge(host, realm)) {
+                                handler.proceed(params.credential.username, params.credential.password)
+                            } else {
+                                super.onReceivedHttpAuthRequest(view, handler, host, realm)
+                            }
+                        }
+
+                        // Cancelled, as by default, for pages and their
+                        // requests alike.
+                        override fun onReceivedSslError(
+                            view: WebView?,
+                            handler: SslErrorHandler,
+                            error: SslError,
+                        ) {
+                            handler.cancel()
+                            onCertificateError(error.url, error.url == mainFrameUrl)
+                        }
                     }
                     if (savedState != null) {
                         restoreState(savedState)
                     } else {
-                        loadUrl(url)
+                        loadUrl(target.url)
                     }
                     onWebViewReady(this)
                 }

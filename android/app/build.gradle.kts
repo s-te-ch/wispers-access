@@ -30,8 +30,8 @@ android {
         applicationId = "dev.wispers.access.android"
         minSdk = 28
         targetSdk = 36
-        versionCode = 12
-        versionName = "1.0.0"
+        versionCode = 13
+        versionName = "1.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -113,6 +113,7 @@ dependencies {
     implementation(libs.androidx.compose.material.icons.core)
     implementation(libs.zxing.android.embedded)
     implementation(libs.androidx.swiperefreshlayout)
+    implementation(libs.androidx.webkit)
     testImplementation(libs.junit)
     androidTestImplementation(platform(libs.androidx.compose.bom))
     androidTestImplementation(libs.androidx.compose.ui.test.junit4)

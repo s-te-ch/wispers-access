@@ -1,6 +1,8 @@
 //! Tauri commands and data formats for shares.
 
 use crate::Desktop;
+use crate::browsers::Browser;
+use crate::certificates::removed_on_leave;
 use serde::Serialize;
 use std::time::{Duration, SystemTime};
 use tauri::State;
@@ -26,6 +28,13 @@ pub struct ShareView {
     state: &'static str,
     joined_at_ms: u64,
     last_connected_ms: Option<u64>,
+    /// Whether this app, as it started, had to quit and restart the browser
+    /// running the share's profile, because the share's port changed.
+    /// Cleared once one of the share's apps is opened.
+    profile_restarted: bool,
+    /// Whether leaving the share takes out a certificate this app installed
+    /// for it, which has the system ask the user.
+    removes_certificates: bool,
 }
 
 #[derive(Serialize)]
@@ -35,8 +44,12 @@ pub struct AppView {
     name: String,
     /// `web`, `jellyfin` or `immich`.
     kind: &'static str,
-    /// Where the browser finds the app, `<app>.<share>.wa.localhost:<port>`.
-    host: String,
+    /// Where the browser finds the app:
+    /// `http://<app>.<share>.wa.localhost:<port>/` for a reverse-proxy app,
+    /// the start URL for a forward-proxy app.
+    url: String,
+    /// The problem description if this device can't open the app.
+    unavailable: Option<String>,
 }
 
 /// List all joined shares, from the store. Doesn't wait for the network.
@@ -45,12 +58,13 @@ pub fn shares(desktop: State<Desktop>) -> Result<Vec<ShareView>, String> {
     let shares = desktop.client.shares().map_err(|e| e.to_string())?;
     Ok(shares
         .iter()
-        .map(|share| ShareView::of(share, &desktop))
+        .map(|share| ShareView::of(share, &shares, &desktop))
         .collect())
 }
 
 impl ShareView {
-    fn of(share: &sdk::Share, desktop: &Desktop) -> Self {
+    /// `shares` are all joined shares, `share` among them.
+    fn of(share: &sdk::Share, shares: &[sdk::Share], desktop: &Desktop) -> Self {
         let port = desktop.proxy.port();
         Self {
             id: share.id.to_string(),
@@ -64,13 +78,43 @@ impl ShareView {
                     id: app.id.clone(),
                     name: app.name.clone(),
                     kind: app.kind.as_str(),
-                    host: format!("{}.{}.wa.localhost:{port}", app.id, share.label),
+                    url: match app.mode {
+                        sdk::AppProxyMode::ForwardProxy => {
+                            app.start_url.clone().unwrap_or_default()
+                        }
+                        _ => format!("http://{}.{}.wa.localhost:{port}/", app.id, share.label),
+                    },
+                    unavailable: why_unavailable(app),
                 })
                 .collect(),
             state: describe_state(share.state),
             joined_at_ms: epoch_ms(share.joined_at),
             last_connected_ms: desktop.activity.last_connected(&share.id),
+            profile_restarted: desktop.profile_manager.was_restarted(&share.id),
+            removes_certificates: !removed_on_leave(&desktop.installed_certificates, share, shares)
+                .is_empty(),
         }
+    }
+}
+
+/// Why this device can't open the app, `None` if it can. A host node newer
+/// than this app can share apps in a mode it doesn't know, or with origins
+/// it can't parse. A forward-proxy app also needs a browser that takes a
+/// profile and a proxy at launch.
+fn why_unavailable(app: &sdk::SharedApp) -> Option<String> {
+    const NEEDS_NEWER_APP: &str = "Needs a newer version of Wispers Access";
+    match app.mode {
+        sdk::AppProxyMode::ReverseProxy => None,
+        sdk::AppProxyMode::ForwardProxy => {
+            if app.start_url.is_none() || sdk::proxied_targets(app.clone()).is_none() {
+                Some(NEEDS_NEWER_APP.to_owned())
+            } else if Browser::first_installed().is_none() {
+                Some(format!("Needs {} installed", Browser::NAMES))
+            } else {
+                None
+            }
+        }
+        sdk::AppProxyMode::Unknown => Some(NEEDS_NEWER_APP.to_owned()),
     }
 }
 
@@ -134,15 +178,36 @@ pub async fn check_share(
     })
 }
 
-/// Opens an app in the system browser, pairing the browser on the way.
+/// Opens an app: a reverse-proxy app in the system browser, pairing the
+/// browser on the way, a forward-proxy app in the share's browser profile.
 #[tauri::command]
-pub fn open_app(
+pub async fn open_app(
     app: tauri::AppHandle,
-    desktop: State<Desktop>,
+    desktop: State<'_, Desktop>,
     share_id: String,
     app_id: String,
 ) -> Result<(), String> {
     let share = find(&desktop, &share_id)?;
+    let shared_app = share
+        .apps
+        .iter()
+        .find(|shared_app| shared_app.id == app_id)
+        .ok_or_else(|| format!("no app {app_id}"))?;
+    if shared_app.mode == sdk::AppProxyMode::ForwardProxy {
+        let url = shared_app
+            .start_url
+            .clone()
+            .ok_or_else(|| format!("app {app_id} has no start URL"))?;
+        let port = desktop
+            .forward_proxy
+            .share_port(share.id.clone())
+            .await
+            .map_err(|e| e.to_string())?;
+        return desktop
+            .profile_manager
+            .open(&share.id, port, &url)
+            .map_err(|e| e.to_string());
+    }
     let url = desktop
         .proxy
         .browse_url(share.id, app_id)
@@ -173,10 +238,15 @@ pub async fn join(desktop: State<'_, Desktop>, invite_code: String) -> Result<Sh
         .await
         .map_err(|e| e.to_string())?;
     desktop.activity.mark_connected(&share.id);
-    Ok(ShareView::of(&share, &desktop))
+    let shares = desktop.client.shares().unwrap_or_else(|e| {
+        tracing::warn!(error = %e, "could not read the shares after joining");
+        vec![share.clone()]
+    });
+    Ok(ShareView::of(&share, &shares, &desktop))
 }
 
-/// Removes a share from this device.
+/// Removes a share from this device, with its browser profiles and the
+/// certificates this app installed for it alone.
 #[tauri::command]
 pub async fn leave(desktop: State<'_, Desktop>, share_id: String) -> Result<(), String> {
     let share = find(&desktop, &share_id)?;
@@ -186,11 +256,28 @@ pub async fn leave(desktop: State<'_, Desktop>, share_id: String) -> Result<(), 
         .await
         .map_err(|e| e.to_string())?;
     desktop.activity.remove(&share.id);
+    desktop.forward_proxy.release(share.id.clone());
+    // The user imported the saved certificates in the share's profiles, if
+    // anywhere, which go now.
+    desktop.saved_certificates.remove(share.id.as_str());
+    let profile_manager = desktop.profile_manager.clone();
+    let client = desktop.client.clone();
+    let installed = desktop.installed_certificates.clone();
+    let removed = tauri::async_runtime::spawn_blocking(move || {
+        if let Err(e) = profile_manager.remove(&share.id) {
+            tracing::warn!(share = %share.label, error = %e, "could not remove the share's profiles");
+        }
+        crate::certificates::remove_for_left_share(&client, &installed, &share);
+    })
+    .await;
+    if let Err(e) = removed {
+        tracing::warn!(error = %e, "removing the share's profiles or certificates panicked");
+    }
     Ok(())
 }
 
 /// The share an ID from the UI names, or the message for one that is gone.
-fn find(desktop: &Desktop, share_id: &str) -> Result<sdk::Share, String> {
+pub(crate) fn find(desktop: &Desktop, share_id: &str) -> Result<sdk::Share, String> {
     desktop
         .client
         .share(share_id.to_owned())

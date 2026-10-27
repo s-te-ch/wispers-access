@@ -12,8 +12,11 @@ export interface SharedApp {
   id: string;
   name: string;
   kind: AppKind;
-  /** Where the browser finds the app, `<app>.<share>.wa.localhost:<port>`. */
-  host: string;
+  /** Where the browser finds the app: `http://<app>.<share>.wa.localhost:<port>/`
+   * for a reverse-proxy app, the start URL for a forward-proxy app. */
+  url: string;
+  /** The problem description if this device can't open the app. */
+  unavailable: string | null;
 }
 
 export interface Share {
@@ -26,6 +29,13 @@ export interface Share {
   state: ShareState;
   joinedAtMs: number;
   lastConnectedMs: number | null;
+  /** Whether this app, as it started, had to quit and restart the browser
+   * running the share's profile, because the share's port changed. Cleared
+   * once one of the share's apps is opened. */
+  profileRestarted: boolean;
+  /** Whether leaving the share takes out a certificate this app installed
+   * for it, which has the system ask the user. */
+  removesCertificates: boolean;
 }
 
 /** Share availability: reachable or not, or the host node turned us away for good. */
@@ -43,7 +53,8 @@ export const shares = () => invoke<Share[]>("shares");
  * the status dot. */
 export const checkShare = (shareId: string) => invoke<ShareStatus>("check_share", { shareId });
 
-/** Opens an app in the system browser, pairing the browser on the way. */
+/** Opens an app: a reverse-proxy app in the system browser, pairing the
+ * browser on the way, a forward-proxy app in the share's browser profile. */
 export const openApp = (shareId: string, appId: string) =>
   invoke<void>("open_app", { shareId, appId });
 
@@ -53,6 +64,47 @@ export const clipboardInvite = () => invoke<string | null>("clipboard_invite");
 export const join = (inviteCode: string) => invoke<Share>("join", { inviteCode });
 
 export const leave = (shareId: string) => invoke<void>("leave", { shareId });
+
+export interface Certificate {
+  subject: string;
+  kind: "ca" | "selfSignedServer" | "caSignedServer";
+  /** A server certificate's names. */
+  names: string[];
+  /** Whether installing it can help: a CA's, or a self-signed server's. */
+  installable: boolean;
+  /** Whether this app installed it. */
+  installed: boolean;
+}
+
+export interface CertificateStatus {
+  /** The share's `https` origins whose certificate this device doesn't trust. */
+  untrustedOrigins: string[];
+  /**
+   * Whether the check couldn't tell for any origin whether this device trusts it, as the
+   * share's host node or every origin was out of reach.
+   */
+  unchecked: boolean;
+  certificates: Certificate[];
+  /** Whether this app can install certificates here, or only save them. */
+  canInstall: boolean;
+  /**
+   * Whether the user saved the share's certificates. Whether they imported them in a browser
+   * afterwards is out of the app's sight.
+   */
+  saved: boolean;
+}
+
+/** Checks the share's `https` origins by a TLS handshake through the share. */
+export const checkCertificates = (shareId: string) =>
+  invoke<CertificateStatus>("check_certificates", { shareId });
+
+/** Installs the share's installable certificates; the system asks the user. */
+export const installCertificates = (shareId: string) =>
+  invoke<void>("install_certificates", { shareId });
+
+/** Saves them into a folder the user picks: the folder, or null if cancelled. */
+export const saveCertificates = (shareId: string) =>
+  invoke<string | null>("save_certificates", { shareId });
 
 /** What closing the window does: hide it, with the app running on in the
  * menu bar or tray, or quit, where nothing else holds the app. Then the window

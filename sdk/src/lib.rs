@@ -1,6 +1,6 @@
 //! The guest side of Wispers Access, shared by every client app: joining and
 //! restoring shares over any transport, the local share store, the guest API
-//! calls, and the loopback HTTP proxy.
+//! calls, and the loopback HTTP proxies.
 //!
 //! The entry point is [`Client`], one per data directory. The wire types an
 //! integrator meets ([`SharedApp`], [`Transport`]) are re-exported from the wire
@@ -11,27 +11,37 @@
 
 uniffi::setup_scaffolding!();
 
+mod certificates;
+mod forward_proxy;
 mod guest_node;
-mod http;
 mod iroh_transport;
 mod logging;
+mod loopback;
+mod loopback_forwarding;
 mod pairing;
+mod reverse_proxy;
 mod secrets;
+mod socket_owner;
 mod storage;
+#[cfg(test)]
+mod test_support;
 mod transports;
 mod wispers_connect_transport;
 
-pub use http::RequiredCookie;
+pub use certificates::{CertificateDescription, CertificateKind};
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
+pub use certificates::{OriginTrust, TrustVerdict};
 pub use logging::{LogLevel, LogSink, install_log_sink};
+pub use loopback::RequiredCookie;
 pub use secrets::{FileSecretStore, SecretScope, SecretStore, SecretStoreError};
 pub use storage::ShareId;
-pub use wispers_access_wire::{AppKind, SharedApp, Transport};
+pub use wispers_access_wire::{AppKind, AppProxyMode, SharedApp, Transport};
 
 use guest_node::GuestNode;
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::OnceCell;
 use transports::TerminalState;
@@ -59,6 +69,11 @@ pub enum SdkError {
     /// and turned the request away. The user should update the app.
     #[error("{0}")]
     ClientTooOld(String),
+    /// A port that one of the share's loopback origins needs is taken, by
+    /// another share's open app or by another process. The message, a
+    /// sentence to show the user, says which.
+    #[error("{0}")]
+    PortInUse(String),
     #[error("{0}")]
     Internal(String),
 }
@@ -132,6 +147,10 @@ pub struct Share {
     pub transport: Transport,
     /// The apps as last fetched from the host node, in its order.
     pub apps: Vec<SharedApp>,
+    /// Certificates for the share's `https` origins, one PEM certificate each,
+    /// as last fetched from the host node, for the guest's user to install on
+    /// the device.
+    pub ca_certificates: Vec<String>,
     pub state: ShareState,
     /// When this device joined.
     pub joined_at: std::time::SystemTime,
@@ -166,6 +185,9 @@ pub struct SharedApp {
     pub id: String,
     pub name: String,
     pub kind: AppKind,
+    pub mode: AppProxyMode,
+    pub start_url: Option<String>,
+    pub proxied_origins: Vec<String>,
 }
 
 #[uniffi::remote(Enum)]
@@ -173,6 +195,13 @@ pub enum AppKind {
     Web,
     Jellyfin,
     Immich,
+}
+
+#[uniffi::remote(Enum)]
+pub enum AppProxyMode {
+    ReverseProxy,
+    ForwardProxy,
+    Unknown,
 }
 
 #[uniffi::remote(Enum)]
@@ -189,6 +218,46 @@ pub fn validate_invite(invite_code: String) -> Result<Transport> {
     Ok(wire::Invite::parse(&invite_code)
         .map_err(|e| SdkError::InvalidInvite(e.to_string()))?
         .transport())
+}
+
+/// Where a forward-proxy app's proxied origins point, for the client app to
+/// set up its WebView's proxy with. `None` if one of them doesn't parse: the
+/// host node is newer than this SDK, and the app can't be opened.
+#[uniffi::export]
+pub fn proxied_targets(app: SharedApp) -> Option<Vec<ProxiedTarget>> {
+    app.proxied_origins
+        .iter()
+        .map(|origin| {
+            let origin = origin.parse::<wire::Origin>().ok()?;
+            Some(ProxiedTarget {
+                host: origin.host().to_owned(),
+                port: origin.port(),
+                https: origin.is_https(),
+                loopback: origin.is_loopback(),
+            })
+        })
+        .collect()
+}
+
+/// One of a forward-proxy app's proxied origins, taken apart.
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ProxiedTarget {
+    /// A lowercase DNS name, an IPv4 literal, or an IPv6 literal in brackets.
+    pub host: String,
+    /// The port, the scheme's default if the origin names none.
+    pub port: u16,
+    pub https: bool,
+    /// Whether the host names the loopback (`localhost`, `127.0.0.1`,
+    /// `[::1]`), which some WebViews never send to a proxy.
+    pub loopback: bool,
+}
+
+/// What one of a share's certificates ([`Share::ca_certificates`]) can vouch
+/// for, for the text that offers to install it. `None` if it isn't an X.509
+/// certificate in PEM.
+#[uniffi::export]
+pub fn describe_certificate(pem: String) -> Option<CertificateDescription> {
+    certificates::describe(&pem)
 }
 
 #[uniffi::export]
@@ -303,12 +372,15 @@ impl Client {
             let row = client.row(&share)?;
             // Let the live guest node go first: the transport that says
             // goodbye must not compete with it for the same key.
-            client
+            let live = client
                 .inner
                 .guest_nodes
                 .lock()
                 .expect("unpoisoned")
                 .remove(&share);
+            if let Some(node) = live.as_ref().and_then(|cell| cell.get()) {
+                node.close().await;
+            }
             transports::leave(&row, &client.inner.secrets)
                 .await
                 .map_err(SdkError::host_node)?;
@@ -359,31 +431,32 @@ impl Client {
         auth_mode: ProxyAuthMode,
     ) -> Result<Arc<HostRoutedProxy>> {
         let authenticator = match auth_mode {
-            ProxyAuthMode::AppCookie { cookie } => http::Authenticator::for_cookie(cookie),
-            ProxyAuthMode::Pairing { token_lifetime } => http::Authenticator::for_pairing(
+            ProxyAuthMode::AppCookie { cookie } => reverse_proxy::Authenticator::for_cookie(cookie),
+            ProxyAuthMode::Pairing { token_lifetime } => reverse_proxy::Authenticator::for_pairing(
                 pairing::CookieIssuer::restore_or_mint(&*self.inner.secrets, token_lifetime)?,
             ),
         };
         let client = self.clone();
         self.on_runtime(async move {
-            let (port, listeners) = http::bind_loopback_port(port)
+            let (port, listeners) = loopback::bind_port(port)
                 .await
                 .map_err(SdkError::host_node)?;
-            let accept_loops = listeners
-                .into_iter()
-                .map(|listener| {
-                    client.inner.runtime.spawn(http::accept_loop(
+            let serve = {
+                let client = client.clone();
+                let authenticator = authenticator.clone();
+                move |listener| {
+                    client.inner.runtime.spawn(reverse_proxy::accept_loop(
                         listener,
                         client.clone(),
-                        http::RouteSource::HostHeader,
+                        reverse_proxy::RouteSource::HostHeader,
                         Some(authenticator.clone()),
                     ))
-                })
-                .collect();
+                }
+            };
             Ok(Arc::new(HostRoutedProxy {
                 client,
                 authenticator,
-                bound_port: BoundPort { port, accept_loops },
+                bound_port: BoundPort::serve(port, listeners, serve),
             }))
         })
         .await
@@ -399,6 +472,52 @@ impl Client {
             required_cookie,
             bound_ports: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Starts the loopback forward proxy for desktop clients, with a port per
+    /// share that only processes of this OS user may connect to (see
+    /// `forward_proxy::ShareSource::Fixed`). macOS, Linux and Windows only.
+    pub fn start_per_share_forward_proxy(&self) -> Arc<PerShareForwardProxy> {
+        Arc::new(PerShareForwardProxy {
+            client: self.clone(),
+            bound_ports: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Starts the loopback forward proxy for the shares' forward-proxy apps,
+    /// on one port for all shares; `0` picks a free one. A share's webview
+    /// uses it as its HTTP proxy for the share's proxied origins and answers
+    /// its 407 with the share's [`CredentialRoutedForwardProxy::credential`]. For mobile client
+    /// apps, which can give each share's webview a credential of its own.
+    pub async fn start_credential_routed_forward_proxy(
+        &self,
+        port: u16,
+    ) -> Result<Arc<CredentialRoutedForwardProxy>> {
+        let credential_issuer = Arc::new(forward_proxy::CredentialIssuer::default());
+        let client = self.clone();
+        self.on_runtime(async move {
+            let (port, listeners) = loopback::bind_port(port)
+                .await
+                .map_err(SdkError::host_node)?;
+            let serve = {
+                let client = client.clone();
+                let credential_issuer = credential_issuer.clone();
+                move |listener| {
+                    client.inner.runtime.spawn(forward_proxy::accept_loop(
+                        listener,
+                        client.clone(),
+                        forward_proxy::ShareSource::Credential(credential_issuer.clone()),
+                    ))
+                }
+            };
+            Ok(Arc::new(CredentialRoutedForwardProxy {
+                client,
+                credential_issuer,
+                bound_port: Arc::new(BoundPort::serve(port, listeners, serve)),
+                loopback_forwarders: Default::default(),
+            }))
+        })
+        .await
     }
 }
 
@@ -439,6 +558,42 @@ impl Client {
                 guest_nodes: Mutex::new(HashMap::new()),
             }),
         }))
+    }
+
+    /// Whether this device trusts each `https` origin of the share's
+    /// forward-proxy apps, as the platform's verifier decides, by a TLS
+    /// handshake through a tunnel to each. For the desktop app, whose
+    /// browsers never tell it about a certificate error; the mobile apps
+    /// learn it from their webviews. Origins that don't parse are left out.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    pub async fn check_origin_trust(&self, share: ShareId) -> Result<Vec<OriginTrust>> {
+        let mut origins: Vec<wire::Origin> = Vec::new();
+        let apps = self.row(&share)?.read_apps().map_err(SdkError::storage)?;
+        let https_origins = apps
+            .iter()
+            .filter(|app| app.mode == AppProxyMode::ForwardProxy)
+            .flat_map(|app| &app.proxied_origins)
+            .filter_map(|origin| origin.parse::<wire::Origin>().ok())
+            .filter(|origin| origin.is_https());
+        for origin in https_origins {
+            if !origins.contains(&origin) {
+                origins.push(origin);
+            }
+        }
+        if origins.is_empty() {
+            return Ok(Vec::new());
+        }
+        let node = match self.restore_guest_node(share.as_str()).await? {
+            Lookup::Live(node) => node,
+            Lookup::Dead(state) => {
+                return Err(SdkError::HostNode(format!(
+                    "the share is {}",
+                    state.as_str()
+                )));
+            }
+            Lookup::Unknown => return Err(SdkError::NoSuchShare(share.to_string())),
+        };
+        certificates::check_origins(&node, origins).await
     }
 
     /// The local bookkeeping of any join, once the host node has answered:
@@ -593,7 +748,7 @@ pub enum ProxyAuthMode {
 #[derive(uniffi::Object)]
 pub struct HostRoutedProxy {
     client: Client,
-    authenticator: http::Authenticator,
+    authenticator: reverse_proxy::Authenticator,
     bound_port: BoundPort,
 }
 
@@ -609,7 +764,9 @@ impl HostRoutedProxy {
     pub fn browse_url(&self, share: ShareId, app_id: String) -> Result<String> {
         let label = self.share_label(&share)?;
         Ok(match self.authenticator.issuer() {
-            Some(issuer) => http::pair_url(self.port(), &issuer.mint_token(), &label, &app_id),
+            Some(issuer) => {
+                reverse_proxy::pair_url(self.port(), &issuer.mint_token(), &label, &app_id)
+            }
             None => self.app_origin(&label, &app_id),
         })
     }
@@ -627,7 +784,7 @@ impl HostRoutedProxy {
     fn app_origin(&self, label: &str, app_id: &str) -> String {
         format!(
             "http://{app_id}.{label}.{}:{}",
-            http::PROXY_DOMAIN,
+            reverse_proxy::PROXY_DOMAIN,
             self.port()
         )
     }
@@ -671,6 +828,30 @@ impl PerAppProxy {
         let port = self.app_port(share, app_id).await?;
         Ok(format!("http://127.0.0.1:{port}"))
     }
+
+    /// Binds every app's port again, on the same port numbers. iOS reclaims
+    /// the listening sockets of a suspended app, so call this whenever the
+    /// app comes back to the foreground.
+    pub async fn rebind(&self) {
+        let cells: Vec<_> = self
+            .bound_ports
+            .lock()
+            .expect("unpoisoned")
+            .values()
+            .cloned()
+            .collect();
+        let _ = self
+            .client
+            .on_runtime(async move {
+                for cell in cells {
+                    if let Some(bound) = cell.get() {
+                        bound.rebind().await;
+                    }
+                }
+                Ok(())
+            })
+            .await;
+    }
 }
 
 impl PerAppProxy {
@@ -692,34 +873,31 @@ impl PerAppProxy {
                     .client
                     .on_runtime(async move {
                         if let Some(port) = row.read_app_port(&app).map_err(SdkError::storage)?
-                            && let Ok(bound) = http::bind_loopback_port(port).await
+                            && let Ok(bound) = loopback::bind_port(port).await
                         {
                             return Ok(bound);
                         }
-                        let (port, listeners) = http::bind_loopback_port(0)
-                            .await
-                            .map_err(SdkError::host_node)?;
+                        let (port, listeners) =
+                            loopback::bind_port(0).await.map_err(SdkError::host_node)?;
                         row.write_app_port(&app, port).map_err(SdkError::storage)?;
                         Ok((port, listeners))
                     })
                     .await?;
-                let route_source = http::RouteSource::Fixed { share, app: app_id };
+                let route_source = reverse_proxy::RouteSource::Fixed { share, app: app_id };
                 let authenticator = self
                     .required_cookie
                     .clone()
-                    .map(http::Authenticator::for_cookie);
-                let accept_loops = listeners
-                    .into_iter()
-                    .map(|listener| {
-                        self.client.inner.runtime.spawn(http::accept_loop(
-                            listener,
-                            self.client.clone(),
-                            route_source.clone(),
-                            authenticator.clone(),
-                        ))
-                    })
-                    .collect();
-                Ok::<_, SdkError>(BoundPort { port, accept_loops })
+                    .map(reverse_proxy::Authenticator::for_cookie);
+                let client = self.client.clone();
+                let serve = move |listener| {
+                    client.inner.runtime.spawn(reverse_proxy::accept_loop(
+                        listener,
+                        client.clone(),
+                        route_source.clone(),
+                        authenticator.clone(),
+                    ))
+                };
+                Ok::<_, SdkError>(BoundPort::serve(port, listeners, serve))
             })
             .await?;
         Ok(bound.port)
@@ -736,16 +914,319 @@ impl Drop for PerAppProxy {
     }
 }
 
+/// A running loopback forward proxy, serving every share's forward-proxy
+/// apps on one port. Dropping it stops accepting connections, and the
+/// shares' credentials end with it.
+#[derive(uniffi::Object)]
+pub struct CredentialRoutedForwardProxy {
+    client: Client,
+    credential_issuer: Arc<forward_proxy::CredentialIssuer>,
+    bound_port: Arc<BoundPort>,
+    /// Each share's loopback forwarder while it lives.
+    loopback_forwarders: Arc<tokio::sync::Mutex<HashMap<ShareId, Weak<LoopbackForwarder>>>>,
+}
+
+#[uniffi::export]
+impl CredentialRoutedForwardProxy {
+    pub fn port(&self) -> u16 {
+        self.bound_port.port
+    }
+
+    /// The realm of the proxy's 407s. The client app answers a challenge with
+    /// the share's credential only if it names this realm and the proxy's
+    /// host. (Android's callback gives no port, so the realm is what tells the
+    /// proxy apart from a shared app on `localhost`.)
+    pub fn realm(&self) -> String {
+        forward_proxy::REALM.to_owned()
+    }
+
+    /// What a share's webview answers the proxy's 407s with. Minted lazily,
+    /// valid as long as this proxy runs.
+    pub fn credential(&self, share: ShareId) -> Result<ProxyCredential> {
+        self.client.row(&share)?;
+        Ok(ProxyCredential {
+            username: share.to_string(),
+            password: self.credential_issuer.mint_password(&share),
+        })
+    }
+
+    /// Binds the proxy's port, and those of every live loopback forwarder,
+    /// again, on the same port numbers. iOS reclaims the listening sockets of a
+    /// suspended app, so call this whenever the app comes back to the
+    /// foreground.
+    pub async fn rebind(&self) {
+        let own = self.bound_port.clone();
+        let forwarders = self.loopback_forwarders.clone();
+        let _ = self
+            .client
+            .on_runtime(async move {
+                own.rebind().await;
+                let live: Vec<_> = forwarders
+                    .lock()
+                    .await
+                    .values()
+                    .filter_map(Weak::upgrade)
+                    .collect();
+                for forwarder in live {
+                    for bound in &forwarder.bound_ports {
+                        bound.rebind().await;
+                    }
+                }
+                Ok(())
+            })
+            .await;
+    }
+
+    /// For WebViews that don't send loopback hosts to a proxy (iOS), which
+    /// breaks normal forward-proxy mode whenver a shared app uses
+    /// localhost:port-style addresses. Instead, this attempts to bind the same
+    /// ports as the shared app, then proxies requests reaching those ports.
+    /// This can clash, in which case we fail with [`SdkError::PortInUse`].
+    pub async fn forward_loopback_origins(&self, share: ShareId) -> Result<Arc<LoopbackForwarder>> {
+        let client = self.client.clone();
+        let forwarders = self.loopback_forwarders.clone();
+        self.client
+            .on_runtime(async move {
+                let mut forwarders = forwarders.lock().await;
+                if let Some(live) = forwarders.get(&share).and_then(Weak::upgrade) {
+                    return Ok(live);
+                }
+                forwarders.retain(|_, forwarder| forwarder.strong_count() > 0);
+                let apps = client.row(&share)?.read_apps().map_err(SdkError::storage)?;
+                // Released by its drop if a port fails to bind.
+                let mut forwarder = LoopbackForwarder {
+                    cookie: RequiredCookie {
+                        name: loopback_forwarding::COOKIE_NAME.to_owned(),
+                        value: secrets::mint_secret(),
+                    },
+                    bound_ports: Vec::new(),
+                };
+                for (port, hosts) in loopback_forwarding::loopback_ports(&apps) {
+                    if let Some(holder) = forwarders.iter().find_map(|(holder, other)| {
+                        other
+                            .upgrade()
+                            .is_some_and(|other| other.ports().contains(&port))
+                            .then_some(holder)
+                    }) {
+                        let name = client
+                            .row(holder)?
+                            .read_names()
+                            .map_err(SdkError::storage)?
+                            .1;
+                        return Err(SdkError::PortInUse(format!(
+                            "Port {port} is in use by an app of the share {name}."
+                        )));
+                    }
+                    let (_, listeners) = loopback::bind_port(port).await.map_err(|e| {
+                        tracing::warn!(
+                            port,
+                            error = format!("{e:#}"),
+                            "could not bind a loopback port"
+                        );
+                        SdkError::PortInUse(format!(
+                            "Port {port} is already in use on this device."
+                        ))
+                    })?;
+                    let forwarded = Arc::new(loopback_forwarding::ForwardedPort {
+                        client: client.clone(),
+                        share: share.clone(),
+                        port,
+                        hosts,
+                        cookie: forwarder.cookie.clone(),
+                        share_origins: loopback_forwarding::share_origins(&apps),
+                    });
+                    let runtime = client.inner.runtime.clone();
+                    let serve = move |listener| {
+                        runtime.spawn(loopback_forwarding::accept_loop(
+                            listener,
+                            forwarded.clone(),
+                        ))
+                    };
+                    forwarder
+                        .bound_ports
+                        .push(BoundPort::serve(port, listeners, serve));
+                }
+                let forwarder = Arc::new(forwarder);
+                forwarders.insert(share, Arc::downgrade(&forwarder));
+                Ok(forwarder)
+            })
+            .await
+    }
+}
+
+impl Drop for CredentialRoutedForwardProxy {
+    fn drop(&mut self) {
+        self.bound_port.release();
+    }
+}
+
+/// A running loopback forward proxy with a port per share, for desktop
+/// clients (see [`Client::start_per_share_forward_proxy`]). Dropping it stops
+/// accepting connections.
+#[derive(uniffi::Object)]
+pub struct PerShareForwardProxy {
+    client: Client,
+    /// Each share's port, bound by whoever asks for it first.
+    bound_ports: Mutex<HashMap<ShareId, Arc<OnceCell<BoundPort>>>>,
+}
+
+#[uniffi::export]
+impl PerShareForwardProxy {
+    /// The share's port on `127.0.0.1`, for its browser profile's proxy
+    /// setting. Binds it when on first use, using the remembered port from the
+    /// last run if available (will try for a few seconds, as an earlier run of
+    /// the app may still be exiting), otherwise a new port. If the share's
+    /// browser got started using a a different port, it must be restarted.
+    pub async fn share_port(&self, share: ShareId) -> Result<u16> {
+        let cell = self
+            .bound_ports
+            .lock()
+            .expect("unpoisoned")
+            .entry(share.clone())
+            .or_default()
+            .clone();
+        let bound = cell
+            .get_or_try_init(|| async {
+                let row = self.client.row(&share)?;
+                let (port, listeners) = self
+                    .client
+                    .on_runtime(async move {
+                        if let Some(port) =
+                            row.read_forward_proxy_port().map_err(SdkError::storage)?
+                            && let Ok(bound) = loopback::rebind_port(port).await
+                        {
+                            return Ok(bound);
+                        }
+                        let (port, listeners) =
+                            loopback::bind_port(0).await.map_err(SdkError::host_node)?;
+                        row.write_forward_proxy_port(port)
+                            .map_err(SdkError::storage)?;
+                        Ok((port, listeners))
+                    })
+                    .await?;
+                let client = self.client.clone();
+                let serve = move |listener| {
+                    client.inner.runtime.spawn(forward_proxy::accept_loop(
+                        listener,
+                        client.clone(),
+                        forward_proxy::ShareSource::Fixed(share.clone()),
+                    ))
+                };
+                Ok::<_, SdkError>(BoundPort::serve(port, listeners, serve))
+            })
+            .await?;
+        Ok(bound.port)
+    }
+
+    /// Closes the share's port. Used when we leave a share. Already accepted
+    /// connections run until the browser closes them.
+    pub fn release(&self, share: ShareId) {
+        let cell = self.bound_ports.lock().expect("unpoisoned").remove(&share);
+        if let Some(bound) = cell.as_ref().and_then(|cell| cell.get()) {
+            bound.release();
+        }
+    }
+}
+
+impl Drop for PerShareForwardProxy {
+    fn drop(&mut self) {
+        for cell in self.bound_ports.lock().expect("unpoisoned").values() {
+            if let Some(bound) = cell.get() {
+                bound.release();
+            }
+        }
+    }
+}
+
+/// A share's Basic credential for the [`CredentialRoutedForwardProxy`].
+#[derive(Clone, Debug, PartialEq, Eq, uniffi::Record)]
+pub struct ProxyCredential {
+    pub username: String,
+    pub password: String,
+}
+
+/// A share's `http` loopback origins, forwarded to its host node while this
+/// lives (see [`CredentialRoutedForwardProxy::forward_loopback_origins`]). Dropping the last
+/// reference releases the ports.
+#[derive(uniffi::Object)]
+pub struct LoopbackForwarder {
+    cookie: RequiredCookie,
+    bound_ports: Vec<BoundPort>,
+}
+
+#[uniffi::export]
+impl LoopbackForwarder {
+    /// The cookie every forwarded request must carry. The client app sets it
+    /// in the share's data store for `localhost` and `127.0.0.1`, `HttpOnly`
+    /// so pages can't read or delete it.
+    pub fn cookie(&self) -> RequiredCookie {
+        self.cookie.clone()
+    }
+
+    /// The ports being forwarded.
+    pub fn ports(&self) -> Vec<u16> {
+        self.bound_ports.iter().map(|bound| bound.port).collect()
+    }
+}
+
+impl Drop for LoopbackForwarder {
+    fn drop(&mut self) {
+        for bound in &self.bound_ports {
+            bound.release();
+        }
+    }
+}
+
 /// A port bound on each loopback address, with an accept loop per address.
+/// It remembers how to serve the port, so that it can bind it again.
 struct BoundPort {
     port: u16,
-    accept_loops: Vec<tokio::task::JoinHandle<()>>,
+    /// Starts the accept loop for one of the port's listeners.
+    serve: Box<dyn Fn(tokio::net::TcpListener) -> tokio::task::JoinHandle<()> + Send + Sync>,
+    accept_loops: Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 
 impl BoundPort {
+    /// Serves listeners just bound to `port`, one accept loop each.
+    fn serve(
+        port: u16,
+        listeners: Vec<tokio::net::TcpListener>,
+        serve: impl Fn(tokio::net::TcpListener) -> tokio::task::JoinHandle<()> + Send + Sync + 'static,
+    ) -> Self {
+        let accept_loops = listeners.into_iter().map(&serve).collect();
+        BoundPort {
+            port,
+            serve: Box::new(serve),
+            accept_loops: Mutex::new(accept_loops),
+        }
+    }
+
+    /// Binds the port again and serves the new listeners. If it can't be bound
+    /// again, it stays unserved, with a warning.
+    async fn rebind(&self) {
+        let old = std::mem::take(&mut *self.accept_loops.lock().expect("unpoisoned"));
+        for accept_loop in &old {
+            accept_loop.abort();
+        }
+        for accept_loop in old {
+            let _ = accept_loop.await;
+        }
+        match loopback::bind_port(self.port).await {
+            Ok((_, listeners)) => {
+                let new = listeners.into_iter().map(&self.serve).collect();
+                *self.accept_loops.lock().expect("unpoisoned") = new;
+            }
+            Err(e) => tracing::warn!(
+                port = self.port,
+                error = format!("{e:#}"),
+                "could not bind a loopback port again"
+            ),
+        }
+    }
+
     /// Stops the accept loops, which closes the port.
     fn release(&self) {
-        for accept_loop in &self.accept_loops {
+        for accept_loop in self.accept_loops.lock().expect("unpoisoned").iter() {
             accept_loop.abort();
         }
     }
@@ -779,6 +1260,21 @@ mod tests {
         .unwrap()
     }
 
+    /// Deletes a client's data dir once it can. Windows doesn't delete open
+    /// files, and a dropped client's database closes only after its runtime
+    /// has dropped the tasks it aborted.
+    fn remove_scratch_dir(dir: &std::path::Path) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while let Err(e) = std::fs::remove_dir_all(dir) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "could not remove {}: {e}",
+                dir.display()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     #[test]
     fn a_client_starts_offline_with_its_own_runtime() {
         let data_dir = scratch_dir();
@@ -790,7 +1286,7 @@ mod tests {
             Err(SdkError::InvalidInvite(_))
         ));
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
     }
 
     #[tokio::test]
@@ -820,18 +1316,14 @@ mod tests {
         }
         drop(proxy);
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
     }
 
     #[tokio::test]
     async fn per_app_ports_survive_a_new_proxy() {
         let data_dir = scratch_dir();
         let client = client_in(&data_dir);
-        // A share the store knows, without a host node behind it.
-        let row = client.inner.db.new_row().unwrap();
-        row.write_deduped_hostname("rt").unwrap();
-        row.mark_complete().unwrap();
-        let share = row.share_id().unwrap();
+        let share = stored_share(&client);
 
         let proxy = client.start_per_app_proxy(None);
         let first = proxy.base_url(share.clone(), "echo".into()).await.unwrap();
@@ -850,7 +1342,28 @@ mod tests {
         assert_eq!(proxy.base_url(share, "echo".into()).await.unwrap(), first);
         drop(proxy);
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
+    }
+
+    #[tokio::test]
+    async fn per_app_ports_are_served_again_after_a_rebind() {
+        let data_dir = scratch_dir();
+        let client = client_in(&data_dir);
+        let share = stored_share(&client);
+        let cookie = RequiredCookie {
+            name: "__wispers_proxy_auth".into(),
+            value: "s3cret".into(),
+        };
+        let proxy = client.start_per_app_proxy(Some(cookie));
+        let base = proxy.base_url(share, "echo".into()).await.unwrap();
+        let port: u16 = base.rsplit(':').next().unwrap().parse().unwrap();
+        proxy.rebind().await;
+        // Any answer will do: the port is listening.
+        let req = hyper::Request::get("/").body(String::new()).unwrap();
+        assert_eq!(send(port, req).await.status(), hyper::StatusCode::FORBIDDEN);
+        drop(proxy);
+        drop(client);
+        remove_scratch_dir(&data_dir);
     }
 
     #[tokio::test]
@@ -890,10 +1403,7 @@ mod tests {
         );
         // There is no pairing to be had under an app's own cookie: the
         // browser goes straight to the app.
-        let row = client.inner.db.new_row().unwrap();
-        row.write_deduped_hostname("rt").unwrap();
-        row.mark_complete().unwrap();
-        let share = row.share_id().unwrap();
+        let share = stored_share(&client);
         assert_eq!(
             proxy.browse_url(share.clone(), "echo".into()).unwrap(),
             proxy.base_url(share, "echo".into()).unwrap()
@@ -908,17 +1418,14 @@ mod tests {
         );
         drop(proxy);
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
     }
 
     #[tokio::test]
     async fn a_browse_url_pairs_the_browser_once() {
         let data_dir = scratch_dir();
         let client = client_in(&data_dir);
-        let row = client.inner.db.new_row().unwrap();
-        row.write_deduped_hostname("rt").unwrap();
-        row.mark_complete().unwrap();
-        let share = row.share_id().unwrap();
+        let share = stored_share(&client);
         let auth_mode = ProxyAuthMode::Pairing {
             token_lifetime: Duration::from_secs(60),
         };
@@ -986,14 +1493,22 @@ mod tests {
         assert_eq!(send(port, app).await.status(), hyper::StatusCode::NOT_FOUND);
         drop(proxy);
         drop(client);
-        std::fs::remove_dir_all(data_dir).unwrap();
+        remove_scratch_dir(&data_dir);
     }
 
-    /// One HTTP/1.1 request to a proxy port.
+    /// One HTTP/1.1 request to a proxy port, on a connection of its own. The
+    /// proxy closes the connection after the response. Our end is a task on
+    /// the test's runtime, which `remove_scratch_dir` blocks, and the proxy's
+    /// end holds the client, and with it the database, which Windows can't
+    /// delete while it is open.
     async fn send(
         port: u16,
-        req: hyper::Request<String>,
+        mut req: hyper::Request<String>,
     ) -> hyper::Response<hyper::body::Incoming> {
+        req.headers_mut().insert(
+            hyper::header::CONNECTION,
+            hyper::header::HeaderValue::from_static("close"),
+        );
         let stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
             .await
             .unwrap();
@@ -1003,6 +1518,42 @@ mod tests {
                 .unwrap();
         tokio::spawn(conn);
         sender.send_request(req).await.unwrap()
+    }
+
+    /// Adds a share the store knows, without a host node behind it, as "rt".
+    /// The row is dropped on return. It keeps the database open, and Windows
+    /// can't delete the data dir while it is.
+    fn stored_share(client: &Client) -> ShareId {
+        let row = client.inner.db.new_row().unwrap();
+        row.write_deduped_hostname("rt").unwrap();
+        row.mark_complete().unwrap();
+        row.share_id().unwrap()
+    }
+
+    #[test]
+    fn proxied_targets_take_origins_apart() {
+        let app = |origins: &[&str]| SharedApp {
+            id: "a".into(),
+            name: "a".into(),
+            kind: AppKind::Web,
+            mode: AppProxyMode::ForwardProxy,
+            start_url: None,
+            proxied_origins: origins.iter().map(|o| (*o).to_owned()).collect(),
+        };
+        let target = |host: &str, port, https, loopback| ProxiedTarget {
+            host: host.into(),
+            port,
+            https,
+            loopback,
+        };
+        assert_eq!(
+            proxied_targets(app(&["http://localhost:4200", "https://sso.internal"])),
+            Some(vec![
+                target("localhost", 4200, false, true),
+                target("sso.internal", 443, true, false),
+            ])
+        );
+        assert_eq!(proxied_targets(app(&["http://a:1", "nonsense"])), None);
     }
 
     #[test]

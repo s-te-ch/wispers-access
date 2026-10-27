@@ -112,14 +112,32 @@ impl GuestNode {
         self.transport.drop_connection();
     }
 
+    /// Shut the transport down. Used when leaving a share.
+    pub async fn close(&self) {
+        self.transport.close().await;
+    }
+
     pub fn label(&self) -> &str {
         &self.label
     }
 
-    /// Opens a DATA stream for one app, ready for the HTTP request.
-    pub async fn open_data_stream(&self, app_id: &str) -> Result<Stream, TransportError> {
+    /// Opens a REVERSE_PROXY stream for one app, ready for the HTTP request.
+    pub async fn open_reverse_proxy_stream(&self, app_id: &str) -> Result<Stream, TransportError> {
         let mut stream = self.open_stream().await?;
-        wire::open_data_stream(&mut stream, app_id)
+        wire::open_reverse_proxy_stream(&mut stream, app_id)
+            .await
+            .map_err(|e| TransportError::Transient(e.into()))?;
+        Ok(stream)
+    }
+
+    /// Opens a FORWARD_PROXY stream to `host:port`.
+    pub async fn open_forward_proxy_stream(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Stream, TransportError> {
+        let mut stream = self.open_stream().await?;
+        wire::open_forward_proxy_stream(&mut stream, host, port)
             .await
             .map_err(|e| TransportError::Transient(e.into()))?;
         Ok(stream)

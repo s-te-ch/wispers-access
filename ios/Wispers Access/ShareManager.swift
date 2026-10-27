@@ -33,6 +33,10 @@ final class ShareManager {
     /// view before its first load.
     @ObservationIgnored let proxyAuth = ProxyAuth()
 
+    /// The SDK's forward proxy for the shares' forward-proxy apps, started at
+    /// launch. A task, since starting it is async; sessions await it.
+    @ObservationIgnored let forwardProxy: Task<CredentialRoutedForwardProxy, Error>?
+
     /// The shares currently open for browsing, switchable in-app. Lazy so its
     /// icon callback can capture `self` (to feed `icons`).
     @ObservationIgnored private(set) lazy var browser = BrowseSessionStore(
@@ -49,6 +53,9 @@ final class ShareManager {
     ) {
         self.client = client
         self.proxy = client?.startPerAppProxy(requiredCookie: proxyAuth.requiredCookie)
+        self.forwardProxy = client.map { client in
+            Task { try await client.startCredentialRoutedForwardProxy(port: 0) }
+        }
         self.icons = icons ?? ShareIconStore()
         self.activity = activity ?? ShareActivityStore()
         self.shares = shares
@@ -101,7 +108,8 @@ final class ShareManager {
 
     /// Removes a share: tears down its open browse sessions and drops it from
     /// the roster at once, then lets the SDK leave it, which tells the host
-    /// node where it can and forgets the share and its secrets either way.
+    /// node where it can and forgets the share and its secrets either way. The
+    /// share's web data store goes too.
     func delete(_ id: ShareId) {
         browser.close(id)
         icons.remove(id)
@@ -109,6 +117,7 @@ final class ShareManager {
         shares.removeAll { $0.id == id }
         guard let client else { return }
         Task {
+            await ShareDataStore.remove(id)
             do {
                 try await client.leave(share: id)
             } catch {
@@ -128,10 +137,19 @@ final class ShareManager {
         backgroundedAt = Date()
     }
 
-    /// Back in the foreground, check network connection health.
+    /// Back in the foreground: serve the proxies' ports again, and check
+    /// network connection health.
     func cameToForeground() {
         guard let since = backgroundedAt else { return }
         backgroundedAt = nil
+        // iOS may have reclaimed the listening sockets while the app was
+        // suspended, after which the ports refuse every connection.
+        Task {
+            await proxy?.rebind()
+            if let forwardProxy = try? await forwardProxy?.value {
+                await forwardProxy.rebind()
+            }
+        }
         guard Date().timeIntervalSince(since) >= Self.checkAfterBackground, let client else { return }
         Task { await client.checkConnections() }
     }

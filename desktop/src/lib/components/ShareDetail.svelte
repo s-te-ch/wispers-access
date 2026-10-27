@@ -8,6 +8,7 @@
     isoDate,
   } from "$lib/format";
   import AppIcon from "./AppIcon.svelte";
+  import CertificateNotice from "./CertificateNotice.svelte";
   import ConfirmRemoveDialog from "./ConfirmRemoveDialog.svelte";
   import StatusDot from "./StatusDot.svelte";
 
@@ -58,6 +59,7 @@
       </p>
     </div>
   {:else}
+    <CertificateNotice {share} />
     <h2 class="mt-9 mb-3 text-[11px] font-semibold tracking-[0.16em] text-on-surface-variant uppercase">
       Apps
     </h2>
@@ -72,19 +74,31 @@
           <AppIcon {app} size={36} />
           <span class="flex min-w-0 flex-1 flex-col">
             <span class="truncate font-serif text-[17px]">{app.name}</span>
-            <span class="truncate text-xs text-on-surface-variant select-text">{app.host}</span>
+            <span class="truncate text-xs text-on-surface-variant select-text">{app.url}</span>
           </span>
-          <button
-            type="button"
-            class="flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-primary px-4 text-sm font-semibold text-primary-dark hover:bg-[#95c877]"
-            onclick={() => open(app.id)}
-          >
-            Open in browser
-            <span aria-hidden="true">↗</span>
-          </button>
+          {#if app.unavailable}
+            <span class="max-w-[220px] shrink-0 text-right text-[13px] text-on-surface-variant">
+              {app.unavailable}
+            </span>
+          {:else}
+            <button
+              type="button"
+              class="flex h-10 shrink-0 items-center gap-1.5 rounded-full bg-primary px-4 text-sm font-semibold text-primary-dark hover:bg-[#95c877]"
+              onclick={() => open(app.id)}
+            >
+              Open in browser
+              <span aria-hidden="true">↗</span>
+            </button>
+          {/if}
         </li>
       {/each}
     </ul>
+    {#if share.profileRestarted}
+      <p class="mt-3 text-[13px] leading-relaxed text-on-surface-variant">
+        This share's browser restarted when Wispers Access started, because the share had to move to
+        a new port. Its tabs were restored, but anything unsaved in them was lost.
+      </p>
+    {/if}
     {#if openError}
       <p class="mt-3 text-[13px] text-destructive select-text" role="alert">{openError}</p>
     {/if}

@@ -14,13 +14,28 @@ struct BrowserView: View {
         ZStack {
             Color(.systemBackground).ignoresSafeArea()
 
-            if let session = manager.browser.session(for: key) {
+            if let reason = unavailable {
+                // A quick action or a restored window can lead to an app this
+                // device can't open.
+                ContentUnavailableView(
+                    "Can't open this app", systemImage: "exclamationmark.triangle",
+                    description: Text(reason))
+            } else if let session = manager.browser.session(for: key) {
                 SessionWebView(session: session)
                     .ignoresSafeArea(.container, edges: .bottom)
-                if let error = session.startupError {
-                    ProxyErrorView(message: error) { session.start() }
-                } else if session.isLoading {
+                switch session.startupError {
+                case .portInUse(let message):
+                    PortInUseView(message: message) { session.start() }
+                case .untrustedCertificate:
+                    if let share = manager.share(key.shareID) {
+                        CertificateNoticeView(share: share) { session.start() }
+                    }
+                case .other(let message):
+                    ProxyErrorView(message: message) { session.start() }
+                case nil where session.isLoading:
                     ConnectingOverlay()
+                case nil:
+                    EmptyView()
                 }
             } else {
                 ConnectingOverlay()
@@ -41,14 +56,22 @@ struct BrowserView: View {
             // Ensure the (warm) session exists and mark it on-screen.
             if let share = manager.share(key.shareID),
                 let app = share.apps.first(where: { $0.id == key.appID }),
+                whyUnavailable(app) == nil,
                 let proxy = manager.proxy
             {
-                manager.browser.open(share, app, proxy: proxy, auth: manager.proxyAuth)
+                manager.browser.open(
+                    share, app, proxy: proxy, auth: manager.proxyAuth,
+                    forwardProxy: manager.forwardProxy)
             }
         }
         .onDisappear {
             manager.browser.resignActive(key)
         }
+    }
+
+    /// Why this device can't open the app, if it can't.
+    private var unavailable: String? {
+        manager.share(key.shareID)?.apps.first { $0.id == key.appID }.flatMap(whyUnavailable)
     }
 
     private var title: String {
@@ -78,6 +101,24 @@ private struct ConnectingOverlay: View {
             }
         }
         .ignoresSafeArea()
+    }
+}
+
+/// A forward-proxy app whose share's loopback ports can't all be bound, such
+/// as when another share's app holds one of them.
+private struct PortInUseView: View {
+    let message: String
+    let onRetry: () -> Void
+
+    var body: some View {
+        ContentUnavailableView {
+            Label("Port in use", systemImage: "exclamationmark.triangle")
+        } description: {
+            Text("\(message) Close what's using it, then try again.")
+        } actions: {
+            Button("Retry", action: onRetry)
+                .buttonStyle(.borderedProminent)
+        }
     }
 }
 

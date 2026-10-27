@@ -1,5 +1,7 @@
-//! HTTP forwarding with (optional) header rewriting.
+//! Reverse-proxy mode: HTTP forwarding to an app's upstream, with (optional)
+//! header rewriting.
 
+use crate::upstream;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use http_body_util::{BodyExt, Full, combinators::BoxBody};
@@ -10,7 +12,6 @@ use hyper_util::rt::TokioIo;
 use std::convert::Infallible;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::net::TcpStream;
 use tracing::{debug, info, warn};
 
 /// Body type used in responses we send back to the peer. Boxed so we can return
@@ -28,6 +29,10 @@ pub enum Target {
     UnknownApp {
         config_hash: u64,
     },
+    /// The client tried to use reverse-proxy mode for an app shared in
+    /// forward-proxy mode. This happens with old clients, which don't know and
+    /// ignore the `mode` field.
+    ClientTooOld,
 }
 
 /// Header carrying locally generated errors, so clients can tell them apart
@@ -99,6 +104,17 @@ async fn handle_request(
             );
             return Ok(resp);
         }
+        Target::ClientTooOld => {
+            let mut resp = error_response(
+                hyper::StatusCode::UPGRADE_REQUIRED,
+                "This app needs a newer version of Wispers Access. Please update.",
+            );
+            resp.headers_mut().insert(
+                ERROR_HEADER,
+                hyper::header::HeaderValue::from_static(wispers_access_wire::CLIENT_TOO_OLD),
+            );
+            return Ok(resp);
+        }
     };
     match forward_to_upstream(req, upstream, user_id).await {
         Ok(resp) => Ok(resp),
@@ -112,31 +128,6 @@ async fn handle_request(
     }
 }
 
-/// Connect to `host:port`, dialing all its addresses at once and keeping the
-/// first that answers.
-///
-/// This works around slowness with `TcpStream::connect` and IPv4-only
-/// upstreams on Windows. There, `localhost` resolves to `::1` first, causing a
-/// 2s timeout before timing out and trying 127.0.0.1.
-pub(crate) async fn connect_upstream(upstream: &str) -> std::io::Result<TcpStream> {
-    let mut attempts = tokio::task::JoinSet::new();
-    for addr in tokio::net::lookup_host(upstream).await? {
-        attempts.spawn(TcpStream::connect(addr));
-    }
-    let mut last_err = None;
-    while let Some(attempt) = attempts.join_next().await {
-        match attempt {
-            // Dropping the set aborts the attempts still in flight.
-            Ok(Ok(tcp)) => return Ok(tcp),
-            Ok(Err(e)) => last_err = Some(e),
-            Err(e) => last_err = Some(std::io::Error::other(e)),
-        }
-    }
-    Err(last_err.unwrap_or_else(|| {
-        std::io::Error::new(std::io::ErrorKind::NotFound, "no addresses resolved")
-    }))
-}
-
 /// Forward the request to the chosen upstream app.
 /// This also handles WebSocket upgrades.
 async fn forward_to_upstream(
@@ -145,7 +136,7 @@ async fn forward_to_upstream(
     user_id: String,
 ) -> Result<hyper::Response<BoxedBody>> {
     // Open a connection to the upstream app. `upstream` is `host:port`.
-    let tcp = connect_upstream(&upstream)
+    let tcp = upstream::connect(&upstream)
         .await
         .with_context(|| format!("connect to upstream {}", upstream))?;
 

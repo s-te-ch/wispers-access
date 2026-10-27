@@ -67,7 +67,13 @@ struct ShareDetailScreen: View {
                     }
                     Button("Cancel", role: .cancel) {}
                 } message: {
-                    Text("This device's access will be removed on the host. You'll need a new invitation code to rejoin.")
+                    // iOS has no store an app can read, so this can't tell
+                    // whether the certificate was installed.
+                    let certificate =
+                        ConfigurationProfile.data(for: share) == nil
+                        ? ""
+                        : " If you installed its certificate, remove its profile under Settings › General › VPN & Device Management."
+                    Text("This device's access will be removed on the host. You'll need a new invitation code to rejoin.\(certificate)")
                 }
             Spacer()
         }
@@ -91,13 +97,18 @@ struct ShareDetailScreen: View {
             }
             ForEach(share.apps, id: \.id) { app in
                 let key = SharedAppId(shareID: shareID, appID: app.id)
+                let unavailable = whyUnavailable(app)
                 let card = AppCard(
                     app: app,
                     isLive: manager.browser.isWarm(key),
                     iconData: icons.iconData(for: key),
-                    opensWindow: BrowseRouter.opensWindows
+                    opensWindow: BrowseRouter.opensWindows && unavailable == nil,
+                    note: unavailable
                 )
-                if BrowseRouter.opensWindows {
+                if unavailable != nil {
+                    // Nothing to open; the card says why.
+                    card.opacity(0.6)
+                } else if BrowseRouter.opensWindows {
                     Button { openWindow(value: key) } label: { card }
                         .buttonStyle(.plain)
                 } else {

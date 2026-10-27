@@ -2,8 +2,12 @@
 
 mod activity;
 mod autostart;
+mod browsers;
+mod certificate_store;
+mod certificates;
 #[cfg(target_os = "macos")]
 mod menu;
+mod profiles;
 mod secrets;
 mod shares;
 #[cfg(not(target_os = "macos"))]
@@ -59,6 +63,9 @@ pub fn run() {
             shares::clipboard_invite,
             shares::join,
             shares::leave,
+            certificates::check_certificates,
+            certificates::install_certificates,
+            certificates::save_certificates,
             autostart::restart,
             window_policy,
             autostart::autostart_enabled,
@@ -184,7 +191,13 @@ fn show_window_minimized(app: &tauri::AppHandle) {
 pub struct Desktop {
     client: Arc<sdk::Client>,
     proxy: Arc<sdk::HostRoutedProxy>,
+    forward_proxy: Arc<sdk::PerShareForwardProxy>,
+    profile_manager: Arc<profiles::ProfileManager>,
     activity: activity::ActivityStore,
+    installed_certificates: Arc<certificates::InstalledCertificates>,
+    /// The shares whose certificates the user saved, by ID (see
+    /// `certificates::save_certificates`).
+    saved_certificates: certificates::RecordFile,
 }
 
 /// The port the proxy asks for. Fixed so bookmarks keep working across
@@ -192,13 +205,18 @@ pub struct Desktop {
 /// sequence it's still quite memorable :)
 const PROXY_PORT: u16 = 11235;
 
+/// The staging app's port is different, so it doesn't compete with an installed
+/// Wispers Access app.
+const STAGING_PROXY_PORT: u16 = 11236;
+
 /// A pairing link is followed the moment it is minted, by a click in the UI.
 const TOKEN_LIFETIME: Duration = Duration::from_secs(60);
 
 impl Desktop {
     /// Opens the client on the app's data directory with the platform's
-    /// credential store, and starts the proxy. Everything the app does needs
-    /// both, so failing here fails the start.
+    /// credential store, and starts the proxies. Everything the app does
+    /// needs the client and the reverse proxy, so failing here fails the
+    /// start.
     ///
     /// Synchronous on purpose: the client owns a tokio runtime, and dropping
     /// one inside another runtime's `block_on` is a panic, which a failed
@@ -209,29 +227,132 @@ impl Desktop {
         let client = sdk::Client::new(sdk::ClientConfig {
             data_dir: data_dir.join("sdk").to_string_lossy().into_owned(),
             secrets: secrets.map(|store| Arc::new(store) as Arc<dyn sdk::SecretStore>),
-            observer: Some(Arc::new(ShareChangeRelay { app })),
+            observer: Some(Arc::new(ShareChangeRelay { app: app.clone() })),
         })?;
         let auth_mode = sdk::ProxyAuthMode::Pairing {
             token_lifetime: TOKEN_LIFETIME,
         };
+        let port = proxy_port(&app);
         let proxy = tauri::async_runtime::block_on(async {
-            match client
-                .start_host_routed_proxy(PROXY_PORT, auth_mode.clone())
-                .await
-            {
+            match start_proxy_patiently(&client, port, auth_mode.clone()).await {
                 Ok(proxy) => Ok(proxy),
                 Err(e) => {
-                    tracing::warn!(error = %e, "port {PROXY_PORT} is taken, using any free one");
+                    tracing::warn!(error = %e, "port {port} is taken, using any free one");
                     client.start_host_routed_proxy(0, auth_mode).await
                 }
             }
         })?;
         tracing::info!("serving shares on wa.localhost:{}", proxy.port());
+        let forward_proxy = client.start_per_share_forward_proxy();
+        let profile_manager = Arc::new(profiles::ProfileManager::new(
+            data_dir.join("profiles"),
+            app.config().identifier.clone(),
+        ));
+        tauri::async_runtime::spawn(reclaim_share_ports(
+            client.clone(),
+            forward_proxy.clone(),
+            profile_manager.clone(),
+            app,
+        ));
         Ok(Self {
             client,
             proxy,
+            forward_proxy,
+            profile_manager,
             activity: activity::ActivityStore::open(data_dir.join("share-activity.json")),
+            installed_certificates: certificates::InstalledCertificates::open(
+                data_dir.join("installed-certificates.json"),
+            ),
+            saved_certificates: certificates::RecordFile::open(
+                data_dir.join("saved-certificates.json"),
+            ),
         })
+    }
+}
+
+fn proxy_port(app: &tauri::AppHandle) -> u16 {
+    if app.config().identifier.ends_with(".stg") {
+        STAGING_PROXY_PORT
+    } else {
+        PROXY_PORT
+    }
+}
+
+/// Starts the proxy on `port`, trying again for a few seconds while it fails. A
+/// restart (e.g. after an update) starts this process before the old one exits.
+async fn start_proxy_patiently(
+    client: &sdk::Client,
+    port: u16,
+    auth_mode: sdk::ProxyAuthMode,
+) -> Result<Arc<sdk::HostRoutedProxy>, sdk::SdkError> {
+    let deadline = std::time::Instant::now() + PROXY_PORT_PATIENCE;
+    loop {
+        match client
+            .start_host_routed_proxy(port, auth_mode.clone())
+            .await
+        {
+            Err(_) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            started => return started,
+        }
+    }
+}
+
+const PROXY_PORT_PATIENCE: Duration = Duration::from_secs(5);
+
+/// If a browser using the share's profile is still running from before this app
+/// started (again), it will still be using previous set of ports. This function
+/// tries to bind to the same ports again, so the browser keeps working. If a
+/// share's port was taken in the meantime, it gets a new one and we restart the
+/// browser to use it.
+async fn reclaim_share_ports(
+    client: Arc<sdk::Client>,
+    forward_proxy: Arc<sdk::PerShareForwardProxy>,
+    profile_manager: Arc<profiles::ProfileManager>,
+    app: tauri::AppHandle,
+) {
+    let shares = match client.shares() {
+        Ok(shares) => shares,
+        Err(e) => {
+            tracing::warn!(error = %e, "could not list the shares to bind their ports");
+            return;
+        }
+    };
+    for share in shares {
+        if !share
+            .apps
+            .iter()
+            .any(|app| app.mode == sdk::AppProxyMode::ForwardProxy)
+        {
+            continue;
+        }
+        let port = match forward_proxy.share_port(share.id.clone()).await {
+            Ok(port) => port,
+            Err(e) => {
+                tracing::warn!(share = %share.label, error = %e, "could not bind the share's port");
+                continue;
+            }
+        };
+        let restart = {
+            let profile_manager = profile_manager.clone();
+            let id = share.id.clone();
+            tauri::async_runtime::spawn_blocking(move || {
+                profile_manager.restart_if_port_moved(&id, port)
+            })
+        };
+        match restart.await {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                tracing::warn!(share = %share.label, error = %e, "could not restart the share's profile")
+            }
+            Err(e) => tracing::warn!(error = %e, "restarting the share's profile panicked"),
+        }
+        if profile_manager.was_restarted(&share.id)
+            && let Err(e) = app.emit(shares::SHARES_CHANGED, ())
+        {
+            tracing::warn!(error = %e, "could not tell the UI about a restarted profile");
+        }
     }
 }
 
@@ -254,7 +375,13 @@ impl sdk::Observer for ShareChangeRelay {
 fn init_logging() {
     use tracing_subscriber::EnvFilter;
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-        EnvFilter::new("warn,wispers_access_sdk=info,wispers_access_desktop_lib=info")
+        // The platform verifier logs every certificate it refuses as an
+        // error, and the share's pane checks untrusted origins on purpose.
+        // zbus warns on Linux when the folder picker's portal request is gone
+        // before it reads its properties, which is harmless.
+        EnvFilter::new(
+            "warn,wispers_access_sdk=info,wispers_access_desktop_lib=info,rustls_platform_verifier=off,zbus=error",
+        )
     });
     tracing_subscriber::fmt()
         .with_env_filter(filter)

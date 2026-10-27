@@ -36,7 +36,6 @@ class ShareManager @Inject constructor(
 
     init {
         sdk.onShareChanged = { reload() }
-        reload()
     }
 
     fun share(id: ShareId): Share? = _shares.value?.firstOrNull { it.id == id }
@@ -83,7 +82,7 @@ class ShareManager @Inject constructor(
                     _shares.value ?: emptyList()
                 }
             }
-            // The first reload runs from init, before the activity has had a
+            // The first reload runs at app start, before the activity has had a
             // chance to activate demo mode; its read must not overwrite the
             // demo roster that landed meanwhile.
             if (DemoMode.active) return@launch

@@ -205,6 +205,139 @@ stack with Excalidraw, the `docker run` equivalent, and how the image is put
 together. For Coolify there is a ready recipe under
 [integrations/coolify](../integrations/coolify/README.md).
 
+## Apps on several origins
+
+By default, guests open a shared app at an address of its own,
+`http://<app>.<share>.wa.localhost:<port>/`, and waserver passes each request on
+to the app's `upstream`. This is reverse-proxy mode, and it works for apps that
+live on one origin. It also provides the best user experience on the client
+side. Unfortunately, it doesn't work for apps with multiple origins, for example
+apps that redirect to the organisation's SSO login page, or apps that use a
+different origin to reach an API (which apps under development frequently do).
+
+For such apps there is forward-proxy mode, which gives the client-side browser
+an HTTP CONNECT proxy to talk to. This lets the browser use real URLs, even if
+they're internal like `https://sso.corp.internal`, tunneling the requests to
+waserver where these URLs make sense. Because the tunneled connection is usually
+encrypted (TLS), waserver won't add the `x-wispers-access-user` header in this
+mode. The downside is that forward-proxy mode is more difficult to make work
+with the various platforms and browsers, so it's not available everywhere. For
+example, Safari isn't supported.
+
+Let's look at some examples. First, a dev setup with a frontend and an API on
+two local ports:
+
+```toml
+[[app]]
+id = "dev"
+name = "Dev"
+mode = "forward-proxy"
+start_url = "http://localhost:4200/"
+proxied_origins = [
+  "http://localhost:4200",  # the frontend
+  "http://localhost:8080",  # its API
+]
+```
+
+An intranet app with single sign-on:
+
+```toml
+[[app]]
+id = "wiki"
+name = "Wiki"
+mode = "forward-proxy"
+start_url = "https://wiki.intranet.example.org/"
+proxied_origins = [
+  "https://wiki.intranet.example.org",
+  "https://sso.intranet.example.org",  # the identity provider
+]
+```
+
+The identity provider needs no change, since guests use the app's real URLs,
+redirects included.
+
+The rules:
+
+- `start_url` is where the app opens. Its origin must be one of
+  `proxied_origins`. Guests can reach the listed origins and nothing else on the
+  host's network.
+- An origin is `scheme://host[:port]`, without a path. waserver resolves the
+  host name and connects to it, so `localhost` is the machine waserver runs on
+  (or if you're using containers, the container waserver runs in).
+- `localhost`, `127.0.0.1` and `[::1]` take `http`. Every other host takes
+  `https`, IP addresses included. Not every guest platform can make the other
+  combinations work, so `waserver reload` refuses them.
+- A forward-proxy app has no `upstream`, and its `kind` stays `web`.
+- Several apps of a share may list the same origin, such as the identity
+  provider they share.
+
+If you want to make sure this works, `waserver status <share>` shows every
+origin of a forward-proxy app and whether waserver can reach it.
+
+On the guest's side, forward-proxy mode means that each share's apps get
+separate cookies and storage. The mobile apps keep a webview store per share.
+The desktop app opens the apps in a browser profile per share, in the first of
+Chrome, Edge, Brave, Chromium and Firefox it finds. On Android, forward-proxy
+apps need Android System WebView 123 or newer. `waclient serve` prints each
+share's proxy address and its apps' start URLs, for a browser you set up
+yourself (see [waclient](waclient.md#forward-proxied-apps)). Older Wispers
+Access clients show the app as needing an update.
+
+### Certificates
+
+Guests' devices have to trust the certificates of the `https` origins. With
+certificates from a public CA, or from a CA your guests' devices trust already
+(through device management, for example), there is nothing to do. Otherwise,
+add your CA's certificate to the share, at the top of `share.toml`, before the
+first `[[app]]`:
+
+```toml
+name = "Team"
+ca_certificates = ['''
+-----BEGIN CERTIFICATE-----
+MIIB…
+-----END CERTIFICATE-----
+''']
+```
+
+Each entry is one certificate in PEM format (never a key). The client app
+detects if its device doesn't trust one of the share's origins and will offer to
+install the certificate, with the appropriate steps for the platform the client
+app runs on. When the user later removes the share, the client app will remove
+the certificate again (or, where it can't do it by itself, prompt the user to do
+it).
+
+Prefer to use a CA certificate rather than a self-signed server certificate. The
+latter work in desktop browsers, but Android and iOS won't trust them. If your
+servers don't have certificates from a CA yet, make a small one and a
+certificate per server:
+
+```sh
+# The CA, valid for ten years. Keep ca.key safe, as it can make certificates
+# your guests' devices trust.
+openssl ecparam -genkey -name prime256v1 -noout -out ca.key
+openssl req -x509 -new -key ca.key -days 3650 -subj "/CN=Example Team CA" -out ca.pem \
+  -addext "basicConstraints=critical,CA:TRUE" \
+  -addext "keyUsage=critical,keyCertSign,cRLSign"
+
+# A certificate for wiki.intranet.example.org, valid for a year.
+openssl ecparam -genkey -name prime256v1 -noout -out wiki.key
+openssl req -new -key wiki.key -subj "/CN=wiki.intranet.example.org" -out wiki.csr
+cat > wiki.ext <<'EOF'
+basicConstraints = critical, CA:FALSE
+keyUsage = critical, digitalSignature
+extendedKeyUsage = serverAuth
+subjectAltName = DNS:wiki.intranet.example.org
+EOF
+openssl x509 -req -in wiki.csr -CA ca.pem -CAkey ca.key -CAcreateserial -days 365 \
+  -extfile wiki.ext -out wiki.pem
+```
+
+The server gets `wiki.key` and `wiki.pem`, and `ca.pem` goes into
+`ca_certificates`. Apple devices refuse server certificates that are valid for
+more than 825 days. A name constraint on the CA wouldn't make it safer to
+install, as Android's webviews ignore name constraints.
+
 ## Storage
 
 Each share is one directory with two files: `share.toml`, which is yours to

@@ -7,7 +7,7 @@ use std::fs;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use wire::{AppKind, ConfigHash, ShareInfo, SharedApp};
+use wire::{AppKind, AppProxyMode, ConfigHash, ShareInfo, SharedApp};
 use wispers_access_wire as wire;
 
 pub struct DB {
@@ -243,20 +243,30 @@ impl Row {
         let mut conn = self.db.conn.lock().expect("unpoisoned db lock");
         let tx = conn.transaction()?;
         tx.execute(
-            "UPDATE shares SET display_name = ?1, config_hash = ?2 WHERE id = ?3",
-            rusqlite::params![info.name, info.config_hash.to_string(), self.id],
+            "UPDATE shares SET display_name = ?1, config_hash = ?2, ca_certificates = ?3
+             WHERE id = ?4",
+            rusqlite::params![
+                info.name,
+                info.config_hash.to_string(),
+                serde_json::to_string(&info.ca_certificates)?,
+                self.id
+            ],
         )?;
         tx.execute("DELETE FROM apps WHERE share_id = ?1", [self.id])?;
         for (position, app) in info.apps.iter().enumerate() {
             tx.execute(
-                "INSERT INTO apps (share_id, position, app_id, name, kind)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO apps
+                     (share_id, position, app_id, name, kind, mode, start_url, proxied_origins)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
                     self.id,
                     position as i64,
                     app.id,
                     app.name,
-                    app.kind.as_str()
+                    app.kind.as_str(),
+                    app.mode.as_str(),
+                    app.start_url,
+                    serde_json::to_string(&app.proxied_origins)?,
                 ],
             )?;
         }
@@ -279,14 +289,21 @@ impl Row {
     /// The apps as last fetched, in the host node's order.
     pub fn read_apps(&self) -> Result<Vec<SharedApp>> {
         let conn = self.db.conn.lock().expect("unpoisoned db lock");
-        let mut stmt = conn
-            .prepare("SELECT app_id, name, kind FROM apps WHERE share_id = ?1 ORDER BY position")?;
+        let mut stmt = conn.prepare(
+            "SELECT app_id, name, kind, mode, start_url, proxied_origins
+             FROM apps WHERE share_id = ?1 ORDER BY position",
+        )?;
         let apps = stmt
             .query_map([self.id], |r| {
                 Ok(SharedApp {
                     id: r.get(0)?,
                     name: r.get(1)?,
                     kind: AppKind::parse_or_web(&r.get::<_, String>(2)?),
+                    mode: AppProxyMode::parse(&r.get::<_, String>(3)?),
+                    start_url: r.get(4)?,
+                    // Written by write_share_info, so always a JSON list.
+                    proxied_origins: serde_json::from_str(&r.get::<_, String>(5)?)
+                        .unwrap_or_default(),
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -351,9 +368,21 @@ impl Row {
             label,
             transport: self.read_transport_kind()?,
             apps: self.read_apps()?,
+            ca_certificates: self.read_ca_certificates()?,
             state,
             joined_at: self.read_joined_at()?,
         })
+    }
+
+    /// The share's CA certificates, as PEM, as last fetched.
+    pub fn read_ca_certificates(&self) -> Result<Vec<String>> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let json: String = conn.query_row(
+            "SELECT ca_certificates FROM shares WHERE id = ?1",
+            [self.id],
+            |r| r.get(0),
+        )?;
+        Ok(serde_json::from_str(&json)?)
     }
 
     pub fn read_terminal_state(&self) -> Result<Option<String>> {
@@ -397,6 +426,25 @@ impl Row {
             "INSERT INTO app_ports (share_id, app_id, port) VALUES (?1, ?2, ?3)
              ON CONFLICT (share_id, app_id) DO UPDATE SET port = excluded.port",
             rusqlite::params![self.id, app_id, port],
+        )?;
+        Ok(())
+    }
+
+    pub fn read_forward_proxy_port(&self) -> Result<Option<u16>> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        let port = conn.query_row(
+            "SELECT forward_proxy_port FROM shares WHERE id = ?1",
+            [self.id],
+            |r| r.get::<_, Option<u16>>(0),
+        )?;
+        Ok(port)
+    }
+
+    pub fn write_forward_proxy_port(&self, port: u16) -> Result<()> {
+        let conn = self.db.conn.lock().expect("unpoisoned db lock");
+        conn.execute(
+            "UPDATE shares SET forward_proxy_port = ?2 WHERE id = ?1",
+            rusqlite::params![self.id, port],
         )?;
         Ok(())
     }
@@ -482,6 +530,21 @@ fn migrations() -> Migrations<'static> {
         // v2 — record when the guest node was told it's outdated
         // (guest_node.rs, `ClientTooOld`).
         M::up("ALTER TABLE shares ADD COLUMN outdated INTEGER NOT NULL DEFAULT 0;"),
+        // v3 — forward-proxy mode. The lists are JSON. Earlier versions of
+        // this crate dropped the share info fields they didn't know, so an
+        // app they stored may be a forward-proxy app without its mode and
+        // origins. Forgetting the config hashes makes the next share info
+        // fetch unconditional, which fills them in.
+        M::up(
+            "ALTER TABLE shares ADD COLUMN ca_certificates TEXT NOT NULL DEFAULT '[]';
+             ALTER TABLE apps ADD COLUMN mode TEXT NOT NULL DEFAULT 'reverse-proxy';
+             ALTER TABLE apps ADD COLUMN start_url TEXT;
+             ALTER TABLE apps ADD COLUMN proxied_origins TEXT NOT NULL DEFAULT '[]';
+             UPDATE shares SET config_hash = NULL;",
+        ),
+        // v4 — the share's port on the desktop's forward proxy, kept so that
+        // the share's running browser profile still finds it after a restart.
+        M::up("ALTER TABLE shares ADD COLUMN forward_proxy_port INTEGER;"),
     ])
 }
 
@@ -507,6 +570,22 @@ mod tests {
     }
 
     #[test]
+    fn upgrading_to_modes_forgets_config_hashes() {
+        let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+        migrations().to_version(&mut conn, 2).unwrap();
+        conn.execute(
+            "INSERT INTO shares (share_id, config_hash, created_at) VALUES ('s', '7', 0)",
+            [],
+        )
+        .unwrap();
+        migrations().to_latest(&mut conn).unwrap();
+        let hash: Option<String> = conn
+            .query_row("SELECT config_hash FROM shares", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hash, None);
+    }
+
+    #[test]
     fn share_info_round_trips_and_replaces() {
         let db = DB::in_memory();
         let row = db.new_row().unwrap();
@@ -522,13 +601,20 @@ mod tests {
                     id: "jf".into(),
                     name: "Jellyfin".into(),
                     kind: AppKind::Jellyfin,
+                    mode: AppProxyMode::ReverseProxy,
+                    start_url: None,
+                    proxied_origins: Vec::new(),
                 },
                 SharedApp {
-                    id: "photos".into(),
-                    name: "Photos".into(),
+                    id: "dev".into(),
+                    name: "Dev".into(),
                     kind: AppKind::Web,
+                    mode: AppProxyMode::ForwardProxy,
+                    start_url: Some("http://localhost:4200/".into()),
+                    proxied_origins: vec!["http://localhost:4200".into()],
                 },
             ],
+            ca_certificates: vec!["-----BEGIN CERTIFICATE-----\n…".into()],
         };
         row.write_share_info(&info).unwrap();
         assert_eq!(row.read_share_config_hash().unwrap(), Some(ConfigHash(7)));

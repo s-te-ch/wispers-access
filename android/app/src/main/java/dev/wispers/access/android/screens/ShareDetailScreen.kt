@@ -50,14 +50,17 @@ import androidx.lifecycle.viewModelScope
 import dagger.hilt.android.lifecycle.HiltViewModel
 import dagger.hilt.android.qualifiers.ApplicationContext
 import dev.wispers.access.android.BrowseKey
+import dev.wispers.access.android.ShareCertificates
 import dev.wispers.access.android.ShareManager
 import dev.wispers.access.android.addToHomescreen
 import dev.wispers.access.android.demo.DemoMode
 import dev.wispers.access.android.disableShortcuts
+import dev.wispers.access.android.proxy.ForwardProxyHolder
 import dev.wispers.access.android.proxy.ShareAvailability
 import dev.wispers.access.android.proxy.ShareStatusTracker
 import dev.wispers.access.android.proxy.toAvailability
 import dev.wispers.access.android.storage.ShareExtras
+import dev.wispers.access.android.whyUnavailable
 import dev.wispers.access.sdk.Share
 import dev.wispers.access.sdk.ShareId
 import dev.wispers.access.sdk.ShareState
@@ -80,6 +83,7 @@ class ShareDetailViewModel @Inject constructor(
     savedStateHandle: SavedStateHandle,
     private val manager: ShareManager,
     private val extras: ShareExtras,
+    private val forwardProxy: ForwardProxyHolder,
     statusTracker: ShareStatusTracker,
     @param:ApplicationContext private val appContext: Context,
 ) : ViewModel() {
@@ -116,6 +120,7 @@ class ShareDetailViewModel @Inject constructor(
         viewModelScope.launch {
             disableShortcuts(appContext, share, "This app was removed")
             manager.leave(share.id)
+            forwardProxy.forget(share.id)
             _removed.value = true
         }
     }
@@ -196,7 +201,17 @@ fun ShareDetailScreen(
                 Text("Remove $name?")
             },
             text = {
-                Text("This device's access will be removed on the host. You'll need a new invitation code to rejoin.")
+                // Apps can't remove a CA either, so say where the user can.
+                val installed = remember(share) {
+                    share?.let { ShareCertificates.of(it).any { c -> c.isInstalled() } } ?: false
+                }
+                val certificate = if (installed) {
+                    "\n\nThe certificate you installed for it stays on this device. To remove " +
+                        "it, search Settings for “Trusted credentials” and open the User tab."
+                } else {
+                    ""
+                }
+                Text("This device's access will be removed on the host. You'll need a new invitation code to rejoin.$certificate")
             },
             confirmButton = {
                 TextButton(
@@ -263,14 +278,18 @@ private fun ShareDetailContent(
             }
             for (app in share.apps) {
                 val key = BrowseKey(share.id, app.id)
+                val unavailable = whyUnavailable(app)
                 AppCard(
                     app = app,
                     iconPng = icons[key],
-                    enabled = true,
-                    onClick = { onOpenApp(key) },
-                    footer = {
-                        TextButton(onClick = { onAddToHomescreen(app) }) {
-                            Text("Add to homescreen")
+                    enabled = unavailable == null,
+                    note = unavailable,
+                    onClick = { if (unavailable == null) onOpenApp(key) },
+                    footer = if (unavailable != null) null else {
+                        {
+                            TextButton(onClick = { onAddToHomescreen(app) }) {
+                                Text("Add to homescreen")
+                            }
                         }
                     },
                 )
