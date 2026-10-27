@@ -1323,11 +1323,7 @@ mod tests {
     async fn per_app_ports_survive_a_new_proxy() {
         let data_dir = scratch_dir();
         let client = client_in(&data_dir);
-        // A share the store knows, without a host node behind it.
-        let row = client.inner.db.new_row().unwrap();
-        row.write_deduped_hostname("rt").unwrap();
-        row.mark_complete().unwrap();
-        let share = row.share_id().unwrap();
+        let share = stored_share(&client);
 
         let proxy = client.start_per_app_proxy(None);
         let first = proxy.base_url(share.clone(), "echo".into()).await.unwrap();
@@ -1353,10 +1349,7 @@ mod tests {
     async fn per_app_ports_are_served_again_after_a_rebind() {
         let data_dir = scratch_dir();
         let client = client_in(&data_dir);
-        let row = client.inner.db.new_row().unwrap();
-        row.write_deduped_hostname("rt").unwrap();
-        row.mark_complete().unwrap();
-        let share = row.share_id().unwrap();
+        let share = stored_share(&client);
         let cookie = RequiredCookie {
             name: "__wispers_proxy_auth".into(),
             value: "s3cret".into(),
@@ -1410,10 +1403,7 @@ mod tests {
         );
         // There is no pairing to be had under an app's own cookie: the
         // browser goes straight to the app.
-        let row = client.inner.db.new_row().unwrap();
-        row.write_deduped_hostname("rt").unwrap();
-        row.mark_complete().unwrap();
-        let share = row.share_id().unwrap();
+        let share = stored_share(&client);
         assert_eq!(
             proxy.browse_url(share.clone(), "echo".into()).unwrap(),
             proxy.base_url(share, "echo".into()).unwrap()
@@ -1435,10 +1425,7 @@ mod tests {
     async fn a_browse_url_pairs_the_browser_once() {
         let data_dir = scratch_dir();
         let client = client_in(&data_dir);
-        let row = client.inner.db.new_row().unwrap();
-        row.write_deduped_hostname("rt").unwrap();
-        row.mark_complete().unwrap();
-        let share = row.share_id().unwrap();
+        let share = stored_share(&client);
         let auth_mode = ProxyAuthMode::Pairing {
             token_lifetime: Duration::from_secs(60),
         };
@@ -1523,6 +1510,16 @@ mod tests {
                 .unwrap();
         tokio::spawn(conn);
         sender.send_request(req).await.unwrap()
+    }
+
+    /// Adds a share the store knows, without a host node behind it, as "rt".
+    /// The row is dropped on return. It keeps the database open, and Windows
+    /// can't delete the data dir while it is.
+    fn stored_share(client: &Client) -> ShareId {
+        let row = client.inner.db.new_row().unwrap();
+        row.write_deduped_hostname("rt").unwrap();
+        row.mark_complete().unwrap();
+        row.share_id().unwrap()
     }
 
     #[test]
