@@ -12,7 +12,11 @@
     "linux-x86_64-deb": {
       "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.1.0/Wispers.Access_1.1.0_amd64.deb",
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYek1OYlorYmZTaWtiaDZHcFpnQ2VOZDdKNjI3QzMyQUxWSkhmOGoxV2hzeU9ESFBBdWZaMjZUNUNWUjBiYmpMRWNwNmJIT3k4eDhmUFJuVitaaGQ5aWdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTE2Nzk2CWZpbGU6V2lzcGVycyBBY2Nlc3NfMS4xLjBfYW1kNjQuZGViCXZlcnNpb246MS4xLjAKZVUyZFNZQXJBNU81MURrc1J5WHFFcTF3NjZtVlBhd1VTenFKQzhMSVg2NWlxTTBvQVphdnlaRkpibmQ0d0JHOWFlQ0kvL1RCUmswRDNMUThmNVF4RHc9PQo="
+    },
+    "windows-x86_64": {
+      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.1.0/Wispers.Access_1.1.0_x64-setup.exe",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekNXbzE3NTl3UzMxSllyVWVnVVBqM3lRQ3p1bzIybmFmT1dqMnByODgydlVIQW0wMWNKQkJkNFNhY2hzN1Zpc0VZQXFGVCtrWUMxR3A2Q1F5L3JIN2dvPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTEzOTIyCWZpbGU6V2lzcGVycyBBY2Nlc3NfMS4xLjBfeDY0LXNldHVwLmV4ZQl2ZXJzaW9uOjEuMS4wClUwQTJkN2w1cVJ5M244WlQwUGE5b1RxVWhsa2hoNEhibmNzaXhUM3hMWEEramZTSFVDeG9meEhMSG5tdXBnQlVOUG5qQWZOa0RUN1RJVENRUVhXQkJnPT0K"
     }
   },
-  "pub_date": "2026-10-27T15:59:56Z"
+  "pub_date": "2026-10-27T15:12:02Z"
 }
