@@ -4,7 +4,15 @@
     "darwin-aarch64": {
       "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.1.0/Wispers.Access.app.tar.gz",
       "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekFmYVFCa3pjS2t3TXU5ZWprSjR4ditOcmVjYUw3OTVFVUdXWndtOStDSkhscS9jZWdXSFJxVnBDZ2xXOHRHVUZuQXgrbGJsN21ma29sOXZtVTJyb3c0PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTE1NjEwCWZpbGU6V2lzcGVycyBBY2Nlc3MuYXBwLnRhci5negl2ZXJzaW9uOjEuMS4wCjBoejFaU1VNL2hkaEs5a0w3dWZLSjdHSjhDR0JIZGdpVDBnVkw1aCtEa2FWTE5IRndsMnVZSWF6OTJQMXhLR3FVdi9GTTVQOVZYaVgvQi80dm90TENnPT0K"
+    },
+    "linux-x86_64-appimage": {
+      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.1.0/Wispers.Access_1.1.0_amd64.AppImage",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYekFrb3EzWG8yNUZrL1RwVWxSamhxWVNJL1FmNXpzdmJkMzlCM01ERFBUaklsdFAzdm9rTXptOVlaUTBibXlDdURKOXN6NFZjSWpMUkZ5WkJjU2pnSWc4PQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTE2Nzk2CWZpbGU6V2lzcGVycyBBY2Nlc3NfMS4xLjBfYW1kNjQuQXBwSW1hZ2UJdmVyc2lvbjoxLjEuMAovNjhRaWlOVmlHK2swWW5CZElZWjEwM040YnJaTWtzSEZhNWhTSklaVHl6dDg4R3d0aHpLZDd1YW1qaCtiOUdkS0F5b1F1VmVHbkxUTUVBeG9iajBDdz09Cg=="
+    },
+    "linux-x86_64-deb": {
+      "url": "https://github.com/s-te-ch/wispers-access/releases/download/desktop-v1.1.0/Wispers.Access_1.1.0_amd64.deb",
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVUSGt5eGZZKzhYek1OYlorYmZTaWtiaDZHcFpnQ2VOZDdKNjI3QzMyQUxWSkhmOGoxV2hzeU9ESFBBdWZaMjZUNUNWUjBiYmpMRWNwNmJIT3k4eDhmUFJuVitaaGQ5aWdnPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkzMTE2Nzk2CWZpbGU6V2lzcGVycyBBY2Nlc3NfMS4xLjBfYW1kNjQuZGViCXZlcnNpb246MS4xLjAKZVUyZFNZQXJBNU81MURrc1J5WHFFcTF3NjZtVlBhd1VTenFKQzhMSVg2NWlxTTBvQVphdnlaRkpibmQ0d0JHOWFlQ0kvL1RCUmswRDNMUThmNVF4RHc9PQo="
     }
   },
-  "pub_date": "2026-10-27T15:40:39Z"
+  "pub_date": "2026-10-27T15:59:56Z"
 }
