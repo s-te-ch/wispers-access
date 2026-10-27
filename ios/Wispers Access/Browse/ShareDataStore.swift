@@ -37,6 +37,10 @@ enum ShareDataStore {
     /// Deletes the data store of a share that was left, with its cookies and
     /// storage. Fails quietly while a web view still uses it.
     static func remove(_ shareID: ShareId) async {
+        // WebKit sets itself up as its first object is made. Removing a data
+        // store before that crashes it (iOS 26.5, macOS 15.7), as when a share
+        // is removed before any app was opened since launch.
+        _ = WKWebsiteDataStore.default()
         try? await WKWebsiteDataStore.remove(forIdentifier: identifier(shareID))
     }
 
