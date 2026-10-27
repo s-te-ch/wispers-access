@@ -147,9 +147,9 @@ Open the app, click "+ Add a share", paste the invite code (`wax1_...`), click
 "Join". When opening a shared app on desktop, your system browser will open a
 new tab and show the app there.
 
-Finally, if you'd rather stick to the CLI, there's also `waclient` (installed
-together with `waserver`). It's useful for local testing but not something you'd
-tell your relatives to install =)
+Finally, if you'd rather stick to the CLI, there's also
+[`waclient`](docs/waclient.md) (installed together with `waserver`). It's useful
+for local testing but not something you'd tell your relatives to install =)
 
 ## When to use something else
 

@@ -212,7 +212,7 @@ By default, guests open a shared app at an address of its own,
 to the app's `upstream`. This is reverse-proxy mode, and it works for apps that
 live on one origin. It also provides the best user experience on the client
 side. Unfortunately, it doesn't work for apps with multiple origins, for example
-apps that redirect the organisation's SSO login page, or apps that use a
+apps that redirect to the organisation's SSO login page, or apps that use a
 different origin to reach an API (which apps under development frequently do).
 
 For such apps there is forward-proxy mode, which gives the client-side browser
@@ -221,7 +221,8 @@ they're internal like `https://sso.corp.internal`, tunneling the requests to
 waserver where these URLs make sense. Because the tunneled connection is usually
 encrypted (TLS), waserver won't add the `x-wispers-access-user` header in this
 mode. The downside is that forward-proxy mode is more difficult to make work
-with the various platforms and browsers, so it's not available everywhere. For example, Safari isn't supported.
+with the various platforms and browsers, so it's not available everywhere. For
+example, Safari isn't supported.
 
 Let's look at some examples. First, a dev setup with a frontend and an API on
 two local ports:
@@ -262,7 +263,7 @@ The rules:
   host's network.
 - An origin is `scheme://host[:port]`, without a path. waserver resolves the
   host name and connects to it, so `localhost` is the machine waserver runs on
-  (of if you're using containers, the container waserver runs in).
+  (or if you're using containers, the container waserver runs in).
 - `localhost`, `127.0.0.1` and `[::1]` take `http`. Every other host takes
   `https`, IP addresses included. Not every guest platform can make the other
   combinations work, so `waserver reload` refuses them.
@@ -277,8 +278,10 @@ On the guest's side, forward-proxy mode means that each share's apps get
 separate cookies and storage. The mobile apps keep a webview store per share.
 The desktop app opens the apps in a browser profile per share, in the first of
 Chrome, Edge, Brave, Chromium and Firefox it finds. On Android, forward-proxy
-apps need Android System WebView 123 or newer. Older Wispers Access clients show
-the app as needing an update.
+apps need Android System WebView 123 or newer. `waclient serve` prints each
+share's proxy address and its apps' start URLs, for a browser you set up
+yourself (see [waclient](waclient.md#forward-proxied-apps)). Older Wispers
+Access clients show the app as needing an update.
 
 ### Certificates
 
@@ -301,7 +304,8 @@ Each entry is one certificate in PEM format (never a key). The client app
 detects if its device doesn't trust one of the share's origins and will offer to
 install the certificate, with the appropriate steps for the platform the client
 app runs on. When the user later removes the share, the client app will remove
-the certificate again (or, where it can't do it by itself, prompt the user to do it).
+the certificate again (or, where it can't do it by itself, prompt the user to do
+it).
 
 Prefer to use a CA certificate rather than a self-signed server certificate. The
 latter work in desktop browsers, but Android and iOS won't trust them. If your
