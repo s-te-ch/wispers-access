@@ -1496,11 +1496,19 @@ mod tests {
         remove_scratch_dir(&data_dir);
     }
 
-    /// One HTTP/1.1 request to a proxy port.
+    /// One HTTP/1.1 request to a proxy port, on a connection of its own. The
+    /// proxy closes the connection after the response. Our end is a task on
+    /// the test's runtime, which `remove_scratch_dir` blocks, and the proxy's
+    /// end holds the client, and with it the database, which Windows can't
+    /// delete while it is open.
     async fn send(
         port: u16,
-        req: hyper::Request<String>,
+        mut req: hyper::Request<String>,
     ) -> hyper::Response<hyper::body::Incoming> {
+        req.headers_mut().insert(
+            hyper::header::CONNECTION,
+            hyper::header::HeaderValue::from_static("close"),
+        );
         let stream = tokio::net::TcpStream::connect((Ipv4Addr::LOCALHOST, port))
             .await
             .unwrap();
