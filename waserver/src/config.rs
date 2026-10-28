@@ -166,15 +166,6 @@ impl ShareConfig {
         })
     }
 
-    /// The app used for requests that name no app: the first in reverse-proxy
-    /// mode, the only mode the clients sending such requests know.
-    ///
-    /// TODO: Clean this up once old clients are gone and everyone specifies the
-    /// app to talk to.
-    pub fn default_app(&self) -> Option<&AppConfig> {
-        self.apps.iter().find(|app| app.upstream().is_some())
-    }
-
     /// Hash of the (observable parts of the) config, used to detect config
     /// updates without having to compare the entire data structure.
     pub fn config_hash(&self) -> u64 {
@@ -484,7 +475,6 @@ upstream = ":2283"
         assert_eq!(cfg.name, "Family");
         assert!(cfg.legacy_transport.is_none());
         assert_eq!(cfg.apps.len(), 2);
-        assert_eq!(cfg.default_app().unwrap().id, "jellyfin");
         assert_eq!(cfg.apps[0].kind, AppKind::Jellyfin);
         // Name defaults to the id, an empty host means localhost.
         assert_eq!(cfg.apps[1].name, "photos");
@@ -524,8 +514,6 @@ upstream = ":3000"
             ]
         );
         assert_eq!(cfg.apps[0].upstream(), None);
-        // Legacy clients only know reverse-proxy apps.
-        assert_eq!(cfg.default_app().unwrap().id, "grafana");
     }
 
     #[test]
@@ -685,7 +673,6 @@ LmgiKMekczkYKWj8heM50uEnUsNDYlCkP926zkjP5g==
     fn apps_may_be_absent() {
         let cfg = ShareConfig::parse("name = \"x\"\n").unwrap();
         assert!(cfg.apps.is_empty());
-        assert!(cfg.default_app().is_none());
     }
 
     #[test]

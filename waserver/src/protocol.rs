@@ -1,19 +1,16 @@
 //! The server side of the wire protocol (see the `wispers-access-wire` crate).
 //! Data plane streams get proxied (REVERSE_PROXY to the app they name,
 //! FORWARD_PROXY to the origin they name), control plane streams get routed to
-//! the guest API. For backward compatibility, raw HTTP from legacy clients get
-//! proxied to the default app.
+//! the guest API.
 
-use crate::config::{AppConfig, AppProxyMode, ShareConfig};
+use crate::config::{AppProxyMode, ShareConfig};
 use crate::forward_proxy;
 use crate::guest_api;
 use crate::reverse_proxy::{self, Target};
 use crate::storage;
 use anyhow::{Context, Result};
-use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll};
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::broadcast;
 use tracing::warn;
 use wire::{FirstByte, Plane, ReverseProxyPreamble, StreamType};
@@ -67,7 +64,6 @@ where
     let first = read_stream_type(&mut stream).await?;
     let data_plane = match first {
         Some(FirstByte::Typed(t)) => t.plane() == Plane::Data,
-        Some(FirstByte::LegacyHttp(_)) => true,
         Some(FirstByte::Unknown(_)) | None => false,
     };
     if data_plane && !peer.is_authorized() {
@@ -88,15 +84,6 @@ where
         Some(FirstByte::Typed(StreamType::ForwardProxy)) => {
             let user_id = peer.user_id.expect("data plane peers are authorized");
             forward_proxy::serve(stream, &ctx.config, user_id).await?;
-        }
-        Some(FirstByte::LegacyHttp(raw_byte)) => {
-            let user_id = peer.user_id.expect("data plane peers are authorized");
-            let target = match ctx.config.default_app().and_then(AppConfig::upstream) {
-                Some(upstream) => Target::Upstream(upstream.into()),
-                None => Target::NoDefaultApp,
-            };
-            // Prepend the first byte again, then serve the stream.
-            reverse_proxy::serve(Prefixed::new(vec![raw_byte], stream), target, user_id).await?;
         }
         Some(FirstByte::Unknown(raw_byte)) => {
             warn!(raw_byte, "unknown stream type, closing");
@@ -138,60 +125,6 @@ fn app_target(config: &ShareConfig, app_id: &str) -> Target {
                 config_hash: config.config_hash(),
             }
         }
-    }
-}
-
-/// A stream with bytes already read from it put back in front.
-struct Prefixed<S> {
-    prefix: Vec<u8>,
-    pos: usize,
-    inner: S,
-}
-
-impl<S> Prefixed<S> {
-    fn new(prefix: Vec<u8>, inner: S) -> Self {
-        Self {
-            prefix,
-            pos: 0,
-            inner,
-        }
-    }
-}
-
-impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        if self.pos < self.prefix.len() {
-            let n = (self.prefix.len() - self.pos).min(buf.remaining());
-            buf.put_slice(&self.prefix[self.pos..self.pos + n]);
-            self.pos += n;
-            return Poll::Ready(Ok(()));
-        }
-        Pin::new(&mut self.inner).poll_read(cx, buf)
-    }
-}
-
-impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
-    fn poll_write(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-        data: &[u8],
-    ) -> Poll<std::io::Result<usize>> {
-        Pin::new(&mut self.inner).poll_write(cx, data)
-    }
-
-    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_flush(cx)
-    }
-
-    fn poll_shutdown(
-        mut self: Pin<&mut Self>,
-        cx: &mut TaskContext<'_>,
-    ) -> Poll<std::io::Result<()>> {
-        Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
 
@@ -311,20 +244,6 @@ upstream = ":1"
     const GET: &[u8] = b"GET /x HTTP/1.1\r\nHost: a\r\n\r\n";
 
     #[tokio::test]
-    async fn legacy_request_goes_to_the_default_app_with_identity() {
-        let upstream = echo_upstream().await;
-        let response = exchange(
-            context_with_upstream(&upstream),
-            Some("alice"),
-            GET.to_vec(),
-        )
-        .await;
-        let text = String::from_utf8_lossy(&response);
-        assert!(text.starts_with("HTTP/1.1 200"), "{text}");
-        assert!(text.ends_with("alice"), "{text}");
-    }
-
-    #[tokio::test]
     async fn reverse_proxy_stream_is_routed_by_app_id() {
         let upstream = echo_upstream().await;
         let response = exchange(
@@ -357,15 +276,6 @@ upstream = ":1"
             )),
             "{head}"
         );
-    }
-
-    #[tokio::test]
-    async fn legacy_request_on_an_empty_share_gets_a_plain_503() {
-        let response = exchange(context(EMPTY_SHARE), Some("bob"), GET.to_vec()).await;
-        let (head, _) = split_response(&response);
-        assert!(head.starts_with("http/1.1 503"), "{head}");
-        // A page for the person; legacy clients know no error header.
-        assert!(!head.contains(reverse_proxy::ERROR_HEADER), "{head}");
     }
 
     #[tokio::test]
@@ -457,9 +367,6 @@ proxied_origins = ["http://localhost:4200", "https://sso.internal"]
             head.contains(&format!("{}: client-too-old", reverse_proxy::ERROR_HEADER)),
             "{head}"
         );
-        // Legacy requests find no default app on a forward-proxy-only share.
-        let response = exchange(context(FORWARD_PROXY_SHARE), Some("bob"), GET.to_vec()).await;
-        assert!(split_response(&response).0.starts_with("http/1.1 503"));
     }
 
     /// A share with one forward-proxy app whose only origin is `port` on
@@ -645,17 +552,6 @@ proxied_origins = ["http://localhost:4200", "https://sso.internal"]
         assert!(exchange(ctx, None, Vec::new()).await.is_empty());
     }
 
-    #[tokio::test]
-    async fn prefixed_reader_replays_then_delegates() {
-        let (mut a, b) = tokio::io::duplex(64);
-        a.write_all(b"world").await.unwrap();
-        drop(a);
-        let mut p = Prefixed::new(b"hello ".to_vec(), b);
-        let mut out = String::new();
-        p.read_to_string(&mut out).await.unwrap();
-        assert_eq!(out, "hello world");
-    }
-
     fn activation_request(secret: &wire::InviteSecret) -> Vec<u8> {
         let body = serde_json::to_vec(&wire::Activation { secret: *secret }).unwrap();
         let mut req = format!(
@@ -785,16 +681,10 @@ proxied_origins = ["http://localhost:4200", "https://sso.internal"]
 
         // So is a FORWARD_PROXY stream.
         let (server, mut client) = tokio::io::duplex(1024);
-        let task = tokio::spawn(handle(server, ctx.clone(), peer.clone()));
+        let task = tokio::spawn(handle(server, ctx, peer));
         wire::open_forward_proxy_stream(&mut client, "localhost", 1)
             .await
             .unwrap();
-        assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Refused);
-
-        // So is a legacy raw request.
-        let (server, mut client) = tokio::io::duplex(1024);
-        let task = tokio::spawn(handle(server, ctx, peer));
-        client.write_all(GET).await.unwrap();
         assert_eq!(task.await.unwrap().unwrap(), StreamOutcome::Refused);
     }
 }
