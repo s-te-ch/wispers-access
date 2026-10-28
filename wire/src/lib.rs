@@ -13,9 +13,7 @@
 //! - [`StreamType::Ctrl`] for the control plane. A raw HTTP/1.1 request to the
 //!   host node's guest API (the `/v1/...` routes below), answered in raw HTTP.
 //!
-//! Streams whose first byte is an ASCII letter are raw HTTP requests for the
-//! default app from clients that predate this framing. Every stream ends in a
-//! FIN from the side that wrote last.
+//! Every stream ends in a FIN from the side that wrote last.
 //!
 //! The JSON types below are the contract. Fields are only ever added, with a
 //! default for readers that predate them; a field is never renamed or given a
@@ -346,7 +344,6 @@ pub enum Plane {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FirstByte {
     Typed(StreamType),
-    LegacyHttp(u8),
     Unknown(u8),
 }
 
@@ -356,8 +353,6 @@ impl From<u8> for FirstByte {
             0x00 => FirstByte::Typed(StreamType::ReverseProxy),
             0x01 => FirstByte::Typed(StreamType::Ctrl),
             0x02 => FirstByte::Typed(StreamType::ForwardProxy),
-            // Every HTTP method starts with an ASCII letter.
-            b'A'..=b'Z' | b'a'..=b'z' => FirstByte::LegacyHttp(first),
             other => FirstByte::Unknown(other),
         }
     }
@@ -1154,13 +1149,9 @@ mod tests {
             FirstByte::from(0x02),
             FirstByte::Typed(StreamType::ForwardProxy)
         );
-        for method in ["GET", "POST", "OPTIONS", "get"] {
-            assert_eq!(
-                FirstByte::from(method.as_bytes()[0]),
-                FirstByte::LegacyHttp(method.as_bytes()[0])
-            );
-        }
         assert_eq!(FirstByte::from(0x03), FirstByte::Unknown(0x03));
+        // Raw HTTP from clients that predate the framing is not served.
+        assert_eq!(FirstByte::from(b'G'), FirstByte::Unknown(b'G'));
         assert_eq!(FirstByte::from(b' '), FirstByte::Unknown(b' '));
         assert_eq!(FirstByte::from(0xff), FirstByte::Unknown(0xff));
     }

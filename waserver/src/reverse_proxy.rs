@@ -22,8 +22,6 @@ type BoxedBody = BoxBody<Bytes, std::io::Error>;
 #[derive(Clone)]
 pub enum Target {
     Upstream(Arc<str>),
-    /// A legacy request on a share with no apps.
-    NoDefaultApp,
     /// The stream named an app the share does not have (any more). The
     /// hash lets the client skip a `GET /v1/share` round trip if it already caught up.
     UnknownApp {
@@ -79,14 +77,6 @@ async fn handle_request(
 ) -> Result<hyper::Response<BoxedBody>, Infallible> {
     let upstream = match target {
         Target::Upstream(upstream) => upstream,
-        Target::NoDefaultApp => {
-            // Legacy client requested the default app when there are no shared apps.
-            warn!(uri = %req.uri(), "no app configured; rejecting");
-            return Ok(error_response(
-                hyper::StatusCode::SERVICE_UNAVAILABLE,
-                "no app configured on this host node",
-            ));
-        }
         Target::UnknownApp { config_hash } => {
             // The requested upstream app doesn't exist. Note that the upstream
             // is determined at the stream level, but the error is sent here
