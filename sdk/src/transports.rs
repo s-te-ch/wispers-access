@@ -25,6 +25,7 @@ impl<T: AsyncRead + AsyncWrite + Send + Unpin> Bidirectional for T {}
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 
 /// Joins the share the invite is for, selecting the appropriate transport.
+/// An invite the share turns down fails with [`InviteRefusedError`].
 pub async fn join(
     invite: wire::Invite,
     row: &storage::Row,
@@ -51,6 +52,13 @@ pub async fn join(
         } => iroh_transport::join(row, secrets, endpoint_id, &secret).await,
     }
 }
+
+/// The share turned the invite down. Each transport learns this its own
+/// way; the message is a sentence for the user. `Client::join` finds it by
+/// downcast.
+#[derive(Debug, thiserror::Error)]
+#[error("{0}")]
+pub struct InviteRefusedError(pub &'static str);
 
 /// Restores the transport for a share's database row.
 pub async fn restore(

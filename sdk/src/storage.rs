@@ -528,7 +528,7 @@ fn migrations() -> Migrations<'static> {
              ) STRICT;",
         ),
         // v2 — record when the guest node was told it's outdated
-        // (guest_node.rs, `ClientTooOld`).
+        // (guest_node.rs, `ClientTooOldError`).
         M::up("ALTER TABLE shares ADD COLUMN outdated INTEGER NOT NULL DEFAULT 0;"),
         // v3 — forward-proxy mode. The lists are JSON. Earlier versions of
         // this crate dropped the share info fields they didn't know, so an

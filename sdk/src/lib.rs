@@ -56,6 +56,10 @@ pub type Result<T> = std::result::Result<T, SdkError>;
 pub enum SdkError {
     #[error("invalid invite code: {0}")]
     InvalidInvite(String),
+    /// The share turned a well-formed invite down, because it's used, expired
+    /// or unknown. The message is the description to show to the user.
+    #[error("{0}")]
+    InviteRefused(String),
     #[error("no share {0}")]
     NoSuchShare(String),
     /// The store or the secret store failed.
@@ -288,8 +292,12 @@ impl Client {
                 let info = transports::join(invite, &row, &client.inner.secrets)
                     .await
                     .map_err(|e| {
-                        if e.is::<guest_node::ClientTooOld>() {
+                        if e.is::<guest_node::ClientTooOldError>() {
                             SdkError::ClientTooOld(e.to_string())
+                        } else if let Some(refused) =
+                            e.downcast_ref::<transports::InviteRefusedError>()
+                        {
+                            SdkError::InviteRefused(refused.to_string())
                         } else {
                             SdkError::host_node(e)
                         }
