@@ -256,7 +256,7 @@ private struct FirstRunPane: View {
                     .foregroundStyle(AccessColor.onSurfaceVariant)
                     .padding(.top, 12)
                     .padding(.bottom, 28)
-                JoinShareForm(phase: $phase, onJoined: onJoined)
+                JoinShareForm(phase: $phase, cameraOnTap: true, onJoined: onJoined)
             }
             .frame(maxWidth: 400)
             .padding(.top, 120)

@@ -13,6 +13,8 @@ enum AccessColor {
     static let infoCard = Color(hex: 0xECE7F1)      // lavender detail cards
     static let destructive = Color(hex: 0xB3261E)   // "Remove from this device"
     static let sidebar = Color(hex: 0xEDEDE6)       // iPad sidebar, as on the desktop
+    static let viewfinder = Color(hex: 0x1E2A26)    // QR scanner panel, under the camera
+    static let onViewfinder = Color(hex: 0xE8EFE4)
 }
 
 extension Color {

@@ -111,7 +111,12 @@ dependencies {
     implementation(libs.androidx.hilt.navigation.compose)
     implementation(libs.androidx.navigation.compose)
     implementation(libs.androidx.compose.material.icons.core)
-    implementation(libs.zxing.android.embedded)
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.camera.mlkit.vision)
+    // The bundled model, so scanning works without Google Play services.
+    implementation(libs.mlkit.barcode.scanning)
     implementation(libs.androidx.swiperefreshlayout)
     implementation(libs.androidx.webkit)
     testImplementation(libs.junit)

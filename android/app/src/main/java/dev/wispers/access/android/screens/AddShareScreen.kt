@@ -1,43 +1,65 @@
 package dev.wispers.access.android.screens
 
+import android.content.ClipboardManager
+import android.content.Context
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SecondaryTabRow
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.compose.material3.Tab
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalWindowInfo
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardCapitalization
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
-import com.journeyapps.barcodescanner.ScanContract
-import com.journeyapps.barcodescanner.ScanOptions
+import androidx.compose.ui.unit.min
+import androidx.compose.ui.unit.sp
 import androidx.hilt.navigation.compose.hiltViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
@@ -45,12 +67,12 @@ import dagger.hilt.android.lifecycle.HiltViewModel
 import dev.wispers.access.android.ShareManager
 import dev.wispers.access.sdk.SdkException
 import dev.wispers.access.sdk.Share
-import dev.wispers.access.sdk.Transport
 import dev.wispers.access.sdk.validateInvite
 import javax.inject.Inject
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
@@ -58,8 +80,6 @@ import kotlinx.coroutines.launch
 class AddShareViewModel @Inject constructor(
     private val manager: ShareManager,
 ) : ViewModel() {
-
-    enum class Tab { ENTER_CODE, SCAN_QR }
 
     enum class JoinStep(val label: String) {
         VALIDATING("Validating invitation code…"),
@@ -73,8 +93,9 @@ class AddShareViewModel @Inject constructor(
     }
 
     data class State(
-        val tab: Tab = Tab.ENTER_CODE,
         val code: String = "",
+        /** The code was found on the clipboard, not entered by the user. */
+        val fromClipboard: Boolean = false,
         val phase: Phase = Phase.Idle,
         val error: String? = null,
     )
@@ -82,29 +103,45 @@ class AddShareViewModel @Inject constructor(
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
 
-    fun onTabChange(tab: Tab) = _state.update { it.copy(tab = tab) }
+    /**
+     * The last QR payload seen. The camera keeps decoding a code for as long as
+     * it is in frame, so a repeat is ignored, also after its join failed.
+     * Clearing the field forgets it.
+     */
+    private var lastScan: String? = null
 
-    fun onCodeChange(code: String) = _state.update { it.copy(code = code, error = null) }
+    fun onCodeChange(code: String) {
+        if (code.isEmpty()) lastScan = null
+        _state.update { it.copy(code = code, fromClipboard = false, error = null) }
+    }
+
+    /** Fills the empty field with the clipboard's text if that is an invite. */
+    fun onClipboardText(text: String) {
+        val code = text.trim()
+        val s = _state.value
+        if (s.phase !is Phase.Idle || s.code.isNotEmpty() || !isInvite(code)) return
+        _state.update { it.copy(code = code, fromClipboard = true, error = null) }
+    }
 
     fun onJoinClick() {
         if (_state.value.phase !is Phase.Idle) return
         val code = _state.value.code.trim()
-        if (!validate(code)) return
+        // The keyboard's Go key skips the disabled Join button.
+        if (code.isEmpty() || !validate(code)) return
         viewModelScope.launch { runJoin(code) }
     }
 
-    /** Handles a scanned QR payload: joins on a valid invite code, errors otherwise. */
-    fun onScanResult(contents: String) {
-        if (_state.value.phase !is Phase.Idle) return
-        val code = contents.trim()
-        if (!validate(code)) return
-        _state.update { it.copy(code = code, error = null) }
+    /** Handles a scanned QR payload. An invite joins at once, anything else is ignored. */
+    fun onScan(payload: String) {
+        if (_state.value.phase !is Phase.Idle || payload == lastScan) return
+        lastScan = payload
+        val code = payload.trim()
+        if (!isInvite(code)) return
+        _state.update { it.copy(code = code, fromClipboard = false, error = null) }
         viewModelScope.launch { runJoin(code) }
     }
 
-    /** Which transport the code names, shown once it parses. */
-    fun transportOf(code: String): Transport? =
-        runCatching { validateInvite(code.trim()) }.getOrNull()
+    private fun isInvite(code: String): Boolean = runCatching { validateInvite(code) }.isSuccess
 
     /** Pre-validates so a bad code shows its real reason inline, without the progress steps. */
     private fun validate(code: String): Boolean {
@@ -157,6 +194,9 @@ fun AddShareScreen(
     viewModel: AddShareViewModel = hiltViewModel(),
 ) {
     val state by viewModel.state.collectAsState()
+    // Here rather than in the idle form, so a failed join's return to it
+    // doesn't read the clipboard (and show the system's toast) again.
+    ClipboardPrefill(onText = viewModel::onClipboardText)
 
     Scaffold(
         containerColor = MaterialTheme.colorScheme.background,
@@ -180,19 +220,18 @@ fun AddShareScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(innerPadding)
+                .consumeWindowInsets(innerPadding)
                 .padding(16.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             when (val phase = state.phase) {
                 AddShareViewModel.Phase.Idle -> IdleContent(
-                    tab = state.tab,
                     code = state.code,
-                    transport = viewModel.transportOf(state.code),
+                    fromClipboard = state.fromClipboard,
                     error = state.error,
-                    onTabChange = viewModel::onTabChange,
                     onCodeChange = viewModel::onCodeChange,
                     onJoin = viewModel::onJoinClick,
-                    onScanResult = viewModel::onScanResult,
+                    onScan = viewModel::onScan,
                 )
                 is AddShareViewModel.Phase.Joining -> JoinProgress(phase = phase)
                 is AddShareViewModel.Phase.Joined -> JoinSuccess(
@@ -205,80 +244,139 @@ fun AddShareScreen(
     }
 }
 
+/**
+ * Offers the clipboard's text to [onText] whenever the window gains focus, so
+ * on open and on return from the app the invite was copied in. Focus rather than
+ * resume, because Android only hands the clipboard to the focused app. Each
+ * clip is read once, since every read shows the system's "pasted" toast.
+ */
+@Composable
+private fun ClipboardPrefill(onText: (String) -> Unit) {
+    val context = LocalContext.current
+    val windowInfo = LocalWindowInfo.current
+    val currentOnText by rememberUpdatedState(onText)
+    var lastClip by remember { mutableLongStateOf(-1L) }
+    LaunchedEffect(windowInfo) {
+        snapshotFlow { windowInfo.isWindowFocused }.filter { it }.collect {
+            val clipboard = context.getSystemService(ClipboardManager::class.java)
+            val description = clipboard.primaryClipDescription ?: return@collect
+            if (description.timestamp == lastClip || !description.hasMimeType("text/*")) return@collect
+            lastClip = description.timestamp
+            clipboardText(context)?.let(currentOnText)
+        }
+    }
+}
+
+/** The camera on top, the code field below. A scan and Join end in the same join. */
 @Composable
 private fun IdleContent(
-    tab: AddShareViewModel.Tab,
     code: String,
-    transport: Transport?,
+    fromClipboard: Boolean,
     error: String?,
-    onTabChange: (AddShareViewModel.Tab) -> Unit,
     onCodeChange: (String) -> Unit,
     onJoin: () -> Unit,
-    onScanResult: (String) -> Unit,
+    onScan: (String) -> Unit,
 ) {
-    SecondaryTabRow(selectedTabIndex = tab.ordinal) {
-        Tab(
-            selected = tab == AddShareViewModel.Tab.ENTER_CODE,
-            onClick = { onTabChange(AddShareViewModel.Tab.ENTER_CODE) },
-            text = { Text("Enter code") },
-        )
-        Tab(
-            selected = tab == AddShareViewModel.Tab.SCAN_QR,
-            onClick = { onTabChange(AddShareViewModel.Tab.SCAN_QR) },
-            text = { Text("Scan QR") },
-        )
-    }
-    when (tab) {
-        AddShareViewModel.Tab.ENTER_CODE -> EnterCodeContent(
-            code = code,
-            transport = transport,
-            error = error,
-            onCodeChange = onCodeChange,
-            onJoin = onJoin,
-        )
-        AddShareViewModel.Tab.SCAN_QR -> ScanQrContent(
-            error = error,
-            onScanResult = onScanResult,
-        )
+    BoxWithConstraints(modifier = Modifier.fillMaxSize().imePadding()) {
+        // Square, but leaves room for the code field and Join on short
+        // screens and above the keyboard.
+        val panelSize = min(maxWidth, maxHeight * 0.55f)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(rememberScrollState()),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            LabelledDivider("SCAN THE QR CODE", modifier = Modifier.padding(bottom = 18.dp))
+            QrScanPanel(onScan = onScan, viewfinderSize = panelSize)
+            LabelledDivider(
+                "OR PASTE THE INVITE CODE",
+                modifier = Modifier.padding(top = 26.dp, bottom = 18.dp),
+            )
+            CodeEntry(
+                code = code,
+                fromClipboard = fromClipboard,
+                error = error,
+                onCodeChange = onCodeChange,
+                onJoin = onJoin,
+            )
+        }
     }
 }
 
 @Composable
-private fun EnterCodeContent(
+private fun LabelledDivider(label: String, modifier: Modifier) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(14.dp),
+    ) {
+        HorizontalDivider(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.outline)
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            fontWeight = FontWeight.Bold,
+            letterSpacing = 1.6.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        HorizontalDivider(modifier = Modifier.weight(1f), color = MaterialTheme.colorScheme.outline)
+    }
+}
+
+@Composable
+private fun CodeEntry(
     code: String,
-    transport: Transport?,
+    fromClipboard: Boolean,
     error: String?,
     onCodeChange: (String) -> Unit,
     onJoin: () -> Unit,
 ) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Text("Invitation code", style = MaterialTheme.typography.labelLarge)
-        val clipboard = LocalClipboardManager.current
+    val context = LocalContext.current
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
         OutlinedTextField(
             value = code,
             onValueChange = onCodeChange,
             placeholder = { Text("wax1_…") },
             singleLine = true,
             isError = error != null,
+            shape = RoundedCornerShape(16.dp),
+            keyboardOptions = KeyboardOptions(
+                capitalization = KeyboardCapitalization.None,
+                autoCorrectEnabled = false,
+                keyboardType = KeyboardType.Ascii,
+                imeAction = ImeAction.Go,
+            ),
+            keyboardActions = KeyboardActions(onGo = { onJoin() }),
             trailingIcon = {
-                TextButton(
-                    onClick = { clipboard.getText()?.text?.let(onCodeChange) },
-                ) {
-                    Text("Paste")
+                if (code.isEmpty()) {
+                    TextButton(onClick = { clipboardText(context)?.let { onCodeChange(it.trim()) } }) {
+                        Text("Paste", color = MaterialTheme.colorScheme.secondary)
+                    }
+                } else {
+                    IconButton(onClick = { onCodeChange("") }) {
+                        Icon(Icons.Filled.Close, contentDescription = "Clear")
+                    }
                 }
             },
             modifier = Modifier.fillMaxWidth(),
         )
-        if (transport != null) {
-            Text(
-                when (transport) {
-                    Transport.WISPERS_CONNECT -> "Via Wispers Connect"
-                    Transport.IROH -> "Peer to peer (iroh)"
-                    Transport.TAILSCALE -> "Via Tailscale"
-                },
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+        if (fromClipboard) {
+            Row(
+                modifier = Modifier.padding(horizontal = 4.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Icon(
+                    Icons.Filled.Check,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.secondary,
+                    modifier = Modifier.size(18.dp),
+                )
+                Text("Pasted from your clipboard", style = MaterialTheme.typography.bodyMedium)
+            }
         }
         if (error != null) {
             Text(
@@ -290,52 +388,12 @@ private fun EnterCodeContent(
         Button(
             onClick = onJoin,
             enabled = code.isNotBlank(),
-            modifier = Modifier.fillMaxWidth(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(56.dp),
         ) {
             Text("Join")
         }
-        Text(
-            "Codes are issued by the person sharing the app with you.",
-            style = MaterialTheme.typography.bodySmall,
-        )
-    }
-}
-
-@Composable
-private fun ScanQrContent(
-    error: String?,
-    onScanResult: (String) -> Unit,
-) {
-    val scanLauncher = rememberLauncherForActivityResult(ScanContract()) { result ->
-        // contents is null when the user backs out of the scanner.
-        result.contents?.let(onScanResult)
-    }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(
-            onClick = {
-                scanLauncher.launch(
-                    ScanOptions().apply {
-                        setDesiredBarcodeFormats(ScanOptions.QR_CODE)
-                        setPrompt("Scan the invite QR code")
-                        setBeepEnabled(false)
-                    },
-                )
-            },
-            modifier = Modifier.fillMaxWidth(),
-        ) {
-            Text("Open camera")
-        }
-        if (error != null) {
-            Text(
-                error,
-                color = MaterialTheme.colorScheme.error,
-                style = MaterialTheme.typography.bodySmall,
-            )
-        }
-        Text(
-            "Point the camera at the QR code from the invite.",
-            style = MaterialTheme.typography.bodySmall,
-        )
     }
 }
 
@@ -415,3 +473,12 @@ private fun StepRow(label: String, status: StepStatus) {
         Text(label, style = MaterialTheme.typography.bodyLarge)
     }
 }
+
+/** The clipboard's text, if it holds any. */
+private fun clipboardText(context: Context): String? =
+    context.getSystemService(ClipboardManager::class.java)
+        .primaryClip
+        ?.takeIf { it.itemCount > 0 }
+        ?.getItemAt(0)
+        ?.coerceToText(context)
+        ?.toString()

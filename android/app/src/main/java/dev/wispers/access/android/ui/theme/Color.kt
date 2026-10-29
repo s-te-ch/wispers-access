@@ -10,3 +10,7 @@ val AccessOnSurface = Color(0xFF1A1A1A)
 val AccessOnSurfaceVariant = Color(0xFF6B6B68)
 val AccessOutline = Color(0xFFD9D9D2)
 val AccessOnSurfaceMedium = Color(0xFF606060)
+
+// The QR scanner panel: a dark ground around and under the camera preview.
+val AccessViewfinder = Color(0xFF1E2A26)
+val AccessOnViewfinder = Color(0xFFE8EFE4)
