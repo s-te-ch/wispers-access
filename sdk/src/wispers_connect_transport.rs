@@ -4,7 +4,8 @@ use crate::guest_node;
 use crate::secrets::{SecretScope, SecretStore, SecretStoreError};
 use crate::storage::{self, ShareId};
 use crate::transports::{
-    BoxFuture, ConnectionCheck, Stream, TerminalState, Transport, TransportError,
+    BoxFuture, ConnectionCheck, InviteRefusedError, Stream, TerminalState, Transport,
+    TransportError,
 };
 use anyhow::{Context, Result};
 use std::sync::{Arc, Mutex};
@@ -38,7 +39,18 @@ pub async fn join(
     }
     let mut node = ns.restore_or_init_node().await?;
     info!("registering the Wispers node");
-    node.register(registration_token).await?;
+    node.register(registration_token).await.map_err(|e| {
+        // The hub answers NotFound for a token that is used, expired or
+        // unknown, or whose connectivity group is gone.
+        if e.is_not_found() {
+            InviteRefusedError(
+                "This invite has been used already or has expired. Ask for a new one.",
+            )
+            .into()
+        } else {
+            anyhow::Error::from(e)
+        }
+    })?;
 
     // From here on the hub holds a registration that consumes quota, so
     // a failed join must log the node out again (revoke + deregister) rather

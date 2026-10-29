@@ -224,6 +224,10 @@ struct JoinShareForm: View {
             } else {
                 phase = .joined(share)
             }
+        } catch SdkError.InviteRefused(let sentence) {
+            // Already written for the user, unlike the other errors' text.
+            phase = .idle
+            errorMessage = sentence
         } catch {
             phase = .idle
             errorMessage = error.localizedDescription

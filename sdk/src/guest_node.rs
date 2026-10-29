@@ -2,7 +2,9 @@
 
 use crate::Observer;
 use crate::storage;
-use crate::transports::{ConnectionCheck, Stream, TerminalState, Transport, TransportError};
+use crate::transports::{
+    ConnectionCheck, InviteRefusedError, Stream, TerminalState, Transport, TransportError,
+};
 use anyhow::{Context, Result};
 use http_body_util::{BodyExt, Full};
 use hyper::StatusCode;
@@ -155,7 +157,7 @@ impl GuestNode {
         let known = self.row.read_share_config_hash()?;
         let info = match fetch_info(stream, known).await {
             Ok(info) => info,
-            Err(e) if e.is::<ClientTooOld>() => {
+            Err(e) if e.is::<ClientTooOldError>() => {
                 if self.row.write_outdated(true)? {
                     warn!(
                         share = self.label,
@@ -259,7 +261,7 @@ impl From<anyhow::Error> for RefreshError {
 /// Any guest API call can get it, so it is one error, found by downcast.
 #[derive(Debug, thiserror::Error)]
 #[error("this app is too old for the share's host; update Wispers Access and try again")]
-pub struct ClientTooOld;
+pub struct ClientTooOldError;
 
 /// `GET /v1/share` over a fresh stream. `None` when the host node says the
 /// share is unchanged since `known`. Also what `join` uses, before there is a
@@ -280,7 +282,7 @@ pub async fn fetch_info(stream: Stream, known: Option<ConfigHash>) -> Result<Opt
     match resp.status() {
         StatusCode::NOT_MODIFIED => Ok(None),
         StatusCode::OK => Ok(Some(read_share(resp).await?)),
-        StatusCode::UPGRADE_REQUIRED => Err(ClientTooOld.into()),
+        StatusCode::UPGRADE_REQUIRED => Err(ClientTooOldError.into()),
         status => anyhow::bail!("the host node answered {} to GET /v1/share", status),
     }
 }
@@ -303,13 +305,35 @@ pub async fn activate(stream: Stream, secret: &wire::InviteSecret) -> Result<Sha
         return read_share(resp).await;
     }
     if resp.status() == StatusCode::UPGRADE_REQUIRED {
-        return Err(ClientTooOld.into());
+        return Err(ClientTooOldError.into());
     }
     let status = resp.status();
     let body = resp.into_body().collect().await?.to_bytes();
     match serde_json::from_slice::<wire::ApiError>(&body) {
-        Ok(err) => anyhow::bail!("activation refused: {}", err.error),
+        Ok(err) => match wire::ActivationError::parse(&err.error).and_then(refusal) {
+            Some(refused) => Err(refused.into()),
+            None => anyhow::bail!("activation refused: {}", err.error),
+        },
         Err(_) => anyhow::bail!("the host node answered {} to the activation", status),
+    }
+}
+
+/// What to tell the user about an invite the host node refused. `None` for
+/// refusals about this device's key rather than the invite, which a join's
+/// fresh key never gets.
+fn refusal(why: wire::ActivationError) -> Option<InviteRefusedError> {
+    use wire::ActivationError::*;
+    match why {
+        InviteConsumed => Some(InviteRefusedError(
+            "This invite has been used already. Ask for a new one.",
+        )),
+        InviteExpired => Some(InviteRefusedError(
+            "This invite has expired. Ask for a new one.",
+        )),
+        InviteUnknown => Some(InviteRefusedError(
+            "This invite is no longer valid. Ask for a new one.",
+        )),
+        Malformed | Revoked | AlreadyGuest => None,
     }
 }
 
@@ -325,7 +349,7 @@ pub async fn leave(stream: Stream) -> Result<()> {
         .context("DELETE /v1/guest")?;
     match resp.status() {
         StatusCode::NO_CONTENT => Ok(()),
-        StatusCode::UPGRADE_REQUIRED => Err(ClientTooOld.into()),
+        StatusCode::UPGRADE_REQUIRED => Err(ClientTooOldError.into()),
         status => anyhow::bail!("the host node answered {} to DELETE /v1/guest", status),
     }
 }
@@ -412,9 +436,11 @@ mod tests {
     }
 
     /// A transport whose host node answers every guest API request with
-    /// `status`, after checking that the request named this SDK's version.
+    /// `status` and the JSON `body`, after noting the version the request
+    /// named.
     struct Answering {
         status: &'static str,
+        body: &'static str,
         user_agents: Arc<Mutex<Vec<String>>>,
     }
 
@@ -422,7 +448,7 @@ mod tests {
         fn open_stream(&self) -> BoxFuture<'_, Result<Stream, TransportError>> {
             Box::pin(async {
                 let (near, far) = tokio::io::duplex(4096);
-                let status = self.status;
+                let (status, body) = (self.status, self.body);
                 let user_agents = self.user_agents.clone();
                 tokio::spawn(async move {
                     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -443,7 +469,6 @@ mod tests {
                             break;
                         }
                     }
-                    let body = r#"{"error":"client-too-old"}"#;
                     let response = format!(
                         "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n\
                          content-length: {}\r\nconnection: close\r\n\r\n{body}",
@@ -481,6 +506,7 @@ mod tests {
                 stored_row(),
                 Box::new(Answering {
                     status,
+                    body: r#"{"error":"client-too-old"}"#,
                     user_agents: user_agents.clone(),
                 }),
                 Arc::new(NoObserver),
@@ -500,6 +526,33 @@ mod tests {
         // Updated and served again: back to live, without a share body.
         assert!(matches!(node("304 Not Modified").refresh().await, Ok(None)));
         assert!(!stored_row().read_outdated().unwrap());
+    }
+
+    #[tokio::test]
+    async fn an_invite_the_host_node_refuses_says_why() {
+        let activate = |status, body| async move {
+            let host = Answering {
+                status,
+                body,
+                user_agents: Default::default(),
+            };
+            let stream = host.open_stream().await.ok().expect("a stream");
+            activate(stream, &wire::InviteSecret([7; 16])).await
+        };
+
+        let used = activate("409 Conflict", r#"{"error":"invite-consumed"}"#)
+            .await
+            .expect_err("a used invite fails");
+        assert_eq!(
+            used.downcast_ref::<InviteRefusedError>()
+                .map(ToString::to_string),
+            Some("This invite has been used already. Ask for a new one.".into())
+        );
+        // About the key, not the invite, so no sentence for the user.
+        let revoked = activate("403 Forbidden", r#"{"error":"revoked"}"#)
+            .await
+            .expect_err("a revoked key fails");
+        assert!(!revoked.is::<InviteRefusedError>());
     }
 
     #[tokio::test(start_paused = true)]
