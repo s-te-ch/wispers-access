@@ -4,6 +4,12 @@
 
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Needed for scanning invite QR codes. Without it, the user can still
+         paste the invite code in text form. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature
+        android:name="android.hardware.camera"
+        android:required="false" />
 
     <!-- Backups are off by design: share/node keys are wrapped by a
          hardware-bound Keystore key that never leaves the device, so restored

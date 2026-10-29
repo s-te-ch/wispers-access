@@ -51,23 +51,31 @@ struct AddShareScreen: View {
     }
 }
 
-/// Join a share by pasting its invite code or scanning its QR. The idle state
-/// offers both; once joining starts it shows step progress (Validating →
-/// Joining), and on success a "Joined" summary with Open / Back — unless
-/// `onJoined` takes the share instead. The join itself is the SDK's, through
-/// `ShareManager`; this form only drives the UI from the steps it reports.
+/// Join a share by scanning its QR or pasting its invite code. The idle state
+/// shows the camera with the code field below it. A scanned invite joins at
+/// once, a pasted one on Join, both through `join()`. Once joining starts it
+/// shows step progress (Validating → Joining), and on success a "Joined"
+/// summary with Open / Back — unless `onJoined` takes the share instead. The
+/// join itself is the SDK's, through `ShareManager`; this form only drives the
+/// UI from the steps it reports.
 struct JoinShareForm: View {
     @Binding var phase: JoinPhase
+    /// Waits for a tap before turning the camera on, where a permission prompt
+    /// on sight would be out of place (the iPad's first screen).
+    var cameraOnTap = false
     var onJoined: ((Share) -> Void)?
     var onOpen: (ShareId) -> Void = { _ in }
     var onBackToList: () -> Void = {}
 
     @Environment(ShareManager.self) private var manager
 
-    @State private var tab: AddTab = .enterCode
     @State private var code = DemoMode.presentAddSheet ? DemoMode.sampleInvite : ""
     @State private var errorMessage: String?
-    @State private var showingScanner = false
+    @State private var cameraTapped = false
+    /// The last QR payload seen. The camera keeps decoding a code for as long
+    /// as it is in frame, so a repeat is ignored, also after its join failed.
+    /// Clearing the field forgets it.
+    @State private var lastScan: String?
 
     var body: some View {
         switch phase {
@@ -88,52 +96,50 @@ struct JoinShareForm: View {
     }
 
     private var idleContent: some View {
-        VStack(spacing: 20) {
-            Picker("How to add", selection: $tab) {
-                Text("Enter code").tag(AddTab.enterCode)
-                Text("Scan QR").tag(AddTab.scanQR)
+        VStack(spacing: 0) {
+            if QRScanPanel.isAvailable {
+                labelledDivider("SCAN THE QR CODE")
+                    .padding(.bottom, 18)
+                QRScanPanel(
+                    isStarted: !cameraOnTap || cameraTapped,
+                    onStart: { cameraTapped = true },
+                    onScan: scanned
+                )
+                    // Takes what the rest leaves, so it shrinks on short
+                    // screens and above the keyboard.
+                    .layoutPriority(1)
+                labelledDivider("OR PASTE THE INVITE CODE")
+                    .padding(.top, 26)
+                    .padding(.bottom, 18)
             }
-            .pickerStyle(.segmented)
-
-            switch tab {
-            case .enterCode: enterCode
-            case .scanQR: scanQR
-            }
-            Spacer()
+            codeEntry
+            Spacer(minLength: 0)
         }
-        .onChange(of: code) { errorMessage = nil }
-        .onChange(of: tab) { errorMessage = nil }
+        .onChange(of: code) {
+            errorMessage = nil
+            if code.isEmpty { lastScan = nil }
+        }
     }
 
-    // MARK: Enter code
-
-    private var enterCode: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("INVITATION CODE")
-                .font(.caption.weight(.medium)).tracking(1)
+    private func labelledDivider(_ label: String) -> some View {
+        HStack(spacing: 14) {
+            Rectangle().fill(AccessColor.outline).frame(height: 1)
+            Text(label)
+                .font(.caption.weight(.bold)).tracking(1.6)
                 .foregroundStyle(AccessColor.onSurfaceVariant)
+                .fixedSize()
+            Rectangle().fill(AccessColor.outline).frame(height: 1)
+        }
+    }
 
-            TextField("wax1_…", text: $code, axis: .vertical)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(.body.monospaced())
-                .lineLimit(2...6)
-                .padding(12)
-                .background(AccessColor.surface, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-
-            HStack {
-                backendNote
-                Spacer()
-                PasteButton(payloadType: String.self) { strings in
-                    if let pasted = strings.first { code = pasted }
-                }
-                .labelStyle(.titleAndIcon)
-                .buttonBorderShape(.capsule)
-                .tint(AccessColor.primary)
-            }
+    private var codeEntry: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            codeField
 
             if let errorMessage {
                 Text(errorMessage).font(.footnote).foregroundStyle(AccessColor.destructive)
+                    // The camera has layout priority, and would squeeze this to a line.
+                    .fixedSize(horizontal: false, vertical: true)
             }
 
             Button { Task { await join() } } label: {
@@ -141,74 +147,64 @@ struct JoinShareForm: View {
             }
             .disabled(trimmedCode.isEmpty)
             .opacity(trimmedCode.isEmpty ? 0.5 : 1)
-
-            Text("Codes are issued by the person sharing the app with you.")
-                .font(.footnote).foregroundStyle(AccessColor.onSurfaceVariant)
         }
     }
 
-    /// Shows which transport the pasted code rides, but only once it parses.
-    @ViewBuilder private var backendNote: some View {
-        if let transport = try? validateInvite(inviteCode: trimmedCode) {
-            Label(Self.describe(transport), systemImage: "point.3.connected.trianglepath.dotted")
-                .font(.caption).foregroundStyle(AccessColor.onSurfaceVariant)
-                .lineLimit(1).truncationMode(.middle)
-        }
-    }
-
-    private static func describe(_ transport: Transport) -> String {
-        switch transport {
-        case .wispersConnect: "Via Wispers Connect"
-        case .iroh: "Peer to peer (iroh)"
-        case .tailscale: "Via Tailscale"
-        }
-    }
-
-    // MARK: Scan QR
-
-    private var scanQR: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            if QRScannerView.canScan {
-                Button { showingScanner = true } label: {
-                    Label("Open camera", systemImage: "qrcode.viewfinder").accessFilledButton()
+    /// One line, since the codes are too long to read whole anyway.
+    private var codeField: some View {
+        HStack(spacing: 4) {
+            TextField("wax1_…", text: $code)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .keyboardType(.asciiCapable)
+                .submitLabel(.go)
+                .onSubmit { Task { await join() } }
+                .accessibilityLabel("Invitation code")
+            if code.isEmpty {
+                PasteButton(payloadType: String.self) { strings in
+                    if let pasted = strings.first {
+                        code = pasted.trimmingCharacters(in: .whitespacesAndNewlines)
+                    }
                 }
-                Text("Point the camera at the QR code from the invite.")
-                    .font(.footnote).foregroundStyle(AccessColor.onSurfaceVariant)
+                .labelStyle(.titleOnly)
+                .buttonBorderShape(.capsule)
+                .tint(AccessColor.primary)
             } else {
-                ContentUnavailableView(
-                    "Camera unavailable",
-                    systemImage: "qrcode.viewfinder",
-                    description: Text("QR scanning needs a device with a camera. Use “Enter code” instead.")
-                )
-            }
-            if let errorMessage {
-                Text(errorMessage).font(.footnote).foregroundStyle(AccessColor.destructive)
+                Button { code = "" } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .font(.title3)
+                        .foregroundStyle(AccessColor.onSurfaceVariant)
+                        .frame(width: 44, height: 44)
+                }
+                .accessibilityLabel("Clear")
             }
         }
-        .sheet(isPresented: $showingScanner) { scannerSheet }
+        .padding(.leading, 16)
+        .padding(.trailing, 6)
+        .frame(height: 56)
+        .background(AccessColor.surface, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(code.isEmpty ? AccessColor.outline : AccessColor.primary, lineWidth: 1.5)
+        )
     }
 
-    private var scannerSheet: some View {
-        NavigationStack {
-            QRScannerView { payload in
-                showingScanner = false
-                code = payload
-                Task { await join() }
-            }
-            .ignoresSafeArea()
-            .navigationTitle("Scan invite")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { showingScanner = false }
-                }
-            }
-        }
+    /// Handles a scanned QR payload. An invite triggers join at once, anything
+    /// else is ignored.
+    private func scanned(_ payload: String) {
+        guard phase.isIdle, payload != lastScan else { return }
+        lastScan = payload
+        let invite = payload.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard (try? validateInvite(inviteCode: invite)) != nil else { return }
+        code = invite
+        Task { await join() }
     }
 
     // MARK: Join
 
     private func join() async {
+        // Return on the keyboard skips the disabled Join button.
+        guard !trimmedCode.isEmpty else { return }
         errorMessage = nil
         // Pre-validate so a bad code shows its real reason inline, without briefly
         // flashing the progress steps.
@@ -245,8 +241,6 @@ struct JoinShareForm: View {
         return step == current ? .running : .pending
     }
 }
-
-private enum AddTab: Hashable { case enterCode, scanQR }
 
 enum JoinPhase {
     case idle

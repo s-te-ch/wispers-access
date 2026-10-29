@@ -82,8 +82,7 @@ enum DemoMode {
     }
 
     /// Shaped like a real `waserver invite` code for an iroh share (endpoint
-    /// id, secret) but pure fiction — it parses, so the screenshot shows the
-    /// transport note, and joins nothing.
+    /// id, secret) but pure fiction. It parses, and joins nothing.
     static let sampleInvite =
         "wax1_iroh_30b1c2fed7e381856aad2334030bd0cf4c316ad4ee2fb08a4eebe661718c5977_d4ab8faf8841f2790da9bc82ee370ec7"
 
