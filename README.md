@@ -46,12 +46,13 @@ malicious nodes.
 
 ## Project status
 
-Wispers Access is currently in open beta.
+Wispers Access is out of beta.
 
 Guests can find the apps (plus an installation guide) at
 [access.wispers.dev](https://access.wispers.dev). Direct links:
 * Android: [Play Store](https://play.google.com/store/apps/details?id=dev.wispers.access.android).
-* iOS: [TestFlight](https://testflight.apple.com/join/AjsJChhq), until App Store review is through.
+* iOS: [App Store](https://apps.apple.com/us/app/wispers-access/id6794342115).
+  Builds of the next version are on [TestFlight](https://testflight.apple.com/join/AjsJChhq) while they wait for App Store review.
 * Desktop (macOS, Windows, Linux): [GitHub releases](https://github.com/s-te-ch/wispers-access/releases?q=%22Wispers+Access+desktop%22).
 
 Instructions for setting up the server are in the quick start section below.
