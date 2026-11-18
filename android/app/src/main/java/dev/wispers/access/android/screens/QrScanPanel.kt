@@ -9,7 +9,7 @@ import android.provider.Settings
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.ImageAnalysis
-import androidx.camera.mlkit.vision.MlKitAnalyzer
+import androidx.camera.core.ImageProxy
 import androidx.camera.view.CameraController
 import androidx.camera.view.LifecycleCameraController
 import androidx.camera.view.PreviewView
@@ -60,12 +60,17 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import com.google.mlkit.vision.barcode.BarcodeScannerOptions
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.zxing.BarcodeFormat
+import com.google.zxing.BinaryBitmap
+import com.google.zxing.DecodeHintType
+import com.google.zxing.MultiFormatReader
+import com.google.zxing.PlanarYUVLuminanceSource
+import com.google.zxing.ReaderException
+import com.google.zxing.common.HybridBinarizer
 import dev.wispers.access.android.R
 import dev.wispers.access.android.ui.theme.AccessOnViewfinder
 import dev.wispers.access.android.ui.theme.AccessViewfinder
+import java.util.concurrent.Executors
 
 private enum class CameraAccess { ASKING, GRANTED, DENIED }
 
@@ -119,22 +124,26 @@ private fun LiveViewfinder(onScan: (String) -> Unit, modifier: Modifier) {
     // Bound to the screen's lifecycle, so the camera stops when it is left or
     // backgrounded, and is released with the panel.
     DisposableEffect(controller, lifecycleOwner) {
-        val executor = ContextCompat.getMainExecutor(context)
-        val scanner = BarcodeScanning.getClient(
-            BarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build(),
-        )
+        // Decoding is too slow for the main thread. The controller keeps only
+        // the newest frame, so a slow decode skips frames instead of queueing them.
+        val decodeThread = Executors.newSingleThreadExecutor()
+        val mainThread = ContextCompat.getMainExecutor(context)
+        var disposed = false
         controller.setEnabledUseCases(CameraController.IMAGE_ANALYSIS)
         controller.setImageAnalysisAnalyzer(
-            executor,
-            MlKitAnalyzer(listOf(scanner), ImageAnalysis.COORDINATE_SYSTEM_ORIGINAL, executor) { result ->
-                result.getValue(scanner)?.firstNotNullOfOrNull { it.rawValue }?.let(currentOnScan)
+            decodeThread,
+            QrCodeAnalyzer { text ->
+                // A frame decoded while the panel was going away must not
+                // reach the caller after it.
+                mainThread.execute { if (!disposed) currentOnScan(text) }
             },
         )
         controller.bindToLifecycle(lifecycleOwner)
         onDispose {
+            disposed = true
             controller.unbind()
             controller.clearImageAnalysisAnalyzer()
-            scanner.close()
+            decodeThread.shutdown()
         }
     }
     // The torch goes out whenever the camera stops; keep the toggle in step.
@@ -173,6 +182,46 @@ private fun LiveViewfinder(onScan: (String) -> Unit, modifier: Modifier) {
                     tint = if (torchOn) MaterialTheme.colorScheme.onPrimary else AccessOnViewfinder,
                 )
             }
+        }
+    }
+}
+
+/**
+ * Decodes QR codes in camera frames with ZXing and passes each payload to
+ * [onDecoded], on the analysis thread. It reads only the luminance plane, which
+ * is all a QR code needs. Frames arrive in the sensor's orientation, usually
+ * sideways, which doesn't matter because ZXing finds QR codes at any rotation.
+ */
+internal class QrCodeAnalyzer(private val onDecoded: (String) -> Unit) : ImageAnalysis.Analyzer {
+    private val reader = MultiFormatReader().apply {
+        setHints(
+            mapOf(
+                DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE),
+                // Light-on-dark codes, as a terminal with a dark theme shows them.
+                DecodeHintType.ALSO_INVERTED to true,
+            ),
+        )
+    }
+
+    override fun analyze(image: ImageProxy) {
+        image.use {
+            // YUV_420_888, the analysis default. Its Y plane has a pixel stride
+            // of 1, but rows may be padded out to rowStride.
+            val plane = it.planes[0]
+            val buffer = plane.buffer
+            val luminance = ByteArray(plane.rowStride * it.height)
+            buffer.get(luminance, 0, minOf(buffer.remaining(), luminance.size))
+            val source = PlanarYUVLuminanceSource(
+                luminance, plane.rowStride, it.height, 0, 0, it.width, it.height, false,
+            )
+            val text = try {
+                reader.decodeWithState(BinaryBitmap(HybridBinarizer(source))).text
+            } catch (_: ReaderException) {
+                null // No QR code in this frame, or one too damaged to read.
+            } finally {
+                reader.reset()
+            }
+            text?.let(onDecoded)
         }
     }
 }
