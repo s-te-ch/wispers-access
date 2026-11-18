@@ -114,9 +114,9 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.androidx.camera.lifecycle)
     implementation(libs.androidx.camera.view)
-    implementation(libs.androidx.camera.mlkit.vision)
-    // The bundled model, so scanning works without Google Play services.
-    implementation(libs.mlkit.barcode.scanning)
+    // The QR decoder alone. It has no networking, so scanning sends nothing
+    // anywhere and our promise to not collect data stays true.
+    implementation(libs.zxing.core)
     implementation(libs.androidx.swiperefreshlayout)
     implementation(libs.androidx.webkit)
     testImplementation(libs.junit)
