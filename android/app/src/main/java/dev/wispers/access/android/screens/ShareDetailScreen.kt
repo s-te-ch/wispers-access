@@ -61,6 +61,7 @@ import dev.wispers.access.android.proxy.ShareStatusTracker
 import dev.wispers.access.android.proxy.toAvailability
 import dev.wispers.access.android.storage.ShareExtras
 import dev.wispers.access.android.whyUnavailable
+import dev.wispers.access.android.ui.theme.AccessOnline
 import dev.wispers.access.sdk.Share
 import dev.wispers.access.sdk.ShareId
 import dev.wispers.access.sdk.ShareState
@@ -328,7 +329,7 @@ private fun StatusRow(availability: ShareAvailability?) {
                     .size(10.dp)
                     .background(
                         color = when (availability) {
-                            ShareAvailability.ONLINE -> Color(0xFF34A853)
+                            ShareAvailability.ONLINE -> AccessOnline
                             ShareAvailability.REMOVED, ShareAvailability.REVOKED ->
                                 MaterialTheme.colorScheme.error
                             else -> MaterialTheme.colorScheme.outline

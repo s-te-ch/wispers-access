@@ -23,6 +23,8 @@ import androidx.activity.OnBackPressedCallback
 import androidx.activity.SystemBarStyle
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -298,7 +300,10 @@ internal fun Notice(content: @Composable () -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         Column(
-            modifier = Modifier.padding(24.dp),
+            // Scrolls for the certificate notice's steps on a small screen.
+            modifier = Modifier
+                .verticalScroll(rememberScrollState())
+                .padding(24.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             content()
