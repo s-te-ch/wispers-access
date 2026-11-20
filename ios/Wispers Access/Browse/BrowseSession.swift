@@ -31,6 +31,11 @@ final class BrowseSession: Identifiable {
     private(set) var url: URL?
     var isLoading = true
     private(set) var startupError: StartupError?
+    /// Serves the share's certificate profile to Safari while the user
+    /// installs it (`CertificateNoticeView`). Kept here rather than in the
+    /// view, since each retry replaces the view; it shows that the download
+    /// happened and makes coming back to the app retry the page.
+    var profileServer: ProfileServer?
 
     @ObservationIgnored let webView: WKWebView
     @ObservationIgnored private let share: Share
@@ -82,6 +87,8 @@ final class BrowseSession: Identifiable {
         loadObserver.onFinished = { [weak self] in
             guard let self else { return }
             harvester.harvest(in: webView)
+            profileServer?.stop()
+            profileServer = nil
         }
     }
 

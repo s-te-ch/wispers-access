@@ -42,7 +42,7 @@ enum ConfigurationProfile {
             "PayloadVersion": 1,
             "PayloadIdentifier": "dev.wispers.access.share.\(share.id)",
             "PayloadUUID": UUID().uuidString,
-            "PayloadDisplayName": "\(name) (Wispers Access)",
+            "PayloadDisplayName": displayName(for: share),
             "PayloadDescription":
                 "The certificate \(name)'s apps need. Only install it if you trust this share. Once it's fully trusted, the certificate's owner can make any website show up as secure.",
             "PayloadContent": payloads,
@@ -50,11 +50,16 @@ enum ConfigurationProfile {
         return try? PropertyListSerialization.data(fromPropertyList: profile, format: .xml, options: 0)
     }
 
+    /// The profile's name, as Settings lists it.
+    static func displayName(for share: Share) -> String {
+        "\(share.name.isEmpty ? "A share" : share.name) (Wispers Access)"
+    }
+
     /// The page Safari opens to download the profile. It starts the download
     /// and keeps the remaining steps on screen, because once the user allows
     /// the download, Safari is where they are, not the app.
-    static func instructionsPage(ownerName: String?, caSubject: String, device: String) -> Data {
-        let owner = ownerName.map { "\(escapeHTML($0))'s" } ?? "the share's"
+    static func instructionsPage(profileName: String, caSubject: String, device: String) -> Data {
+        let profile = escapeHTML(profileName)
         let subject = escapeHTML(caSubject)
         let html = """
             <!doctype html>
@@ -74,14 +79,14 @@ enum ConfigurationProfile {
               b { display: block; }
               p { color: #6B6B68; font-size: .9rem; }
             </style>
-            <h1>Install \(owner) certificate</h1>
+            <h1>Next, in Settings</h1>
             <ol>
               <li class="done"><span class="n">✓</span><div><b>Download the profile</b>
                 When Safari asks whether to allow it, tap Allow.</div></li>
               <li><span class="n">2</span><div><b>Install it</b>
-                Open Settings, tap Profile Downloaded near the top, then Install.</div></li>
+                Open Settings › General › VPN &amp; Device Management. Tap “\(profile)”, then Install.</div></li>
               <li><span class="n">3</span><div><b>Turn on trust</b>
-                In Settings › General › About › Certificate Trust Settings, turn on “\(subject)”.</div></li>
+                Go back to General › About. At the very bottom, tap Certificate Trust Settings and turn on “\(subject)”.</div></li>
               <li><span class="n">4</span><div><b>Go back to Wispers Access</b>
                 The app opens by itself once your \(device) trusts the certificate.</div></li>
             </ol>

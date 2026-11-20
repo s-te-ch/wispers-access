@@ -8,10 +8,11 @@ import WispersAccessSdk
 /// the share's host has to fix the certificate.
 struct CertificateNoticeView: View {
     let share: Share
-    let onRetry: () -> Void
+    /// The session whose page was refused. It keeps the profile server, as
+    /// every retry replaces this view.
+    let session: BrowseSession
 
     @Environment(\.scenePhase) private var scenePhase
-    @State private var server: ProfileServer?
     @State private var failure: String?
 
     var body: some View {
@@ -29,7 +30,7 @@ struct CertificateNoticeView: View {
                             "This device doesn't trust the certificate of the app's servers, and the share has none to install. Whoever runs the share has to fix this."
                         )
                     }
-                    Button("Try Again", action: onRetry).buttonStyle(.bordered)
+                    Button("Try Again") { session.start() }.buttonStyle(.bordered)
                 }
             }
             .padding(24)
@@ -39,11 +40,7 @@ struct CertificateNoticeView: View {
         .background(Color(.systemBackground))
         // Back from Safari and Settings.
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active, server != nil { onRetry() }
-        }
-        .onDisappear {
-            server?.stop()
-            server = nil
+            if phase == .active, session.profileServer != nil { session.start() }
         }
     }
 
@@ -52,7 +49,7 @@ struct CertificateNoticeView: View {
     /// user can't see this view from there.
     @ViewBuilder
     private func steps(_ ca: CertificateDescription) -> some View {
-        let downloaded = server != nil
+        let downloaded = session.profileServer != nil
         Text(ownerName.map { "Install \($0)'s certificate" } ?? "Install the share's certificate")
             .font(.title2.bold())
         Text("This app's servers use a certificate from “\(ca.subject)”. Your \(device) has to trust it before the app can open.")
@@ -68,10 +65,10 @@ struct CertificateNoticeView: View {
                 }
             }
             StepRow(number: 2, title: "Install it") {
-                Text("Open Settings, tap Profile Downloaded near the top, then Install.")
+                Text("Open Settings › General › VPN & Device Management. Tap “\(profileName)”, then Install.")
             }
             StepRow(number: 3, title: "Turn on trust") {
-                Text("In Settings › General › About › Certificate Trust Settings, turn on “\(ca.subject)”.")
+                Text("Go back to General › About. At the very bottom, tap Certificate Trust Settings and turn on “\(ca.subject)”.")
             }
             StepRow(number: 4, title: "Come back here") {
                 Text("The app opens by itself once your \(device) trusts the certificate.")
@@ -87,7 +84,7 @@ struct CertificateNoticeView: View {
         }
         .font(.footnote)
         .foregroundStyle(.secondary)
-        Button("Check Again", action: onRetry)
+        Button("Check Again") { session.start() }
             .font(.footnote)
     }
 
@@ -97,13 +94,14 @@ struct CertificateNoticeView: View {
         guard let profile = ConfigurationProfile.data(for: share),
             let ca = ConfigurationProfile.certificates(of: share).first(where: { $0.description.kind == .ca })
         else { return }
-        server?.stop()
+        session.profileServer?.stop()
+        session.profileServer = nil
         let page = ConfigurationProfile.instructionsPage(
-            ownerName: ownerName, caSubject: ca.description.subject, device: device)
+            profileName: profileName, caSubject: ca.description.subject, device: device)
         let server = ProfileServer(profile: profile, page: page)
         do {
             let url = try await server.start()
-            self.server = server
+            session.profileServer = server
             failure = nil
             await UIApplication.shared.open(url)
         } catch {
@@ -127,6 +125,9 @@ struct CertificateNoticeView: View {
 
     /// The share's name, whose host owns the certificate. `nil` if it has none.
     private var ownerName: String? { share.name.isEmpty ? nil : share.name }
+
+    /// The profile's name in Settings.
+    private var profileName: String { ConfigurationProfile.displayName(for: share) }
 
     /// "iPhone" or "iPad", for the steps.
     private var device: String { UIDevice.current.model }
