@@ -2,10 +2,10 @@ import SwiftUI
 import WispersAccessSdk
 
 /// What a forward-proxy app shows instead of its page once the page was
-/// refused for its certificate. If the share has a CA certificate, it offers
-/// it as a configuration profile, and tries the page again when the user comes
-/// back from installing it. Otherwise it says the share's host has to fix the
-/// certificate.
+/// refused for its certificate. If the share has a CA certificate, it walks the
+/// user through installing it as a configuration profile, and tries the page
+/// again when the user comes back from Safari and Settings. Otherwise it says
+/// the share's host has to fix the certificate.
 struct CertificateNoticeView: View {
     let share: Share
     let onRetry: () -> Void
@@ -16,22 +16,21 @@ struct CertificateNoticeView: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                Text("This app's certificate isn't trusted").font(.title2.bold())
+            VStack(alignment: .leading, spacing: 20) {
                 let certificates = ConfigurationProfile.certificates(of: share)
                 if let ca = certificates.first(where: { $0.description.kind == .ca }) {
-                    offer(ca.description)
-                } else if let other = certificates.first {
-                    Text(notInstallable(other.description))
+                    steps(ca.description)
                 } else {
-                    Text(
-                        "This device doesn't trust the certificate of the app's servers, and the share has none to install. Whoever runs the share has to fix this."
-                    )
+                    Text("This app's certificate isn't trusted").font(.title2.bold())
+                    if let other = certificates.first {
+                        Text(notInstallable(other.description))
+                    } else {
+                        Text(
+                            "This device doesn't trust the certificate of the app's servers, and the share has none to install. Whoever runs the share has to fix this."
+                        )
+                    }
+                    Button("Try Again", action: onRetry).buttonStyle(.bordered)
                 }
-                if let failure {
-                    Text(failure).foregroundStyle(.red)
-                }
-                Button("Try again", action: onRetry).buttonStyle(.bordered)
             }
             .padding(24)
             .frame(maxWidth: 560, alignment: .leading)
@@ -48,25 +47,60 @@ struct CertificateNoticeView: View {
         }
     }
 
-    private func offer(_ ca: CertificateDescription) -> some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("\(shareName) comes with a certificate of “\(ca.subject)”, which you'll have to install to make this device trust the app's servers.")
-            Text("Only install it if you trust this share. Once it's installed and trusted, the certificate's owner can make any website show up as secure.")
-                .font(.callout)
-            Text(
-                "Safari will ask whether to allow a configuration profile. Tap Allow. Then, in Settings, tap “Profile Downloaded” and install it. Last, under General › About › Certificate Trust Settings, turn on full trust for “\(ca.subject)”. Then come back here."
-            )
-            .font(.callout)
-            Button("Download Profile") { Task { await handOver() } }
-                .buttonStyle(.borderedProminent)
+    /// The installation as numbered steps, as it spans the app, Safari and
+    /// Settings. Safari's page repeats the steps after the download, since the
+    /// user can't see this view from there.
+    @ViewBuilder
+    private func steps(_ ca: CertificateDescription) -> some View {
+        let downloaded = server != nil
+        Text(ownerName.map { "Install \($0)'s certificate" } ?? "Install the share's certificate")
+            .font(.title2.bold())
+        Text("This app's servers use a certificate from “\(ca.subject)”. Your \(device) has to trust it before the app can open.")
+        VStack(alignment: .leading, spacing: 18) {
+            StepRow(number: 1, title: "Download the profile", done: downloaded) {
+                Text("Safari opens and asks whether to allow it. Tap Allow.")
+                if downloaded {
+                    Button("Download Again") { Task { await handOver() } }
+                        .buttonStyle(.bordered)
+                } else {
+                    Button("Download Profile") { Task { await handOver() } }
+                        .buttonStyle(.borderedProminent)
+                }
+            }
+            StepRow(number: 2, title: "Install it") {
+                Text("Open Settings, tap Profile Downloaded near the top, then Install.")
+            }
+            StepRow(number: 3, title: "Turn on trust") {
+                Text("In Settings › General › About › Certificate Trust Settings, turn on “\(ca.subject)”.")
+            }
+            StepRow(number: 4, title: "Come back here") {
+                Text("The app opens by itself once your \(device) trusts the certificate.")
+            }
         }
+        if let failure {
+            Text(failure).foregroundStyle(.red)
+        }
+        Label {
+            Text("Only do this if you trust \(ownerName ?? "this share"). Once installed and trusted, the certificate lets its owner make any website look secure.")
+        } icon: {
+            Image(systemName: "exclamationmark.shield")
+        }
+        .font(.footnote)
+        .foregroundStyle(.secondary)
+        Button("Check Again", action: onRetry)
+            .font(.footnote)
     }
 
-    /// Serves the profile on loopback and opens it in Safari.
+    /// Serves the profile and its instructions page on loopback and opens the
+    /// page in Safari, which starts the download from there.
     private func handOver() async {
-        guard let profile = ConfigurationProfile.data(for: share) else { return }
+        guard let profile = ConfigurationProfile.data(for: share),
+            let ca = ConfigurationProfile.certificates(of: share).first(where: { $0.description.kind == .ca })
+        else { return }
         server?.stop()
-        let server = ProfileServer(profile: profile)
+        let page = ConfigurationProfile.instructionsPage(
+            ownerName: ownerName, caSubject: ca.description.subject, device: device)
+        let server = ProfileServer(profile: profile, page: page)
         do {
             let url = try await server.start()
             self.server = server
@@ -89,5 +123,39 @@ struct CertificateNoticeView: View {
         }
     }
 
-    private var shareName: String { share.name.isEmpty ? "This share" : "“\(share.name)”" }
+    private var shareName: String { ownerName.map { "“\($0)”" } ?? "This share" }
+
+    /// The share's name, whose host owns the certificate. `nil` if it has none.
+    private var ownerName: String? { share.name.isEmpty ? nil : share.name }
+
+    /// "iPhone" or "iPad", for the steps.
+    private var device: String { UIDevice.current.model }
+}
+
+/// One numbered step of `CertificateNoticeView`, with a checkmark once done.
+private struct StepRow<Content: View>: View {
+    let number: Int
+    let title: String
+    var done = false
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 14) {
+            ZStack {
+                Circle().fill(done ? AccessColor.online : AccessColor.primary)
+                if done {
+                    Image(systemName: "checkmark").font(.footnote.bold()).foregroundStyle(.white)
+                } else {
+                    Text("\(number)").font(.subheadline.bold()).foregroundStyle(AccessColor.primaryDark)
+                }
+            }
+            .frame(width: 28, height: 28)
+            .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 6) {
+                Text(title).font(.headline)
+                    .accessibilityLabel(done ? "Step \(number), done. \(title)" : "Step \(number). \(title)")
+                content.font(.callout)
+            }
+        }
+    }
 }

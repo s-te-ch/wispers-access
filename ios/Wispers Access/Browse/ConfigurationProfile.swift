@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import UIKit
 import WispersAccessSdk
 
 /// A share's CA certificates as a configuration profile, the only way a CA
@@ -48,29 +49,85 @@ enum ConfigurationProfile {
         ]
         return try? PropertyListSerialization.data(fromPropertyList: profile, format: .xml, options: 0)
     }
-}
 
-/// Serves one configuration profile on a loopback port for Safari to download,
-/// for as long as it is kept. Safari fetches it at once, so iOS reclaiming a
-/// suspended app's listening sockets (see `PerAppProxy.rebind`) doesn't get in
-/// the way.
-@MainActor
-final class ProfileServer {
-    private let profile: Data
-    private var listener: NWListener?
-
-    init(profile: Data) {
-        self.profile = profile
+    /// The page Safari opens to download the profile. It starts the download
+    /// and keeps the remaining steps on screen, because once the user allows
+    /// the download, Safari is where they are, not the app.
+    static func instructionsPage(ownerName: String?, caSubject: String, device: String) -> Data {
+        let owner = ownerName.map { "\(escapeHTML($0))'s" } ?? "the share's"
+        let subject = escapeHTML(caSubject)
+        let html = """
+            <!doctype html>
+            <html lang="en">
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1">
+            <title>Install the certificate</title>
+            <style>
+              body { font: -apple-system-body; font-family: system-ui; background: #F7F7F2; color: #1A1A1A;
+                     max-width: 34rem; margin: 0 auto; padding: 1.5rem 1.25rem; line-height: 1.45; }
+              h1 { font-size: 1.5rem; margin: 0 0 1rem; }
+              ol { list-style: none; padding: 0; margin: 0; }
+              li { display: flex; gap: .85rem; margin: 0 0 1.1rem; }
+              .n { flex: none; width: 1.75rem; height: 1.75rem; border-radius: 50%; background: #A1D283;
+                   color: #4A6B36; font-weight: 700; display: flex; align-items: center; justify-content: center; }
+              .done .n { background: #34A853; color: #fff; }
+              b { display: block; }
+              p { color: #6B6B68; font-size: .9rem; }
+            </style>
+            <h1>Install \(owner) certificate</h1>
+            <ol>
+              <li class="done"><span class="n">✓</span><div><b>Download the profile</b>
+                When Safari asks whether to allow it, tap Allow.</div></li>
+              <li><span class="n">2</span><div><b>Install it</b>
+                Open Settings, tap Profile Downloaded near the top, then Install.</div></li>
+              <li><span class="n">3</span><div><b>Turn on trust</b>
+                In Settings › General › About › Certificate Trust Settings, turn on “\(subject)”.</div></li>
+              <li><span class="n">4</span><div><b>Go back to Wispers Access</b>
+                The app opens by itself once your \(device) trusts the certificate.</div></li>
+            </ol>
+            <p>If Safari didn't ask about a profile, go back to Wispers Access and tap Download Again.</p>
+            <script>window.onload = function () { location.href = "\(ProfileServer.profilePath)"; };</script>
+            </html>
+            """
+        return Data(html.utf8)
     }
 
-    /// Starts listening on a free port and returns the profile's URL there.
+    private static func escapeHTML(_ text: String) -> String {
+        text.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+    }
+}
+
+/// Serves the instructions page and its configuration profile on a loopback
+/// port for Safari, for as long as it is kept. iOS reclaims a suspended app's
+/// listening sockets (see `PerAppProxy.rebind`), so the server holds a
+/// background task until Safari has fetched the profile.
+@MainActor
+final class ProfileServer {
+    nonisolated static let profilePath = "/wispers-access.mobileconfig"
+
+    private let profile: Data
+    private let page: Data
+    private var listener: NWListener?
+    private var backgroundTask: UIBackgroundTaskIdentifier = .invalid
+
+    init(profile: Data, page: Data) {
+        self.profile = profile
+        self.page = page
+    }
+
+    /// Starts listening on a free port and returns the page's URL there.
     func start() async throws -> URL {
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: .any)
         let listener = try NWListener(using: parameters)
         self.listener = listener
-        listener.newConnectionHandler = { [profile] connection in
-            Self.serve(profile, on: connection)
+        listener.newConnectionHandler = { [profile, page, weak self] connection in
+            Self.serve(profile: profile, page: page, on: connection) {
+                Task { @MainActor in self?.endBackgroundTask() }
+            }
         }
         let port: UInt16 = try await withCheckedThrowingContinuation { continuation in
             listener.stateUpdateHandler = { state in
@@ -87,23 +144,48 @@ final class ProfileServer {
             }
             listener.start(queue: .main)
         }
-        return URL(string: "http://localhost:\(port)/wispers-access.mobileconfig")!
+        endBackgroundTask()
+        backgroundTask = UIApplication.shared.beginBackgroundTask(withName: "Configuration profile") { [weak self] in
+            self?.endBackgroundTask()
+        }
+        return URL(string: "http://localhost:\(port)/")!
     }
 
     func stop() {
         listener?.cancel()
         listener = nil
+        endBackgroundTask()
     }
 
-    /// Answers whatever is asked with the profile, then closes.
-    private nonisolated static func serve(_ profile: Data, on connection: NWConnection) {
+    /// Answers `/` with the page and `profilePath` with the profile, then
+    /// closes. `onProfileServed` runs once the profile is sent.
+    private nonisolated static func serve(
+        profile: Data, page: Data, on connection: NWConnection,
+        onProfileServed: @escaping @Sendable () -> Void
+    ) {
         connection.start(queue: .main)
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { _, _, _, _ in
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { request, _, _, _ in
+            let requestLine = request.flatMap { String(decoding: $0, as: UTF8.self).split(separator: "\r\n").first } ?? ""
+            let path = requestLine.split(separator: " ").dropFirst().first.map(String.init) ?? ""
+            let (status, type, body): (String, String, Data) = switch path {
+            case "/": ("200 OK", "text/html; charset=utf-8", page)
+            case profilePath: ("200 OK", "application/x-apple-aspen-config", profile)
+            default: ("404 Not Found", "text/plain", Data("Not found\n".utf8))
+            }
             var response = Data(
-                ("HTTP/1.1 200 OK\r\nContent-Type: application/x-apple-aspen-config\r\n"
-                    + "Content-Length: \(profile.count)\r\nConnection: close\r\n\r\n").utf8)
-            response.append(profile)
-            connection.send(content: response, completion: .contentProcessed { _ in connection.cancel() })
+                ("HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\n"
+                    + "Content-Length: \(body.count)\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n").utf8)
+            response.append(body)
+            connection.send(content: response, completion: .contentProcessed { _ in
+                connection.cancel()
+                if path == profilePath { onProfileServed() }
+            })
         }
+    }
+
+    private func endBackgroundTask() {
+        guard backgroundTask != .invalid else { return }
+        UIApplication.shared.endBackgroundTask(backgroundTask)
+        backgroundTask = .invalid
     }
 }
