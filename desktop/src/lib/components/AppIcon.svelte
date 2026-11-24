@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { SharedApp } from "$lib/api";
+  import type { SharedApp } from "#lib/api.ts";
 
   // A stand-in until icons are harvested through the proxy: a tile in a colour
   // the app's name picks, with its initial. Known kinds get their brand's hue.

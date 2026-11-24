@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { autostartEnabled, setAutostartEnabled, windowPolicy } from "$lib/api";
+  import { autostartEnabled, setAutostartEnabled, windowPolicy } from "#lib/api.ts";
   import { onMount } from "svelte";
 
   // The autostart setting, where the window carries it: on Linux

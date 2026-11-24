@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ShareManager } from "$lib/shares.svelte";
+  import type { ShareManager } from "#lib/shares.svelte.ts";
   import JoinForm from "./JoinForm.svelte";
 
   // No shares yet. Show the join form inline, where the detail pane will be.

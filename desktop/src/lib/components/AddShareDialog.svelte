@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ShareManager } from "$lib/shares.svelte";
+  import type { ShareManager } from "#lib/shares.svelte.ts";
   import JoinForm from "./JoinForm.svelte";
 
   // The native dialog brings the backdrop, focus trapping and Escape.

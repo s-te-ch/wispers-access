@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { Availability } from "$lib/api";
+  import type { Availability } from "#lib/api.ts";
 
   let { availability, size = 8 }: { availability: Availability | "checking"; size?: number } =
     $props();
