@@ -1,11 +1,11 @@
 <script lang="ts">
-  import { ShareManager } from "$lib/shares.svelte";
-  import { UpdateChecker } from "$lib/updates.svelte";
-  import AddShareDialog from "$lib/components/AddShareDialog.svelte";
-  import FirstRun from "$lib/components/FirstRun.svelte";
-  import ShareDetail from "$lib/components/ShareDetail.svelte";
-  import Sidebar from "$lib/components/Sidebar.svelte";
-  import { dragRegion } from "$lib/platform";
+  import { ShareManager } from "#lib/shares.svelte.ts";
+  import { UpdateChecker } from "#lib/updates.svelte.ts";
+  import AddShareDialog from "#lib/components/AddShareDialog.svelte";
+  import FirstRun from "#lib/components/FirstRun.svelte";
+  import ShareDetail from "#lib/components/ShareDetail.svelte";
+  import Sidebar from "#lib/components/Sidebar.svelte";
+  import { dragRegion } from "#lib/platform.ts";
   import { onMount } from "svelte";
 
   const manager = new ShareManager();

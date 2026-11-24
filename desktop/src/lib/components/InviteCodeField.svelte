@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { clipboardInvite } from "$lib/api";
+  import { clipboardInvite } from "#lib/api.ts";
   import { onMount } from "svelte";
 
   // The invitation code field with its paste button. Prefilled from the

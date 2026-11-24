@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { ShareManager } from "$lib/shares.svelte";
+  import type { ShareManager } from "#lib/shares.svelte.ts";
   import InviteCodeField from "./InviteCodeField.svelte";
   import type { Snippet } from "svelte";
 

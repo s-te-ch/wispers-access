@@ -1,6 +1,6 @@
 <script lang="ts">
-  import type { Share } from "$lib/api";
-  import { certificateStoreAsks } from "$lib/platform";
+  import type { Share } from "#lib/api.ts";
+  import { certificateStoreAsks } from "#lib/platform.ts";
 
   let {
     share,

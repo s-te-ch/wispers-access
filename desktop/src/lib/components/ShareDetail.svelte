@@ -1,12 +1,12 @@
 <script lang="ts">
-  import type { Share } from "$lib/api";
-  import type { ShareManager } from "$lib/shares.svelte";
+  import type { Share } from "#lib/api.ts";
+  import type { ShareManager } from "#lib/shares.svelte.ts";
   import {
     describeAvailability,
     describeTransport,
     explainUnusableState,
     isoDate,
-  } from "$lib/format";
+  } from "#lib/format.ts";
   import AppIcon from "./AppIcon.svelte";
   import CertificateNotice from "./CertificateNotice.svelte";
   import ConfirmRemoveDialog from "./ConfirmRemoveDialog.svelte";

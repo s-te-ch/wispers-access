@@ -1,6 +1,6 @@
 <script lang="ts">
-  import type { Availability, Share } from "$lib/api";
-  import { ago, count, describeAvailability } from "$lib/format";
+  import type { Availability, Share } from "#lib/api.ts";
+  import { ago, count, describeAvailability } from "#lib/format.ts";
   import AppIcon from "./AppIcon.svelte";
   import StatusDot from "./StatusDot.svelte";
 

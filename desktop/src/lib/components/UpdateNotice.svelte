@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { UpdateChecker } from "$lib/updates.svelte";
+  import type { UpdateChecker } from "#lib/updates.svelte.ts";
 
   // A newer version is published: say so, and install it on request.
   let { updates }: { updates: UpdateChecker } = $props();

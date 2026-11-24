@@ -3,9 +3,9 @@
   // share's certificate where it doesn't. The browsers never tell the app
   // about a certificate error, so the share's pane checks itself each time it
   // shows the share.
-  import * as api from "$lib/api";
-  import type { CertificateStatus, Share } from "$lib/api";
-  import { certificateStoreAsks } from "$lib/platform";
+  import * as api from "#lib/api.ts";
+  import type { CertificateStatus, Share } from "#lib/api.ts";
+  import { certificateStoreAsks } from "#lib/platform.ts";
 
   let { share }: { share: Share } = $props();
 

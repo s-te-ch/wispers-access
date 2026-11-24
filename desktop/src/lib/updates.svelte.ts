@@ -1,7 +1,7 @@
 // Auto-update handler for the Wispers Access desktop app itself.
 
 import { check, type Update } from "@tauri-apps/plugin-updater";
-import { restart } from "$lib/api";
+import { restart } from "#lib/api.ts";
 
 /** The app is long-lived (it hides rather than quits), so it looks again now and then. */
 const CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;

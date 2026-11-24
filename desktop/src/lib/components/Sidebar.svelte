@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { dragRegion } from "$lib/platform";
-  import type { ShareManager } from "$lib/shares.svelte";
-  import type { UpdateChecker } from "$lib/updates.svelte";
+  import { dragRegion } from "#lib/platform.ts";
+  import type { ShareManager } from "#lib/shares.svelte.ts";
+  import type { UpdateChecker } from "#lib/updates.svelte.ts";
   import LaunchAtLoginToggle from "./LaunchAtLoginToggle.svelte";
   import ShareRow from "./ShareRow.svelte";
   import UpdateNotice from "./UpdateNotice.svelte";
